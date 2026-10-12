@@ -1,0 +1,36 @@
+{
+  "name": "@lamport-robotics/vault",
+  "version": "0.1.0",
+  "description": "Client for the Lamport Vault and pq-registry Solana programs: PDAs, Borsh actions, instruction builders, account decoders and a high-level signer",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "kat": "node scripts/write-kat.ts"
+  },
+  "dependencies": {
+    "@lamport-robotics/lms": "0.1.0",
+    "@noble/hashes": "^2.0.0",
+    "@solana/web3.js": "^1.98.0"
+  },
+  "keywords": [
+    "solana",
+    "post-quantum",
+    "lms",
+    "custody",
+    "vault"
+  ]
+}

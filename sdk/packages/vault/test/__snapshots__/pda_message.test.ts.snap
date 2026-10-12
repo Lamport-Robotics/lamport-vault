@@ -1,0 +1,10 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`PDAs > pins the PDA vectors for the fixed program ids 1`] = `
+{
+  "commitment": "7dc9xDxZgfajQzy5MBMbo513zbWjn7xGccw6gT25XMfs",
+  "sigBuffer": "FeZTkFswvP9DyZsooaKaDznsqr1fnqYNPQJcYHyeGK2A",
+  "vault": "2jZkeDEKxtcsUSyD5zgGMdzF1kWkQn4qz1dAK2iY8qai",
+  "vaultBump": 248,
+}
+`;

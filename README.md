@@ -36,6 +36,7 @@ reserved for that so a vault can't get stuck.
 ## devnet
 
 lamport_vault `B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH`
+pq_registry   `48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad`
 
 ## caveats
 

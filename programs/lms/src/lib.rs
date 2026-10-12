@@ -17,7 +17,11 @@
 //!
 //! ## Parameter sets
 //!
-//! Only SHA-256 with 32-byte output (`n = m = 32`) is defined by RFC 8554.
+//! RFC 8554 defines SHA-256 with 32-byte output (`n = m = 32`). RFC 9858 adds
+//! SHA-256/192: the same SHA-256, truncated to its first 24 bytes
+//! (`n = m = 24`), which is still one `sol_sha256` syscall per hash. Its
+//! SHAKE256 rows are not implemented (no SHAKE syscall on Solana). The LMS
+//! and LM-OTS halves of a key must use the same length.
 //!
 //! ### LM-OTS typecodes (RFC 8554 Table 1)
 //!
@@ -27,6 +31,10 @@
 //! | `LMOTS_SHA256_N32_W2` | 2        | 2 | 133 | 6  | 4292            | no       |
 //! | `LMOTS_SHA256_N32_W4` | 3        | 4 | 67  | 4  | 2180            | **yes**  |
 //! | `LMOTS_SHA256_N32_W8` | 4        | 8 | 34  | 0  | 1124            | no       |
+//! | `LMOTS_SHA256_N24_W1` | 5        | 1 | 200 | 8  | 4828            | no       |
+//! | `LMOTS_SHA256_N24_W2` | 6        | 2 | 101 | 6  | 2452            | no       |
+//! | `LMOTS_SHA256_N24_W4` | 7        | 4 | 51  | 4  | 1252            | **yes**  |
+//! | `LMOTS_SHA256_N24_W8` | 8        | 8 | 26  | 0  | 652             | yes      |
 //!
 //! The arithmetic (`coef`, checksum, chain lengths) is written for any `w` in
 //! `{1, 2, 4, 8}`; the table above carries all four rows. Only W4 is marked
@@ -44,17 +52,29 @@
 //! | `LMS_SHA256_M32_H20` | 8        | 20       | 1 048 576 | 2828                      | yes      |
 //! | `LMS_SHA256_M32_H25` | 9        | 25       | 33 554 432| 2988                      | no       |
 //!
+//! | name                 | typecode | height h | leaves    | signature bytes (with N24 W4) | accepted |
+//! |----------------------|----------|----------|-----------|-------------------------------|----------|
+//! | `LMS_SHA256_M24_H5`  | 10       | 5        | 32        | 1380                          | yes      |
+//! | `LMS_SHA256_M24_H10` | 11       | 10       | 1 024     | 1500                          | yes      |
+//! | `LMS_SHA256_M24_H15` | 12       | 15       | 32 768    | 1620                          | yes      |
+//! | `LMS_SHA256_M24_H20` | 13       | 20       | 1 048 576 | 1740                          | yes      |
+//!
+//! The SHA-256/192 rows need the `sha256-192` feature (on with `sign`);
+//! without it they are not parsed and their code is not compiled in. Each
+//! program decides for itself: the vault and the registry build without the
+//! feature and take 56-byte (SHA-256) keys only.
+//!
 //! ## Byte layouts
 //!
 //! ```text
-//! LMS public key (56 bytes)
-//!   u32 lms_type || u32 lmots_type || I[16] || T[1][32]
+//! LMS public key (24 + m bytes: 56 for SHA-256, 48 for SHA-256/192)
+//!   u32 lms_type || u32 lmots_type || I[16] || T[1][m]
 //!
-//! LM-OTS signature (4 + 32 (p+1) bytes)
-//!   u32 lmots_type || C[32] || y[0][32] || ... || y[p-1][32]
+//! LM-OTS signature (4 + n (p+1) bytes)
+//!   u32 lmots_type || C[n] || y[0][n] || ... || y[p-1][n]
 //!
-//! LMS signature (4 + lmots_sig + 4 + 32 h bytes)
-//!   u32 q || lmots_signature || u32 lms_type || path[0][32] || ... || path[h-1][32]
+//! LMS signature (4 + lmots_sig + 4 + m h bytes)
+//!   u32 q || lmots_signature || u32 lms_type || path[0][m] || ... || path[h-1][m]
 //! ```
 //!
 //! All integers are big-endian (network byte order), as in the RFC.
@@ -71,6 +91,7 @@
 //! | `i = 0xfffd, j = 0xff` | this crate's deterministic randomizer C (signing only; verifiers never see it) |
 //!
 //! [RFC 8554]: https://www.rfc-editor.org/rfc/rfc8554
+//! [RFC 9858]: https://www.rfc-editor.org/rfc/rfc9858
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -91,7 +112,7 @@ pub use error::Error;
 pub use lmots::{lmots_public_key_candidate, parse_lmots_signature, LmotsSignature};
 pub use lms::{
     lms_root_candidate, lms_signature_len, lms_verify, parse_lms_signature, peek_q, verify_parsed,
-    LmsPublicKey, LmsSignature, LMS_PUBLIC_KEY_LEN,
+    public_key_len, LmsPublicKey, LmsSignature, LMS_PUBLIC_KEY_LEN,
 };
 pub use params::{LmotsType, LmsType, MAX_P, N};
 

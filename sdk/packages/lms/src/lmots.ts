@@ -24,47 +24,56 @@ export function checksum(S: Uint8Array, params: LmotsParams): Uint8Array {
   return u16str((sum << ls) & 0xffff);
 }
 
-/** Q = H(I || u32str(q) || u16str(D_MESG) || C || message). */
-export function messageHash(I: Uint8Array, q: number, C: Uint8Array, message: Uint8Array): Uint8Array {
-  return sha256(concat(I, u32str(q), u16str(D_MESG), C, message));
+/** Q = H(I || u32str(q) || u16str(D_MESG) || C || message), truncated to n bytes. */
+export function messageHash(I: Uint8Array, q: number, C: Uint8Array, message: Uint8Array, n: 24 | 32 = 32): Uint8Array {
+  return sha256(concat(I, u32str(q), u16str(D_MESG), C, message)).subarray(0, n);
 }
 
 /**
- * A 64-byte block laid out as `I(16) || q(4) || i(2) || j(1) || value(32)` plus padding, the
+ * A 64-byte block laid out as `I(16) || q(4) || i(2) || j(1) || value(n)` plus padding, the
  * input to every chain-step hash and every Appendix A derivation. `value` sits at offset 23 and the
- * digest is written straight back over it, so one chain step is one compression call.
+ * digest (truncated to n) is written straight back over it, so one chain step is one compression call.
  */
 export const CHAIN_VALUE_OFFSET = 23;
 
-export function newChainBlock(I: Uint8Array, q: number): Uint8Array {
+export function newChainBlock(I: Uint8Array, q: number, n: 24 | 32 = 32): Uint8Array {
   if (I.length !== 16) throw new RangeError("I must be 16 bytes");
   const block = new Uint8Array(64);
   block.set(I, 0);
   writeU32(block, 16, q);
-  padSingleBlock(block, 55);
+  padSingleBlock(block, CHAIN_VALUE_OFFSET + n);
   return block;
 }
 
 /** Write `tmp = H(I || q || i || j || tmp)` into the block value slot, repeated for j in [from, to). */
-function chain(block: Uint8Array, i: number, from: number, to: number): void {
+function chain(block: Uint8Array, i: number, from: number, to: number, n: 24 | 32): void {
   writeU16(block, 20, i);
   for (let j = from; j < to; j++) {
     block[22] = j;
-    sha256SingleBlock(block, block, CHAIN_VALUE_OFFSET);
+    sha256SingleBlock(block, block, CHAIN_VALUE_OFFSET, n);
   }
+}
+
+/**
+ * The n-byte SEED used by Appendix A. Vault key derivation yields 32 bytes; a SHA-256/192 key
+ * uses the first 24 (RFC 9858 keys carry an n-byte SEED). An exact n-byte seed is accepted too.
+ */
+export function seedForParams(params: LmotsParams, seed: Uint8Array): Uint8Array {
+  if (seed.length !== 32 && seed.length !== params.n) throw new RangeError(`SEED must be 32 or ${params.n} bytes`);
+  return seed.subarray(0, params.n);
 }
 
 /** Appendix A: x_q[i] = H(I || u32str(q) || u16str(i) || u8str(0xff) || SEED), for all i, as one p*n buffer. */
 export function derivePrivateElements(params: LmotsParams, seed: Uint8Array, I: Uint8Array, q: number): Uint8Array {
-  if (seed.length !== 32) throw new RangeError("SEED must be 32 bytes");
   const { n, p } = params;
+  const s = seedForParams(params, seed);
   const x = new Uint8Array(p * n);
-  const block = newChainBlock(I, q);
+  const block = newChainBlock(I, q, n);
   block[22] = D_PRG;
   for (let i = 0; i < p; i++) {
     writeU16(block, 20, i);
-    block.set(seed, CHAIN_VALUE_OFFSET);
-    sha256SingleBlock(block, x, i * n);
+    block.set(s, CHAIN_VALUE_OFFSET);
+    sha256SingleBlock(block, x, i * n, n);
   }
   return x;
 }
@@ -76,7 +85,7 @@ function publicHash(params: LmotsParams, I: Uint8Array, q: number, y: Uint8Array
   writeU32(buf, 16, q);
   writeU16(buf, 20, D_PBLC);
   buf.set(y, 22);
-  return sha256(buf);
+  return sha256(buf).subarray(0, params.n);
 }
 
 /**
@@ -84,17 +93,17 @@ function publicHash(params: LmotsParams, I: Uint8Array, q: number, y: Uint8Array
  * hash the ends. This is the per-leaf cost of key generation: p * 2^w hash calls plus one.
  */
 export function publicKeyHashFromSeed(params: LmotsParams, seed: Uint8Array, I: Uint8Array, q: number): Uint8Array {
-  if (seed.length !== 32) throw new RangeError("SEED must be 32 bytes");
   const { n, p, w } = params;
+  const s = seedForParams(params, seed);
   const steps = (1 << w) - 1;
   const y = new Uint8Array(p * n);
-  const block = newChainBlock(I, q);
+  const block = newChainBlock(I, q, n);
   for (let i = 0; i < p; i++) {
     writeU16(block, 20, i);
     block[22] = D_PRG;
-    block.set(seed, CHAIN_VALUE_OFFSET);
-    sha256SingleBlock(block, block, CHAIN_VALUE_OFFSET);
-    chain(block, i, 0, steps);
+    block.set(s, CHAIN_VALUE_OFFSET);
+    sha256SingleBlock(block, block, CHAIN_VALUE_OFFSET, n);
+    chain(block, i, 0, steps, n);
     y.set(block.subarray(CHAIN_VALUE_OFFSET, CHAIN_VALUE_OFFSET + n), i * n);
   }
   return publicHash(params, I, q, y);
@@ -106,10 +115,10 @@ export function publicKeyHash(params: LmotsParams, I: Uint8Array, q: number, x: 
   if (x.length !== p * n) throw new RangeError("x has wrong length");
   const steps = (1 << w) - 1;
   const y = new Uint8Array(p * n);
-  const block = newChainBlock(I, q);
+  const block = newChainBlock(I, q, n);
   for (let i = 0; i < p; i++) {
     block.set(x.subarray(i * n, (i + 1) * n), CHAIN_VALUE_OFFSET);
-    chain(block, i, 0, steps);
+    chain(block, i, 0, steps, n);
     y.set(block.subarray(CHAIN_VALUE_OFFSET, CHAIN_VALUE_OFFSET + n), i * n);
   }
   return publicHash(params, I, q, y);
@@ -128,18 +137,18 @@ export function lmotsSign(
   C: Uint8Array,
 ): Uint8Array {
   const { n, p, w } = params;
-  if (C.length !== n) throw new RangeError("C must be 32 bytes");
+  if (C.length !== n) throw new RangeError(`C must be ${n} bytes`);
   if (x.length !== p * n) throw new RangeError("x has wrong length");
-  const Q = messageHash(I, q, C, message);
+  const Q = messageHash(I, q, C, message, n);
   const QC = concat(Q, checksum(Q, params));
   const sig = new Uint8Array(params.sigLen);
   writeU32(sig, 0, params.typecode);
   sig.set(C, 4);
-  const block = newChainBlock(I, q);
+  const block = newChainBlock(I, q, n);
   for (let i = 0; i < p; i++) {
     const a = coef(QC, i, w);
     block.set(x.subarray(i * n, (i + 1) * n), CHAIN_VALUE_OFFSET);
-    chain(block, i, 0, a);
+    chain(block, i, 0, a, n);
     sig.set(block.subarray(CHAIN_VALUE_OFFSET, CHAIN_VALUE_OFFSET + n), 4 + n + i * n);
   }
   return sig;
@@ -188,14 +197,14 @@ export function publicKeyCandidate(
   if (!parsed) return null;
   const { n, p, w } = params;
   const steps = (1 << w) - 1;
-  const Q = messageHash(I, q, parsed.C, message);
+  const Q = messageHash(I, q, parsed.C, message, n);
   const QC = concat(Q, checksum(Q, params));
   const z = new Uint8Array(p * n);
-  const block = newChainBlock(I, q);
+  const block = newChainBlock(I, q, n);
   for (let i = 0; i < p; i++) {
     const a = coef(QC, i, w);
     block.set(parsed.y.subarray(i * n, (i + 1) * n), CHAIN_VALUE_OFFSET);
-    chain(block, i, a, steps);
+    chain(block, i, a, steps, n);
     z.set(block.subarray(CHAIN_VALUE_OFFSET, CHAIN_VALUE_OFFSET + n), i * n);
   }
   return publicHash(params, I, q, z);

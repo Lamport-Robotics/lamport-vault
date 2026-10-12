@@ -11,15 +11,16 @@ import {
   publicKeyHashFromSeed,
 } from "./lmots.ts";
 import {
+  checkHashLengths,
   D_INTR,
   D_LEAF,
   LMOTS_SHA256_N32_W4,
-  LMS_PUBLIC_KEY_LENGTH,
   LMS_SHA256_M32_H10,
   type LmotsParams,
   type LmsParams,
   lmotsParams,
   lmsParams,
+  lmsPublicKeyLength,
   lmsSignatureLength,
 } from "./params.ts";
 import { padSingleBlock, sha256, sha256SingleBlock } from "./sha256.ts";
@@ -28,7 +29,7 @@ import { padSingleBlock, sha256, sha256SingleBlock } from "./sha256.ts";
 export interface LmsKeyMaterial {
   readonly lmsType: number;
   readonly lmotsType: number;
-  /** 32 bytes */
+  /** 32 bytes (a SHA-256/192 key uses the first 24), or exactly n bytes */
   readonly seed: Uint8Array;
   /** 16 bytes */
   readonly I: Uint8Array;
@@ -47,7 +48,7 @@ export interface LmsSignatureParts {
   /** u32str(type) || C || y, lmots sigLen bytes */
   readonly lmotsSignature: Uint8Array;
   readonly lmsType: number;
-  /** h entries of 32 bytes */
+  /** h entries of m bytes */
   readonly path: Uint8Array[];
 }
 
@@ -59,17 +60,20 @@ export interface TreeBuildOptions {
 }
 
 export function parseLmsPublicKey(pk: Uint8Array): LmsPublicKeyParts {
-  if (pk.length !== LMS_PUBLIC_KEY_LENGTH) throw new Error(`LMS public key must be ${LMS_PUBLIC_KEY_LENGTH} bytes`);
+  if (pk.length < 8) throw new Error("LMS public key shorter than 8 bytes");
   const lmsType = strTou32(pk, 0);
   const lmotsType = strTou32(pk, 4);
-  lmsParams(lmsType);
+  const want = lmsPublicKeyLength(lmsType);
   lmotsParams(lmotsType);
-  return { lmsType, lmotsType, I: pk.slice(8, 24), T1: pk.slice(24, 56) };
+  if (pk.length !== want) throw new Error(`LMS public key must be ${want} bytes`);
+  checkHashLengths(lmsType, lmotsType);
+  return { lmsType, lmotsType, I: pk.slice(8, 24), T1: pk.slice(24, want) };
 }
 
 export function serializeLmsPublicKey(parts: LmsPublicKeyParts): Uint8Array {
-  if (parts.I.length !== 16 || parts.T1.length !== 32) throw new Error("bad public key parts");
-  const out = new Uint8Array(LMS_PUBLIC_KEY_LENGTH);
+  const m = lmsParams(parts.lmsType).m;
+  if (parts.I.length !== 16 || parts.T1.length !== m) throw new Error("bad public key parts");
+  const out = new Uint8Array(lmsPublicKeyLength(parts.lmsType));
   writeU32(out, 0, parts.lmsType);
   writeU32(out, 4, parts.lmotsType);
   out.set(parts.I, 8);
@@ -102,8 +106,8 @@ export function parseLmsSignature(
   const path: Uint8Array[] = [];
   let o = otsEnd + 4;
   for (let i = 0; i < lp.h; i++) {
-    path.push(sig.slice(o, o + 32));
-    o += 32;
+    path.push(sig.slice(o, o + lp.m));
+    o += lp.m;
   }
   return { q, lmotsType, lmotsSignature: sig.slice(4, otsEnd), lmsType, path };
 }
@@ -115,53 +119,58 @@ export function serializeLmsSignature(parts: LmsSignatureParts): Uint8Array {
   let o = 4 + parts.lmotsSignature.length;
   writeU32(out, o, parts.lmsType);
   o += 4;
+  const m = lmsParams(parts.lmsType).m;
   for (const node of parts.path) {
+    if (node.length !== m) throw new Error("path node has wrong length");
     out.set(node, o);
-    o += 32;
+    o += m;
   }
   if (o !== out.length) throw new Error("path length does not match LMS typecode");
   return out;
 }
 
-/** T[r] for a leaf: H(I || u32str(r) || u16str(D_LEAF) || K), a 54-byte single-block hash. */
-function leafNode(block: Uint8Array, r: number, K: Uint8Array, out: Uint8Array, outOffset: number): void {
+/** T[r] for a leaf: H(I || u32str(r) || u16str(D_LEAF) || K), a (22 + m)-byte single-block hash. */
+function leafNode(block: Uint8Array, r: number, K: Uint8Array, out: Uint8Array, outOffset: number, m: 24 | 32): void {
   writeU32(block, 16, r);
   writeU16(block, 20, D_LEAF);
   block.set(K, 22);
-  sha256SingleBlock(block, out, outOffset);
+  sha256SingleBlock(block, out, outOffset, m);
 }
 
-/** T[r] for an interior node: H(I || u32str(r) || u16str(D_INTR) || left || right). */
-function interiorNode(I: Uint8Array, r: number, left: Uint8Array, right: Uint8Array): Uint8Array {
-  const buf = new Uint8Array(16 + 4 + 2 + 64);
+/** T[r] for an interior node: H(I || u32str(r) || u16str(D_INTR) || left || right), m bytes. */
+function interiorNode(I: Uint8Array, r: number, left: Uint8Array, right: Uint8Array, m: 24 | 32 = 32): Uint8Array {
+  const buf = new Uint8Array(16 + 4 + 2 + 2 * m);
   buf.set(I, 0);
   writeU32(buf, 16, r);
   writeU16(buf, 20, D_INTR);
-  buf.set(left, 22);
-  buf.set(right, 54);
-  return sha256(buf);
+  buf.set(left.subarray(0, m), 22);
+  buf.set(right.subarray(0, m), 22 + m);
+  return sha256(buf).subarray(0, m);
 }
 
-function newLeafBlock(I: Uint8Array): Uint8Array {
+function newLeafBlock(I: Uint8Array, m: 24 | 32): Uint8Array {
   const block = new Uint8Array(64);
   block.set(I, 0);
-  padSingleBlock(block, 54);
+  padSingleBlock(block, 22 + m);
   return block;
 }
 
-/** Fill the interior nodes of a tree whose leaves (nodes 2^h .. 2^(h+1)-1) are already present. */
-function fillInterior(tree: Uint8Array, I: Uint8Array, h: number): void {
+/**
+ * Fill the interior nodes of a tree whose leaves (nodes 2^h .. 2^(h+1)-1) are already present.
+ * Nodes are stored at a 32-byte stride for every parameter set; an m = 24 node uses the first 24.
+ */
+function fillInterior(tree: Uint8Array, I: Uint8Array, h: number, m: 24 | 32): void {
   for (let r = 2 ** h - 1; r >= 1; r--) {
-    const node = interiorNode(I, r, tree.subarray(2 * r * 32, 2 * r * 32 + 32), tree.subarray((2 * r + 1) * 32, (2 * r + 2) * 32));
+    const node = interiorNode(I, r, tree.subarray(2 * r * 32, 2 * r * 32 + m), tree.subarray((2 * r + 1) * 32, (2 * r + 1) * 32 + m), m);
     tree.set(node, r * 32);
   }
 }
 
-function computeLeafRange(tree: Uint8Array, mat: LmsKeyMaterial, ots: LmotsParams, h: number, from: number, to: number, block: Uint8Array): void {
-  const leaves = 2 ** h;
+function computeLeafRange(tree: Uint8Array, mat: LmsKeyMaterial, ots: LmotsParams, lp: LmsParams, from: number, to: number, block: Uint8Array): void {
+  const leaves = 2 ** lp.h;
   for (let q = from; q < to; q++) {
     const K = publicKeyHashFromSeed(ots, mat.seed, mat.I, q);
-    leafNode(block, leaves + q, K, tree, (leaves + q) * 32);
+    leafNode(block, leaves + q, K, tree, (leaves + q) * 32, lp.m);
   }
 }
 
@@ -189,7 +198,7 @@ export class LmsPrivateKey {
       lmsType: material.lmsType,
       lmotsType: material.lmotsType,
       I: material.I,
-      T1: tree.slice(32, 64),
+      T1: tree.slice(32, 32 + this.lms.m),
     });
   }
 
@@ -205,14 +214,14 @@ export class LmsPrivateKey {
     const ots = lmotsParams(material.lmotsType);
     const leaves = 2 ** lp.h;
     const tree = new Uint8Array(2 * leaves * 32);
-    const block = newLeafBlock(material.I);
+    const block = newLeafBlock(material.I, lp.m);
     const batch = 64;
     for (let q = 0; q < leaves; q += batch) {
       const to = Math.min(leaves, q + batch);
-      computeLeafRange(tree, material, ots, lp.h, q, to, block);
+      computeLeafRange(tree, material, ots, lp, q, to, block);
       opts.onProgress?.(to, leaves);
     }
-    fillInterior(tree, material.I, lp.h);
+    fillInterior(tree, material.I, lp.h, lp.m);
     return new LmsPrivateKey(material, tree);
   }
 
@@ -223,15 +232,15 @@ export class LmsPrivateKey {
     const ots = lmotsParams(material.lmotsType);
     const leaves = 2 ** lp.h;
     const tree = new Uint8Array(2 * leaves * 32);
-    const block = newLeafBlock(material.I);
+    const block = newLeafBlock(material.I, lp.m);
     const batch = Math.max(1, opts.leavesPerTick ?? 64);
     for (let q = 0; q < leaves; q += batch) {
       const to = Math.min(leaves, q + batch);
-      computeLeafRange(tree, material, ots, lp.h, q, to, block);
+      computeLeafRange(tree, material, ots, lp, q, to, block);
       opts.onProgress?.(to, leaves);
       await yieldToEventLoop();
     }
-    fillInterior(tree, material.I, lp.h);
+    fillInterior(tree, material.I, lp.h, lp.m);
     return new LmsPrivateKey(material, tree);
   }
 
@@ -248,9 +257,9 @@ export class LmsPrivateKey {
     if (tree.length !== 2 * leaves * 32) throw new Error("tree has wrong length for this LMS typecode");
     const copy = tree.slice();
     if (verify) {
-      const root = copy.slice(32, 64);
-      fillInterior(copy, material.I, lp.h);
-      if (!equalBytes(root, copy.subarray(32, 64))) throw new Error("tree cache is inconsistent");
+      const root = copy.slice(32, 32 + lp.m);
+      fillInterior(copy, material.I, lp.h, lp.m);
+      if (!equalBytes(root, copy.subarray(32, 32 + lp.m))) throw new Error("tree cache is inconsistent");
     }
     return new LmsPrivateKey(material, copy);
   }
@@ -262,7 +271,7 @@ export class LmsPrivateKey {
     let r = this.leafCount + q;
     for (let i = 0; i < this.lms.h; i++) {
       const sibling = r ^ 1;
-      path.push(this.tree.slice(sibling * 32, sibling * 32 + 32));
+      path.push(this.tree.slice(sibling * 32, sibling * 32 + this.lms.m));
       r >>>= 1;
     }
     return path;
@@ -272,17 +281,17 @@ export class LmsPrivateKey {
   leaf(q: number): Uint8Array {
     this.checkQ(q);
     const r = this.leafCount + q;
-    return this.tree.slice(r * 32, r * 32 + 32);
+    return this.tree.slice(r * 32, r * 32 + this.lms.m);
   }
 
   /**
-   * Sign `message` with leaf `q`. `C` defaults to 32 fresh random bytes; pass a fixed `C` only for
+   * Sign `message` with leaf `q`. `C` defaults to n fresh random bytes; pass a fixed `C` only for
    * test vectors. Never sign two different messages with the same q: the vault's `next_q` is the
    * guard for that, read it before choosing q.
    */
   sign(q: number, message: Uint8Array, opts: { C?: Uint8Array } = {}): Uint8Array {
     this.checkQ(q);
-    const C = opts.C ?? randomBytes(32);
+    const C = opts.C ?? randomBytes(this.lmots.n);
     const x = derivePrivateElements(this.lmots, this.material.seed, this.material.I, q);
     const ots = lmotsSign(this.lmots, this.material.I, q, x, message, C);
     x.fill(0);
@@ -301,9 +310,9 @@ export class LmsPrivateKey {
 }
 
 function checkMaterial(m: LmsKeyMaterial): void {
-  lmsParams(m.lmsType);
-  lmotsParams(m.lmotsType);
-  if (m.seed.length !== 32) throw new Error("SEED must be 32 bytes");
+  checkHashLengths(m.lmsType, m.lmotsType);
+  const n = lmotsParams(m.lmotsType).n;
+  if (m.seed.length !== 32 && m.seed.length !== n) throw new Error(`SEED must be 32 or ${n} bytes`);
   if (m.I.length !== 16) throw new Error("I must be 16 bytes");
 }
 
@@ -328,13 +337,16 @@ export function lmsRootCandidate(pub: LmsPublicKeyParts, message: Uint8Array, si
   const Kc = publicKeyCandidate(ots, pub.I, sig.q, message, sig.lmotsSignature);
   if (!Kc) return null;
   let nodeNum = 2 ** lp.h + sig.q;
-  const block = newLeafBlock(pub.I);
-  let tmp: Uint8Array = new Uint8Array(32);
-  leafNode(block, nodeNum, Kc, tmp, 0);
+  const block = newLeafBlock(pub.I, lp.m);
+  let tmp: Uint8Array = new Uint8Array(lp.m);
+  leafNode(block, nodeNum, Kc, tmp, 0, lp.m);
   let i = 0;
   while (nodeNum > 1) {
     const sibling = sig.path[i]!;
-    tmp = nodeNum % 2 === 1 ? interiorNode(pub.I, nodeNum >>> 1, sibling, tmp) : interiorNode(pub.I, nodeNum >>> 1, tmp, sibling);
+    tmp =
+      nodeNum % 2 === 1
+        ? interiorNode(pub.I, nodeNum >>> 1, sibling, tmp, lp.m)
+        : interiorNode(pub.I, nodeNum >>> 1, tmp, sibling, lp.m);
     nodeNum >>>= 1;
     i++;
   }
@@ -358,9 +370,9 @@ export function lmsVerify(publicKey: Uint8Array, message: Uint8Array, signature:
 /** The RFC's own leaf-and-interior node hashes, exported for tests and other implementations. */
 export const nodeHash = {
   leaf(I: Uint8Array, r: number, K: Uint8Array): Uint8Array {
-    return sha256(new Uint8Array([...I, ...u32str(r), ...u16str(D_LEAF), ...K]));
+    return sha256(new Uint8Array([...I, ...u32str(r), ...u16str(D_LEAF), ...K])).subarray(0, K.length);
   },
   interior(I: Uint8Array, r: number, left: Uint8Array, right: Uint8Array): Uint8Array {
-    return interiorNode(I, r, left, right);
+    return interiorNode(I, r, left, right, left.length === 24 ? 24 : 32);
   },
 };

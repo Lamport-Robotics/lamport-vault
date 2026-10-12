@@ -1,7 +1,7 @@
 {
   "name": "@lamport-robotics/lms",
   "version": "0.1.0",
-  "description": "RFC 8554 LMS / LM-OTS hash-based signatures (SHA-256, W4) with Lamport Vault key derivation",
+  "description": "RFC 8554 LMS / LM-OTS hash-based signatures (SHA-256, plus RFC 9858 SHA-256/192) with Lamport Vault key derivation",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,

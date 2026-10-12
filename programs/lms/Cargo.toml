@@ -19,8 +19,12 @@ required-features = ["sign"]
 default = []
 # Enables the standard library (error messages via Display, Vec-based helpers).
 std = []
-# Key generation (RFC 8554 Appendix A) and signing. Implies `std`.
-sign = ["std", "dep:hex"]
+# RFC 9858 SHA-256/192 parameter sets (typecodes LM-OTS 5..8, LMS 10..13).
+# Off by default so programs that only take SHA-256 keys carry none of the code.
+sha256-192 = []
+# Key generation (RFC 8554 Appendix A) and signing. Implies `std` and enables
+# every parameter set, since tooling and tests want all of them.
+sign = ["std", "sha256-192", "dep:hex"]
 
 [dependencies]
 # `hashv` is the SHA-256 syscall on Solana and a sha2 implementation everywhere else.

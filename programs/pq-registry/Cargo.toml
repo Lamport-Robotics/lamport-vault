@@ -1,0 +1,39 @@
+[package]
+name = "pq-registry"
+version = "0.1.0"
+description = "Lamport Vault: pq-registry program"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Lamport-Robotics/lamport-vault"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "pq_registry"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dev-dependencies]
+serde_json = "1"
+hex = "0.4"
+
+[dependencies]
+anchor-lang = "0.32.1"
+lamport-lms = { path = "../lms" }
+solana-sha256-hasher = { version = "2.3", default-features = false }
+
+# platform-tools v1.48 (bundled with Agave 2.3) cannot compile edition-2024
+# dependencies; v1.56 can. cargo-build-sbf reads this key.
+[package.metadata.solana]
+tools-version = "v1.56"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

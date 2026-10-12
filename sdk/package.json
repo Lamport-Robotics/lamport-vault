@@ -1,0 +1,28 @@
+{
+  "name": "lamport-vault-sdk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "TypeScript SDK workspace for Lamport Vault: RFC 8554 LMS signatures and the vault / registry clients",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/vault/tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "kat": "node packages/lms/scripts/write-kat.ts && node packages/vault/scripts/write-kat.ts",
+    "bench": "node packages/lms/scripts/bench-keygen.ts",
+    "clean": "node -e \"for (const p of ['packages/lms/dist','packages/vault/dist']) require('node:fs').rmSync(p,{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

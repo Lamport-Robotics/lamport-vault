@@ -1,0 +1,37 @@
+{
+  "name": "@lamport-robotics/lms",
+  "version": "0.1.0",
+  "description": "RFC 8554 LMS / LM-OTS hash-based signatures (SHA-256, W4) with Lamport Vault key derivation",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "kat": "node scripts/write-kat.ts",
+    "bench": "node scripts/bench-keygen.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.0.0",
+    "@scure/bip39": "^2.0.0"
+  },
+  "keywords": [
+    "lms",
+    "lm-ots",
+    "rfc8554",
+    "hash-based-signatures",
+    "post-quantum",
+    "solana"
+  ]
+}

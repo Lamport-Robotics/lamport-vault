@@ -1,0 +1,37 @@
+[package]
+name = "lamport-lms"
+version = "0.1.0"
+edition = "2021"
+description = "RFC 8554 LMS / LM-OTS hash-based signatures: on-chain verification for Solana, key generation and signing for tooling"
+license = "MIT"
+repository = "https://github.com/Lamport-Robotics/lamport-vault"
+
+[lib]
+name = "lamport_lms"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lms-tool"
+path = "src/bin/lms-tool.rs"
+required-features = ["sign"]
+
+[features]
+default = []
+# Enables the standard library (error messages via Display, Vec-based helpers).
+std = []
+# Key generation (RFC 8554 Appendix A) and signing. Implies `std`.
+sign = ["std", "dep:hex"]
+
+[dependencies]
+# `hashv` is the SHA-256 syscall on Solana and a sha2 implementation everywhere else.
+solana-sha256-hasher = { version = "2.3", default-features = false }
+subtle = { version = "2.6", default-features = false }
+hex = { version = "0.4", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

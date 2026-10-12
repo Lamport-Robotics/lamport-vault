@@ -1,7 +1,9 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 
 export const CLUSTER = "devnet" as const;
-export const RPC_URL = "https://api.devnet.solana.com";
+// on the hosted site json-rpc goes through the same origin (/rpc), which the server forwards to a
+// provider; elsewhere (local dev, the single-file build) the public devnet endpoint is used
+export const RPC_URL = typeof location !== "undefined" && location.hostname === "vault.lamportrobotics.com" ? `${location.origin}/rpc` : "https://api.devnet.solana.com";
 export const GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; // devnet; mainnet 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
 /** ~400 ms per slot: a rough wall-clock for a slot number relative to `now` */
 export const slotToDate = (slot: bigint | number, nowSlot: number) => new Date(Date.now() + (Number(slot) - nowSlot) * 400);

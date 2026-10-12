@@ -2,7 +2,7 @@ import "./polyfill.ts";
 import "./style.css";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, createVaultInstruction, decodeVault, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
+import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
 import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, b64, copy, el, isPubkey, rpc, short, sol, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
@@ -381,20 +381,28 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
       if (d.create) pre.push({ name: "Create destination token account", ixs: [d.create] });
     }
   }
-  const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature, tokenProgram });
-  const names = [...pre.map((p) => p.name), "Open signature buffer", ...staged.writes.map((_, i) => `Write part ${i + 2} of ${staged.writes.length + 1}`), "Verify and execute"];
-  const txs = [...pre.map((p) => p.ixs), ...staged.transactions];
   steps.innerHTML = ""; steps.classList.remove("hidden");
-  const items = names.map((n) => { const li = el("li", {}, el("span", {}, n)); steps.append(li); return li; });
+  const addStep = (n: string) => { const li = el("li", {}, el("span", {}, n)); steps.append(li); return li; };
+  const run = async (li: HTMLElement, f: () => Promise<string>) => { li.classList.add("on"); const sig = await f(); li.classList.remove("on"); li.classList.add("done"); li.append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 5))); return sig; };
   btn.setAttribute("disabled", ""); btn.classList.add("spin");
   const sigs: string[] = [];
   try {
-    for (let i = 0; i < txs.length; i++) {
-      items[i].classList.add("on");
-      const sig = await wallet.send(txs[i]);
-      sigs.push(sig);
-      items[i].classList.remove("on"); items[i].classList.add("done");
-      items[i].append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 5)));
+    for (const p of pre) sigs.push(await run(addStep(p.name), () => wallet!.send(p.ixs)));
+    // one 4 KB transaction when the wallet signs transaction v1; otherwise the staged buffer
+    let done = false;
+    if (wallet.sendV1) {
+      const li = addStep("Verify and execute · one transaction");
+      try {
+        const { blockhash, lastValidBlockHeight } = await rpc.getLatestBlockhash("confirmed");
+        const built = buildDirectV1Transaction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, action, signature, tokenProgram, blockhash, lastValidBlockHeight });
+        sigs.push(await run(li, () => wallet!.sendV1!({ ...built, blockhash, lastValidBlockHeight })));
+        done = true;
+      } catch (e) { li.classList.remove("on"); li.append(el("span", { class: "mono", style: "margin-left:auto;font-size:11px;color:var(--mute)" }, "not accepted, using the buffer")); console.warn("v1 path", e); }
+    }
+    if (!done) {
+      const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature, tokenProgram });
+      const names = ["Open signature buffer", ...staged.writes.map((_, i) => `Write part ${i + 2} of ${staged.writes.length + 1}`), "Verify and execute"];
+      for (let i = 0; i < staged.transactions.length; i++) sigs.push(await run(addStep(names[i]), () => wallet!.send(staged.transactions[i])));
     }
     hotKey = action.kind === "Rotate" || action.kind === "Close" ? null : hotKey;
     lastRun = { vault: vaultAddr!.toBase58(), q, kind: action.kind, sigs };

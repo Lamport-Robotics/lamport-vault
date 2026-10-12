@@ -3,11 +3,14 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction, type Transaction
 import { getWallets } from "@wallet-standard/app";
 import type { Wallet as StdWallet, WalletAccount } from "@wallet-standard/base";
 import { CLUSTER, rpc } from "./common.ts";
+import { assembleV1Transaction, keypairV1Signer, v1TransactionSignature } from "@lamport-robotics/vault";
 
 export interface Wallet {
   name: string;
   pubkey: PublicKey;
   send(ixs: TransactionInstruction[]): Promise<string>;
+  /** transaction v1 (0x81, up to 4096 bytes): present when the wallet can sign it */
+  sendV1?: (t: { messageBytes: Uint8Array; unsignedTransaction: Uint8Array; blockhash: string; lastValidBlockHeight: number }) => Promise<string>;
   disconnect(): Promise<void>;
 }
 
@@ -41,9 +44,21 @@ export async function connectStandard(w: StdWallet, silent = false): Promise<Wal
   const account: WalletAccount | undefined = (res.accounts as WalletAccount[]).find((a) => (a.chains as readonly string[]).includes(CHAIN)) ?? res.accounts[0];
   if (!account) throw new Error("wallet returned no account");
   const pubkey = new PublicKey(account.publicKey);
+  const sas = feat["solana:signAndSendTransaction"], st = feat["solana:signTransaction"];
+  const supports1 = (f: any) => { const v = f?.supportedTransactionVersions; return !!v && (Array.isArray(v) ? v.includes(1) : typeof v.has === "function" ? v.has(1) : false); };
+  const sendV1 = supports1(sas) || supports1(st) ? async (t: { messageBytes: Uint8Array; unsignedTransaction: Uint8Array; blockhash: string; lastValidBlockHeight: number }) => {
+    if (supports1(sas)) {
+      const [out] = await sas.signAndSendTransaction({ transaction: t.unsignedTransaction, account, chain: CHAIN, options: { preflightCommitment: "confirmed" } });
+      return confirm(bs58(out.signature), t.blockhash, t.lastValidBlockHeight);
+    }
+    const [out] = await st.signTransaction({ transaction: t.unsignedTransaction, account, chain: CHAIN });
+    const sig = await rpc.sendRawTransaction(out.signedTransaction, { preflightCommitment: "confirmed" });
+    return confirm(sig, t.blockhash, t.lastValidBlockHeight);
+  } : undefined;
   return {
     name: w.name,
     pubkey,
+    sendV1,
     async send(ixs) {
       const { tx, blockhash, lastValidBlockHeight } = await buildTx(ixs, pubkey);
       const bytes = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
@@ -68,9 +83,16 @@ export function localWallet(): Wallet {
   const saved = sessionStorage.getItem(k);
   if (saved) kp = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(saved)));
   else { kp = Keypair.generate(); sessionStorage.setItem(k, JSON.stringify(Array.from(kp.secretKey))); }
+  const signV1 = keypairV1Signer(kp.secretKey);
   return {
     name: "local test key",
     pubkey: kp.publicKey,
+    async sendV1(t) {
+      const wire = assembleV1Transaction(t.messageBytes, [await signV1(t.messageBytes)]);
+      const sig = await rpc.sendRawTransaction(wire, { preflightCommitment: "confirmed" });
+      void v1TransactionSignature;
+      return confirm(sig, t.blockhash, t.lastValidBlockHeight);
+    },
     async send(ixs) {
       const { tx, blockhash, lastValidBlockHeight } = await buildTx(ixs, kp.publicKey);
       tx.sign(kp);

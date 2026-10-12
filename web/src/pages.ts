@@ -1,5 +1,6 @@
 import "./style.css";
 import "./pages.css";
+import "./interface.css";
 
 // reveal on scroll; the svg animations key off the same class
 const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }, { rootMargin: "0px 0px -12% 0px", threshold: 0.15 });

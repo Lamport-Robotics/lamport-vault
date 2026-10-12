@@ -1,6 +1,8 @@
 import "./polyfill.ts";
 import "./style.css";
 import "./pages.css";
+import "./interface.css";
+import { presentHome } from "./presentation.ts";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
@@ -145,7 +147,7 @@ function home() {
   $("#go", s).addEventListener("click", () => { const v = ($("#open", s) as HTMLInputElement).value.trim(); if (isPubkey(v)) location.hash = v; else $("#open", s).focus(); });
   $("#open", s).addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") $("#go", s).click(); });
   $("#new", s).addEventListener("click", () => newVault($("#newbox", s)));
-  return s;
+  return presentHome(s);
 }
 
 function notFound() {

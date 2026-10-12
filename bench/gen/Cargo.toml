@@ -1,0 +1,14 @@
+[package]
+name = "lms-cu-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the programs workspace.
+[workspace]
+
+[dependencies]
+lamport-lms = { path = "../../programs/lms", features = ["sign"] }
+
+[profile.release]
+opt-level = 3

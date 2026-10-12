@@ -37,6 +37,14 @@ computed per RFC 8554 Section 5.3.
 | `LMS_SHA256_M32_H15` | 7 | |
 | `LMS_SHA256_M32_H20` | 8 | |
 
+### SHA-256/192 keys (RFC 9858), if a program accepts them
+
+`lamport-lms` and `@lamport-robotics/lms` also implement RFC 9858's SHA-256/192 sets
+(`LMOTS_SHA256_N24_W4` = 7, `LMOTS_SHA256_N24_W8` = 8, `LMS_SHA256_M24_H*` = 10..13), whose `SEED` is
+24 bytes. Both libraries take the **first 24 bytes** of the 32-byte `SEED_k` above, so the same words and
+the same `k` give a SHA-256/192 key without a second derivation string. `I_k` is unchanged. Neither
+program accepts these keys today (their key arrays are 56 bytes; a SHA-256/192 key is 48).
+
 ## Recovery procedure
 
 1. Compute `master` from the words.

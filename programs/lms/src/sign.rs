@@ -25,12 +25,15 @@
 
 use alloc::vec::Vec;
 
-use crate::hash::{chain_step, h, interior_hash, leaf_hash, message_hash, Digest, D_PBLC};
+use crate::hash::{chain_step, h_n, interior_hash, leaf_hash, message_hash, truncated, Digest, D_PBLC};
 use crate::lmots::digits;
 use crate::lms::LmsPublicKey;
 use crate::params::{LmotsType, LmsType, N};
 
 /// An LMS private key in the Appendix A pseudorandom form.
+///
+/// `SEED` is `n` bytes (RFC 8554 Appendix A, RFC 9858 Section 3): all 32 for
+/// SHA-256, the first 24 for SHA-256/192. The remaining bytes are zero.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LmsPrivateKey {
     /// Tree parameter set.
@@ -39,7 +42,7 @@ pub struct LmsPrivateKey {
     pub lmots_type: LmotsType,
     /// Key pair identifier `I`.
     pub i: [u8; 16],
-    /// The 32-byte secret seed.
+    /// The secret seed, `n` significant bytes.
     pub seed: [u8; N],
 }
 
@@ -48,6 +51,7 @@ pub struct LmsPrivateKey {
 #[derive(Clone, Debug)]
 pub struct LmsTree {
     height: u32,
+    m: usize,
     nodes: Vec<Digest>,
 }
 
@@ -57,14 +61,14 @@ impl LmsTree {
         self.height
     }
 
-    /// The root `T[1]`.
+    /// The root `T[1]` (`m` bytes, zero-padded).
     pub fn root(&self) -> Digest {
-        self.nodes[1]
+        self.node(1)
     }
 
-    /// `T[r]`.
+    /// `T[r]` (`m` bytes, zero-padded).
     pub fn node(&self, r: u32) -> Digest {
-        self.nodes[r as usize]
+        truncated(self.nodes[r as usize], self.m)
     }
 
     /// Authentication path for leaf `q`: `path[0]` is the leaf's sibling,
@@ -73,7 +77,7 @@ impl LmsTree {
         let mut node = (1u32 << self.height) + q;
         let mut out = Vec::with_capacity(self.height as usize);
         while node > 1 {
-            out.push(self.nodes[(node ^ 1) as usize]);
+            out.push(self.node(node ^ 1));
             node /= 2;
         }
         out
@@ -81,41 +85,70 @@ impl LmsTree {
 }
 
 impl LmsPrivateKey {
-    /// Builds a private key from its parts.
+    /// Builds a private key from its parts. For a SHA-256/192 parameter set
+    /// only the first 24 bytes of `seed` are used, so a 32-byte derived seed
+    /// (SPEC-DERIVATION) works for either family.
+    ///
+    /// # Panics
+    /// If the LMS and LM-OTS parameter sets use different hash lengths.
     pub fn new(lms_type: LmsType, lmots_type: LmotsType, i: [u8; 16], seed: [u8; N]) -> Self {
+        Self::from_seed_slice(lms_type, lmots_type, i, &seed[..lmots_type.n()])
+    }
+
+    /// Builds a private key from an exactly `n`-byte seed, as RFC test vectors
+    /// give it.
+    ///
+    /// # Panics
+    /// If `seed` is not `n` bytes or the parameter sets' hash lengths differ.
+    pub fn from_seed_slice(lms_type: LmsType, lmots_type: LmotsType, i: [u8; 16], seed: &[u8]) -> Self {
+        let n = lmots_type.n();
+        assert_eq!(lms_type.m(), n, "LMS and LM-OTS hash lengths differ");
+        assert_eq!(seed.len(), n, "seed must be n bytes");
+        let mut s = [0u8; N];
+        s[..n].copy_from_slice(seed);
         LmsPrivateKey {
             lms_type,
             lmots_type,
             i,
-            seed,
+            seed: s,
         }
+    }
+
+    fn n(&self) -> usize {
+        self.lmots_type.n()
     }
 
     /// Appendix A: `x_q[i] = H(I || u32str(q) || u16str(i) || u8str(0xff) || SEED)`.
     pub fn ots_private_element(&self, q: u32, i: u16) -> Digest {
-        h(&[&self.i, &q.to_be_bytes(), &i.to_be_bytes(), &[0xff], &self.seed])
+        let n = self.n();
+        h_n(&[&self.i, &q.to_be_bytes(), &i.to_be_bytes(), &[0xff], &self.seed[..n]], n)
     }
 
     /// Deterministic randomizer `C` for leaf `q` (see the module docs).
     pub fn randomizer(&self, q: u32) -> Digest {
-        h(&[
-            &self.i,
-            &q.to_be_bytes(),
-            &0xfffdu16.to_be_bytes(),
-            &[0xff],
-            &self.seed,
-        ])
+        let n = self.n();
+        h_n(
+            &[
+                &self.i,
+                &q.to_be_bytes(),
+                &0xfffdu16.to_be_bytes(),
+                &[0xff],
+                &self.seed[..n],
+            ],
+            n,
+        )
     }
 
     /// Algorithm 1: the LM-OTS public key hash `K` of leaf `q`.
     pub fn ots_public_hash(&self, q: u32) -> Digest {
         let t = self.lmots_type;
+        let n = t.n();
         let steps = t.chain_len() as u8;
         let mut y: Vec<Digest> = Vec::with_capacity(t.p());
         for i in 0..t.p() {
             let mut tmp = self.ots_private_element(q, i as u16);
             for j in 0..steps {
-                tmp = chain_step(&self.i, q, i as u16, j, &tmp);
+                tmp = chain_step(&self.i, q, i as u16, j, &tmp, n);
             }
             y.push(tmp);
         }
@@ -125,9 +158,9 @@ impl LmsPrivateKey {
         parts.push(&qb);
         parts.push(&D_PBLC);
         for yi in &y {
-            parts.push(yi);
+            parts.push(&yi[..n]);
         }
-        h(&parts)
+        h_n(&parts, n)
     }
 
     /// Section 5.3: builds every node of the tree. Cost is `2^h` LM-OTS key
@@ -135,16 +168,17 @@ impl LmsPrivateKey {
     /// under a second for H10, and roughly a minute for H15 on a laptop.
     pub fn tree(&self) -> LmsTree {
         let height = self.lms_type.height();
+        let m = self.lms_type.m();
         let leaves = 1usize << height;
         let mut nodes = vec![[0u8; N]; 2 * leaves];
         for q in 0..leaves {
             let r = (leaves + q) as u32;
-            nodes[r as usize] = leaf_hash(&self.i, r, &self.ots_public_hash(q as u32));
+            nodes[r as usize] = leaf_hash(&self.i, r, &self.ots_public_hash(q as u32), m);
         }
         for r in (1..leaves).rev() {
-            nodes[r] = interior_hash(&self.i, r as u32, &nodes[2 * r], &nodes[2 * r + 1]);
+            nodes[r] = interior_hash(&self.i, r as u32, &nodes[2 * r], &nodes[2 * r + 1], m);
         }
-        LmsTree { height, nodes }
+        LmsTree { height, m, nodes }
     }
 
     /// The public key for an already built tree.
@@ -168,20 +202,21 @@ impl LmsPrivateKey {
         self.ots_sign_with_randomizer(q, message, &self.randomizer(q))
     }
 
-    /// Algorithm 3 with a caller-supplied randomizer `C`.
+    /// Algorithm 3 with a caller-supplied randomizer `C` (its first `n` bytes are used).
     pub fn ots_sign_with_randomizer(&self, q: u32, message: &[u8], c: &Digest) -> Vec<u8> {
         let t = self.lmots_type;
-        let qh = message_hash(&self.i, q, c, message);
+        let n = t.n();
+        let qh = message_hash(&self.i, q, &c[..n], message, n);
         let a = digits(&qh, t);
         let mut out = Vec::with_capacity(t.signature_len());
         out.extend_from_slice(&t.typecode().to_be_bytes());
-        out.extend_from_slice(c);
+        out.extend_from_slice(&c[..n]);
         for (i, &ai) in a.iter().enumerate() {
             let mut tmp = self.ots_private_element(q, i as u16);
             for j in 0..ai {
-                tmp = chain_step(&self.i, q, i as u16, j, &tmp);
+                tmp = chain_step(&self.i, q, i as u16, j, &tmp, n);
             }
-            out.extend_from_slice(&tmp);
+            out.extend_from_slice(&tmp[..n]);
         }
         out
     }
@@ -199,8 +234,9 @@ impl LmsPrivateKey {
         out.extend_from_slice(&q.to_be_bytes());
         out.extend_from_slice(&self.ots_sign(q, message));
         out.extend_from_slice(&self.lms_type.typecode().to_be_bytes());
+        let m = self.lms_type.m();
         for node in tree.path(q) {
-            out.extend_from_slice(&node);
+            out.extend_from_slice(&node[..m]);
         }
         out
     }

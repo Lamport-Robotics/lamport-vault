@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "kat": "node packages/lms/scripts/write-kat.ts && node packages/vault/scripts/write-kat.ts",
+    "kat": "node packages/lms/scripts/write-kat.ts && node packages/lms/scripts/write-kat-rfc9858.ts && node packages/vault/scripts/write-kat.ts",
     "bench": "node packages/lms/scripts/bench-keygen.ts",
     "clean": "node -e \"for (const p of ['packages/lms/dist','packages/vault/dist']) require('node:fs').rmSync(p,{recursive:true,force:true})\""
   },

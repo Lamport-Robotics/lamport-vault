@@ -6,14 +6,22 @@ use subtle::ConstantTimeEq;
 use crate::error::Error;
 use crate::hash::{interior_hash, leaf_hash, Digest};
 use crate::lmots::{lmots_public_key_candidate, parse_lmots_signature, LmotsSignature};
+use alloc::vec::Vec;
+
 use crate::params::{LmotsType, LmsType, N};
 
-/// Length of a serialized LMS public key: `4 + 4 + 16 + 32`.
+/// Length of a serialized SHA-256 (`m = 32`) LMS public key: `4 + 4 + 16 + 32`.
 pub const LMS_PUBLIC_KEY_LEN: usize = 56;
+
+/// Length of a serialized public key for `lms_type`: `4 + 4 + 16 + m`
+/// (56 for SHA-256, 48 for RFC 9858 SHA-256/192).
+pub const fn public_key_len(lms_type: LmsType) -> usize {
+    24 + lms_type.m()
+}
 
 /// A parsed LMS public key.
 ///
-/// Layout: `u32 lms_type || u32 lmots_type || I[16] || T[1][32]`.
+/// Layout: `u32 lms_type || u32 lmots_type || I[16] || T[1][m]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LmsPublicKey {
     /// Tree parameter set.
@@ -22,23 +30,31 @@ pub struct LmsPublicKey {
     pub lmots_type: LmotsType,
     /// The 16-byte key pair identifier `I`.
     pub i: [u8; 16],
-    /// The Merkle root `T[1]`.
+    /// The Merkle root `T[1]` (`m` bytes, zero-padded to 32).
     pub t1: Digest,
 }
 
 impl LmsPublicKey {
-    /// Parses the 56-byte form (Algorithm 6, steps 1 and 2).
+    /// Parses the serialized form (Algorithm 6, steps 1 and 2): 56 bytes for
+    /// SHA-256 keys, 48 for SHA-256/192 keys. The LMS and LM-OTS parameter
+    /// sets must use the same hash length (RFC 9858 Section 5).
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != LMS_PUBLIC_KEY_LEN {
+        if bytes.len() < 8 {
             return Err(Error::PublicKeyLength);
         }
         let lms_type = LmsType::from_typecode(u32::from_be_bytes(bytes[0..4].try_into().unwrap()))?;
         let lmots_type =
             LmotsType::from_typecode(u32::from_be_bytes(bytes[4..8].try_into().unwrap()))?;
+        if bytes.len() != public_key_len(lms_type) {
+            return Err(Error::PublicKeyLength);
+        }
+        if lms_type.m() != lmots_type.n() {
+            return Err(Error::HashLengthMismatch);
+        }
         let mut i = [0u8; 16];
         i.copy_from_slice(&bytes[8..24]);
         let mut t1 = [0u8; N];
-        t1.copy_from_slice(&bytes[24..56]);
+        t1[..lms_type.m()].copy_from_slice(&bytes[24..]);
         Ok(LmsPublicKey {
             lms_type,
             lmots_type,
@@ -47,13 +63,23 @@ impl LmsPublicKey {
         })
     }
 
-    /// Serializes to the 56-byte form.
+    /// Serializes a SHA-256 (`m = 32`) key to its 56-byte form.
+    ///
+    /// # Panics
+    /// For a SHA-256/192 key, which is 48 bytes; use [`Self::encode`].
     pub fn to_bytes(&self) -> [u8; LMS_PUBLIC_KEY_LEN] {
-        let mut out = [0u8; LMS_PUBLIC_KEY_LEN];
-        out[0..4].copy_from_slice(&self.lms_type.typecode().to_be_bytes());
-        out[4..8].copy_from_slice(&self.lmots_type.typecode().to_be_bytes());
-        out[8..24].copy_from_slice(&self.i);
-        out[24..56].copy_from_slice(&self.t1);
+        assert_eq!(self.lms_type.m(), 32, "48-byte SHA-256/192 key: use encode()");
+        self.encode().try_into().expect("56 bytes")
+    }
+
+    /// Serializes any key: `4 + 4 + 16 + m` bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let m = self.lms_type.m();
+        let mut out = Vec::with_capacity(public_key_len(self.lms_type));
+        out.extend_from_slice(&self.lms_type.typecode().to_be_bytes());
+        out.extend_from_slice(&self.lmots_type.typecode().to_be_bytes());
+        out.extend_from_slice(&self.i);
+        out.extend_from_slice(&self.t1[..m]);
         out
     }
 
@@ -63,9 +89,9 @@ impl LmsPublicKey {
     }
 }
 
-/// Exact LMS signature length: `4 + lmots_sig_len + 4 + 32 h`.
+/// Exact LMS signature length: `4 + lmots_sig_len + 4 + m h`.
 pub const fn lms_signature_len(lms_type: LmsType, lmots_type: LmotsType) -> usize {
-    4 + lmots_type.signature_len() + 4 + N * (lms_type.height() as usize)
+    4 + lmots_type.signature_len() + 4 + lms_type.m() * (lms_type.height() as usize)
 }
 
 /// A parsed LMS signature, borrowing the caller's bytes.
@@ -79,15 +105,16 @@ pub struct LmsSignature<'a> {
     pub lmots: LmotsSignature<'a>,
     /// Tree parameter set, equal to the public key's.
     pub lms_type: LmsType,
-    /// Authentication path, `h * 32` bytes, `path[0]` adjacent to the leaf.
+    /// Authentication path, `h * m` bytes, `path[0]` adjacent to the leaf.
     pub path: &'a [u8],
 }
 
 impl<'a> LmsSignature<'a> {
-    /// `path[i]`.
+    /// `path[i]`, `m` bytes.
     #[inline(always)]
-    pub fn path(&self, i: usize) -> &'a [u8; N] {
-        self.path[i * N..(i + 1) * N].try_into().expect("32-byte slice")
+    pub fn path(&self, i: usize) -> &'a [u8] {
+        let m = self.lms_type.m();
+        &self.path[i * m..(i + 1) * m]
     }
 }
 
@@ -139,17 +166,26 @@ pub fn parse_lms_signature<'a>(
 }
 
 /// Algorithm 6a, steps 3 to 5: the candidate root `Tc` for a parsed signature.
+/// Only the first `m` bytes are meaningful.
 pub fn lms_root_candidate(pk: &LmsPublicKey, message: &[u8], sig: &LmsSignature<'_>) -> Digest {
+    match pk.lms_type.m() {
+        24 => root_candidate::<24>(pk, message, sig),
+        _ => root_candidate::<32>(pk, message, sig),
+    }
+}
+
+fn root_candidate<const M: usize>(pk: &LmsPublicKey, message: &[u8], sig: &LmsSignature<'_>) -> Digest {
     let kc = lmots_public_key_candidate(&sig.lmots, &pk.i, sig.q, message);
     let h = pk.lms_type.height() as usize;
     let mut node_num = pk.lms_type.leaf_count() + sig.q;
-    let mut tmp = leaf_hash(&pk.i, node_num, &kc);
+    let mut tmp = leaf_hash(&pk.i, node_num, &kc, M);
     for i in 0..h {
         let parent = node_num / 2;
+        let sibling: &[u8; M] = sig.path[i * M..(i + 1) * M].try_into().expect("m-byte slice");
         tmp = if node_num & 1 == 1 {
-            interior_hash(&pk.i, parent, sig.path(i), &tmp)
+            interior_hash(&pk.i, parent, sibling, &tmp, M)
         } else {
-            interior_hash(&pk.i, parent, &tmp, sig.path(i))
+            interior_hash(&pk.i, parent, &tmp, sibling, M)
         };
         node_num = parent;
     }
@@ -173,7 +209,8 @@ pub fn verify_parsed(
     sig: &LmsSignature<'_>,
 ) -> Result<u32, Error> {
     let tc = lms_root_candidate(pk, message, sig);
-    if bool::from(tc.ct_eq(&pk.t1)) {
+    let m = pk.lms_type.m();
+    if bool::from(tc[..m].ct_eq(&pk.t1[..m])) {
         Ok(sig.q)
     } else {
         Err(Error::InvalidSignature)
@@ -214,5 +251,35 @@ mod tests {
         let mut bad = bytes;
         bad[7] = 4;
         assert_eq!(LmsPublicKey::parse(&bad), Err(Error::UnknownLmotsType));
+        // SHA-256 tree with a SHA-256/192 one-time signature
+        let mut bad = bytes;
+        bad[7] = 7;
+        assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
+    }
+
+    #[test]
+    fn sha256_192_public_key_round_trip() {
+        let mut bytes = [0u8; 48];
+        bytes[3] = 11; // LMS_SHA256_M24_H10
+        bytes[7] = 7; // LMOTS_SHA256_N24_W4
+        for (k, b) in bytes[8..].iter_mut().enumerate() {
+            *b = k as u8 + 1;
+        }
+        let pk = LmsPublicKey::parse(&bytes).unwrap();
+        assert_eq!(pk.lms_type, LmsType::Sha256M24H10);
+        assert_eq!(pk.encode(), bytes.to_vec());
+        assert_eq!(&pk.t1[24..], &[0u8; 8]);
+        assert_eq!(pk.signature_len(), 4 + 1252 + 4 + 240);
+        assert_eq!(LmsPublicKey::parse(&[&bytes[..], &[0u8; 8]].concat()), Err(Error::PublicKeyLength));
+        let mut bad = bytes;
+        bad[7] = 3; // SHA-256/192 tree with a SHA-256 one-time signature
+        assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
+    }
+
+    #[test]
+    fn rfc9858_signature_lengths() {
+        assert_eq!(lms_signature_len(LmsType::Sha256M24H10, LmotsType::Sha256N24W4), 1500);
+        assert_eq!(lms_signature_len(LmsType::Sha256M24H10, LmotsType::Sha256N24W8), 900);
+        assert_eq!(lms_signature_len(LmsType::Sha256M24H5, LmotsType::Sha256N24W8), 780);
     }
 }

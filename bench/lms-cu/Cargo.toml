@@ -1,0 +1,28 @@
+[package]
+name = "lms-cu"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Compute-unit benchmark: LMS verification per parameter set, on the Solana VM"
+
+# Not part of the programs workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+lamport-lms = { path = "../../programs/lms" }
+solana-program-entrypoint = "2.3"
+solana-account-info = "2.3"
+solana-pubkey = "2.3"
+solana-program-error = "2.2"
+solana-msg = "2.2"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

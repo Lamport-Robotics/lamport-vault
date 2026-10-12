@@ -50,11 +50,11 @@ The vault stays 4 488 bytes under its 310 000-byte devnet allocation. Without th
 
 ## What it means for the vault
 
-- **N24 W4 H10** is smaller and cheaper on every axis: 40% shorter signatures, 21% fewer compute units,
+- **N24 W4 H10** is smaller and cheaper: 40% shorter signatures, 21% fewer compute units,
   one less staging transaction (1 500 bytes is a 708-byte first chunk plus one 792-byte write, against two
   writes today), and roughly 1 000 fewer bytes in an `execute_direct` transaction v1.
-- **N24 W8** is not worth it: about 5.8× the compute for 600 fewer bytes, and it still does not fit every
-  action in a 1 232-byte legacy transaction.
+- **N24 W8** is not worth it: about 5.8× the compute for 600 fewer bytes, and by our byte count it still
+  does not fit every action in a 1 232-byte legacy transaction (not measured).
 - **The trade-off** is the security level. SHA-256/192 gives about 192-bit classical security (RFC 9858
   Section 8), against about 256 bits for SHA-256. Against a quantum attacker the generic bound is 2^96 hash
   evaluations rather than 2^128; RFC 9858 argues that the depth Grover's algorithm needs puts this out of

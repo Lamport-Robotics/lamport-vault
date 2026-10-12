@@ -44,20 +44,39 @@ function paintWallet() {
     $("#disc").addEventListener("click", async () => { await wallet?.disconnect(); wallet = null; remember(null); paintWallet(); render(); });
     return;
   }
+  const btn = el("button", { class: "link" }, "Connect wallet");
+  btn.addEventListener("click", () => pickWallet());
+  box.append(btn);
+}
+
+/** the wallet picker: every Wallet Standard wallet the browser exposes, with its own icon */
+function pickWallet() {
   const ws = listWallets();
-  const sel = el("select", { id: "wsel" });
-  for (const w of ws) sel.append(el("option", { value: w.name }, w.name));
-  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") sel.append(el("option", { value: "__local" }, "local test key"));
-  if (!sel.options.length) { box.append(el("span", {}, "No Solana wallet found")); return; }
-  const btn = el("button", { class: "link" }, "Connect");
-  btn.addEventListener("click", async () => {
+  const local = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  const overlay = el("div", { class: "overlay" });
+  const list = el("div", { class: "wlist" });
+  const close = () => overlay.remove();
+  const choose = async (name: string) => {
     try {
-      const v = (sel as HTMLSelectElement).value;
-      wallet = v === "__local" ? localWallet() : await connectStandard(ws.find((w) => w.name === v)!);
-      remember(v); paintWallet(); render();
-    } catch (e) { alert(String((e as Error).message ?? e)); }
-  });
-  box.append(sel, btn);
+      wallet = name === "__local" ? localWallet() : await connectStandard(ws.find((w) => w.name === name)!);
+      remember(name); close(); paintWallet(); render();
+    } catch (e) { $("#werr-modal", overlay).textContent = String((e as Error).message ?? e); }
+  };
+  for (const w of ws) {
+    const row = el("button", { class: "wrow" }, el("img", { src: w.icon, alt: "" }), el("span", {}, w.name));
+    row.addEventListener("click", () => choose(w.name));
+    list.append(row);
+  }
+  if (local) { const row = el("button", { class: "wrow" }, el("span", { class: "wdot" }), el("span", {}, "Local test key")); row.addEventListener("click", () => choose("__local")); list.append(row); }
+  if (!ws.length && !local) list.append(el("p", { class: "quiet", style: "margin:4px 0 0" }, "No Solana wallet is installed in this browser. On a phone, open this page inside your wallet's browser, or install Phantom, Solflare or Backpack on desktop."));
+  const modal = el("div", { class: "modal" },
+    el("div", { class: "mhead" }, el("span", { class: "eyebrow", style: "margin:0" }, "Connect a wallet"), el("button", { class: "link quiet", id: "mclose" }, "Close")),
+    el("p", { class: "quiet", style: "font-size:13px" }, "The wallet pays fees and funds deposits. It never holds the vault key."),
+    list, el("div", { class: "err", id: "werr-modal" }));
+  overlay.append(modal);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  $("#mclose", modal).addEventListener("click", close);
+  document.body.append(overlay);
 }
 onWalletsChange(paintWallet);
 paintWallet();

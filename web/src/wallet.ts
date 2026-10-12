@@ -3,6 +3,19 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction, type Transaction
 import { getWallets } from "@wallet-standard/app";
 import type { Wallet as StdWallet, WalletAccount } from "@wallet-standard/base";
 import { CLUSTER, rpc } from "./common.ts";
+import { registerMwa, createDefaultAuthorizationCache, createDefaultChainSelector, createDefaultWalletNotFoundHandler } from "@solana-mobile/wallet-standard-mobile";
+
+// Android: wallets that speak Mobile Wallet Adapter (Phantom, Solflare, Backpack, …) show up as one
+// Wallet Standard entry and open the wallet app for approval. No-op where MWA is not available.
+try {
+  registerMwa({
+    appIdentity: { name: "Lamport Vault", uri: location.origin, icon: "apple-touch-icon.png" },
+    chains: [`solana:${CLUSTER}`],
+    authorizationCache: createDefaultAuthorizationCache(),
+    chainSelector: createDefaultChainSelector(),
+    onWalletNotFound: createDefaultWalletNotFoundHandler(),
+  });
+} catch { /* not on a platform with MWA */ }
 import { assembleV1Transaction, keypairV1Signer, v1TransactionSignature } from "@lamport-robotics/vault";
 
 export interface Wallet {

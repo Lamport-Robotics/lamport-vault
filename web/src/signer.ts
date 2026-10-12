@@ -11,35 +11,34 @@ import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } fro
 import * as qr from "./qr.ts";
 
 const app = $("#app");
+app.className = "shell";
 app.append(
-  el("header", {}, el("a", { class: "brand", href: "#" }, el("b", {}, "Lamport Vault"), el("small", {}, "cold signer")), el("span", { class: "offline-pill", id: "net" }, "…")),
-  el("section", {},
-    el("div", { class: "label" }, el("span", {}, "01 — request"), el("span", {}, "from the vault page")),
-    el("textarea", { class: "mono", id: "req", rows: "6", placeholder: '{"v":1,"vault":"…","action":{…}}' }),
-    el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "small ghost", id: "scanreq" }, "scan QR instead")),
-    el("div", { id: "scanbox" }),
-    el("div", { id: "reqview" }),
-  ),
-  el("section", {},
-    el("div", { class: "label" }, el("span", {}, "02 — words")),
-    el("textarea", { class: "mono", id: "words", rows: "3", placeholder: "24 words", autocomplete: "off", spellcheck: "false" }),
-    el("label", {}, "passphrase (if you set one)"),
-    el("input", { class: "mono", id: "pass", type: "password", autocomplete: "off" }),
-    el("div", { class: "row", style: "margin-top:16px" }, el("button", { class: "primary", id: "sign" }, "Sign")),
-    el("div", { class: "err hidden", id: "err" }),
-  ),
-  el("section", { id: "out", class: "hidden" },
-    el("div", { class: "label" }, el("span", {}, "03 — signature"), el("span", {}, "take this back to the vault page")),
-    el("textarea", { class: "mono", id: "sig", rows: "6", readonly: "" }),
-    el("div", { class: "row", style: "margin-top:10px" }, el("button", { id: "copy", class: "small" }, "copy"), el("button", { id: "dl", class: "small" }, "download .json"), el("button", { id: "qrsig", class: "small" }, "show as QR")),
-    el("div", { id: "qrbox", style: "margin-top:10px" }),
-    el("p", { class: "note warn" }, "One leaf is now spent. If this signature is lost, the next one must use a higher q; the vault page reads it from the chain."),
-  ),
-  el("footer", {}, el("span", {}, "nothing here talks to the network"), el("span", {}, "lamportrobotics.com")),
+  el("div", { class: "top" }, el("a", { class: "brand", href: "#" }, el("b", {}, "Lamport Vault"), el("i", {}), el("small", {}, "cold signer")), el("span", { class: "offline-pill", id: "net" }, "…")),
+  el("div", { class: "page", style: "grid-template-columns:1fr;max-width:640px" },
+    el("div", {},
+      el("div", { class: "panel" },
+        el("div", { class: "eyebrow" }, "1 · Request"),
+        el("label", { class: "field" }, el("span", {}, "From the vault page"), el("textarea", { class: "mono", id: "req", rows: "4", placeholder: "" })),
+        el("div", { class: "actions" }, el("button", { class: "link quiet", id: "scanreq" }, "Scan QR instead")),
+        el("div", { id: "scanbox", class: "qr" }),
+        el("div", { id: "reqview" })),
+      el("div", { class: "panel" },
+        el("div", { class: "eyebrow" }, "2 · Words"),
+        el("label", { class: "field" }, el("span", {}, "24 words"), el("textarea", { class: "mono", id: "words", rows: "2", autocomplete: "off", spellcheck: "false" })),
+        el("label", { class: "field" }, el("span", {}, "Passphrase, if you set one"), el("input", { class: "mono", id: "pass", type: "password", autocomplete: "off" })),
+        el("div", { class: "actions" }, el("button", { class: "btn primary", id: "sign" }, "Sign")),
+        el("div", { class: "err hidden", id: "err" })),
+      el("div", { class: "panel hidden", id: "out" },
+        el("div", { class: "eyebrow" }, "3 · Signature"),
+        el("label", { class: "field" }, el("span", {}, "Take this back to the vault page"), el("textarea", { class: "mono", id: "sig", rows: "4", readonly: "" })),
+        el("div", { class: "actions" }, el("button", { id: "copy", class: "link" }, "Copy"), el("button", { id: "dl", class: "link" }, "Download .json"), el("button", { id: "qrsig", class: "link" }, "Show QR")),
+        el("div", { id: "qrbox", class: "qr", style: "margin-top:14px" }),
+        el("div", { class: "notice", style: "margin-top:18px" }, "One one-time key is now spent. If this signature is lost, the next one must use a higher key number; the vault page reads it from the chain.")))),
+  el("footer", {}, el("span", {}, "nothing on this page talks to the network"), el("span", {}, "lamportrobotics.com")),
 );
 
 const net = $("#net");
-const paintNet = () => { const on = navigator.onLine; net.textContent = on ? "online — go offline before typing words" : "offline"; net.className = `offline-pill ${on ? "on" : "off"}`; };
+const paintNet = () => { const on = navigator.onLine; net.textContent = on ? "online · go offline before typing words" : "offline"; net.className = `offline-pill ${on ? "on" : "off"}`; };
 paintNet(); addEventListener("online", paintNet); addEventListener("offline", paintNet);
 
 let req: SignRequest | null = null;
@@ -53,10 +52,11 @@ $("#req").addEventListener("input", () => {
     const line = a.kind === "TransferSol" ? `send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`
       : a.kind === "TransferToken" ? `send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount + " base units"} of token ${short(a.mint, 6)} to token account ${a.to}`
       : a.kind === "Rotate" ? `rotate the vault key to ${short(a.newLmsPubkey, 10)}` : `close the vault, everything to ${a.to}`;
-    v.append(el("dl", { class: "kv", style: "margin-top:14px" },
+    v.append(el("dl", { class: "spec", style: "margin-top:4px" },
       el("dt", {}, "vault"), el("dd", {}, r.vault),
       el("dt", {}, "action"), el("dd", {}, line),
       el("dt", {}, "leaf q"), el("dd", {}, String(r.nextQ)),
+      el("dt", {}, "key generation"), el("dd", {}, String(r.generation ?? 0)),
       el("dt", {}, "valid until slot"), el("dd", {}, r.expirySlot),
       el("dt", {}, "cluster"), el("dd", {}, r.cluster)));
   } catch (e) { v.append(el("div", { class: "err" }, String((e as Error).message))); }
@@ -75,9 +75,9 @@ $("#sign").addEventListener("click", async () => {
     const found = await recoverKey(master, pub, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
     const action = toAction(req);
-    const message = vaultMessage(new PublicKey(req.vault), encodeAction(action));
+    const message = vaultMessage(new PublicKey(req.vault), req.generation ?? 0, encodeAction(action));
     const signature = found.key.sign(req.nextQ, message);
-    const blob: SignedBlob = { v: 1, vault: req.vault, q: req.nextQ, action: req.action, expirySlot: req.expirySlot, signature: b64(signature) };
+    const blob: SignedBlob = { v: 1, vault: req.vault, q: req.nextQ, generation: req.generation ?? 0, action: req.action, expirySlot: req.expirySlot, signature: b64(signature) };
     ($("#sig") as HTMLTextAreaElement).value = JSON.stringify(blob);
     $("#out").classList.remove("hidden");
     ($("#words") as HTMLTextAreaElement).value = ""; ($("#pass") as HTMLInputElement).value = "";

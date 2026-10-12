@@ -32,7 +32,8 @@ export interface SignRequest {
   cluster: string;
   vault: string;
   lmsPubkey: string;   // base64, 56 bytes
-  nextQ: number;
+  nextQ: number;       // the leaf to sign with (first free one, or the signer's lane)
+  generation: number;  // key generation of the vault at request time; part of the signed message
   expirySlot: string;  // decimal
   action:
     | { kind: "TransferSol"; to: string; lamports: string }
@@ -45,6 +46,7 @@ export interface SignedBlob {
   vault: string;
   q: number;
   action: SignRequest["action"];
+  generation?: number;
   expirySlot: string;
   signature: string;   // base64
 }

@@ -37,8 +37,9 @@ pub enum Action {
         /// Last slot at which the action may execute.
         expiry_slot: u64,
     },
-    /// Replace the LMS key. `next_q` resets to 0, `rotations += 1`; the new key
-    /// must never have been this vault's key before.
+    /// Replace the LMS key: bitmap cleared, `spent = 0`, `generation += 1`. The
+    /// new key must have the same typecodes and must never have been this
+    /// vault's key before.
     Rotate {
         /// The new 56-byte LMS public key.
         new_lms_pubkey: [u8; 56],

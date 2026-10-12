@@ -132,12 +132,30 @@ export const Action = {
   },
 };
 
-export function vaultMessage(vault: PublicKey, actionBytes: Buffer): Buffer {
-  return sha256(Buffer.from("lamport-vault/v1"), vault.toBuffer(), actionBytes);
+export function u32le(x: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(x);
+  return b;
 }
 
-export function registryMessage(owner: PublicKey, newPqPubkey: Buffer): Buffer {
-  return sha256(Buffer.from("pq-registry/v1"), owner.toBuffer(), newPqPubkey);
+/** sha256("lamport-vault/v1" || program_id || vault || u32le(generation) || action_bytes) */
+export function vaultMessage(programId: PublicKey, vault: PublicKey, generation: number, actionBytes: Buffer): Buffer {
+  return sha256(Buffer.from("lamport-vault/v1"), programId.toBuffer(), vault.toBuffer(), u32le(generation), actionBytes);
+}
+
+/** sha256("pq-registry/v1" || program_id || owner || u32le(generation) || new_pq_pubkey) */
+export function registryMessage(programId: PublicKey, owner: PublicKey, generation: number, newPqPubkey: Buffer): Buffer {
+  return sha256(Buffer.from("pq-registry/v1"), programId.toBuffer(), owner.toBuffer(), u32le(generation), newPqPubkey);
+}
+
+/** sha256(pubkey)[0..16]: a `used_keys` entry. */
+export function keyHash(pubkey: Buffer): Buffer {
+  return sha256(pubkey).subarray(0, 16);
+}
+
+/** Bit q of a used-leaf bitmap. */
+export function leafUsed(used: Uint8Array | number[], q: number): boolean {
+  return ((used[q >> 3] ?? 0xff) & (1 << (q & 7))) !== 0;
 }
 
 export function vaultPda(programId: PublicKey, lmsPubkey: Buffer): [PublicKey, number] {

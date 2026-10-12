@@ -6,7 +6,8 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
-use lamport_vault::{signed_message, vault_id_for, Action, SigBuffer, Vault, SIG_SEED, VAULT_SEED};
+use lamport_lms::LmsType;
+use lamport_vault::{signed_message, vault_id_for, Action, SigBuffer, Vault, KEY_HASH_LEN, MESSAGE_VERSION, SIG_SEED, VAULT_SEED};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -22,6 +23,9 @@ fn pk(s: &Value) -> Pubkey {
     Pubkey::from_str(s.as_str().unwrap_or_else(|| panic!("missing pubkey field"))).unwrap()
 }
 fn u64s(s: &Value) -> u64 {
+    s.as_str().unwrap().parse().unwrap()
+}
+fn u32s(s: &Value) -> u32 {
     s.as_str().unwrap().parse().unwrap()
 }
 /// True if `bytes` is one of the four action vectors in the file.
@@ -44,8 +48,14 @@ fn vectors_target_this_program_id() {
 fn action_encodings_and_messages() {
     let d = v();
     let expiry = u64s(&d["inputs"]["expiry_slot"]);
+    let generation = u32s(&d["inputs"]["generation"]);
     let h10: [u8; 56] = hx(&d["inputs"]["h10_pubkey_hex"]).try_into().unwrap();
     let (vault, _) = Pubkey::find_program_address(&[VAULT_SEED, &vault_id_for(&h5(&d))], &lamport_vault::ID);
+    let m = &d["messages"];
+    assert_eq!(m["message_version"].as_u64().unwrap(), MESSAGE_VERSION as u64);
+    assert_eq!(pk(&m["vault_message_inputs"]["program_id"]), lamport_vault::ID);
+    assert_eq!(pk(&m["vault_message_inputs"]["vault"]), vault);
+    assert_eq!(u32s(&m["vault_message_inputs"]["generation"]), generation);
 
     let a = &d["actions"];
     let cases: Vec<(&str, Action)> = vec![
@@ -86,10 +96,11 @@ fn action_encodings_and_messages() {
         assert_eq!(bytes, hx(&a[name]["action_hex"]), "{name} encoding");
         assert_eq!(Action::decode(&bytes).unwrap(), action, "{name} decode");
         assert_eq!(
-            signed_message(&vault, &bytes).to_vec(),
+            signed_message(&vault, generation, &bytes).to_vec(),
             hx(&a[name]["message_hex"]),
             "{name} message"
         );
+        assert_ne!(signed_message(&vault, generation + 1, &bytes).to_vec(), hx(&a[name]["message_hex"]));
     }
     assert_eq!(lamport_vault::MESSAGE_DOMAIN.to_vec(), hx(&d["messages"]["vault_prefix_hex"]));
 }
@@ -166,19 +177,44 @@ fn account_layouts() {
     let d = v();
     let key = h5(&d);
     let vault_hex = hx(&d["accounts"]["vault_hex"]);
+    // disc(8) version bump vault_id(32) lms_pubkey(56) spent(4) generation(4) created(8)
+    // || vec<u8> used (u32 len, 2^h/8 bytes) || vec<[u8;16]> used_keys (u32 len, 16 each)
+    assert_eq!(vault_hex[8], Vault::VERSION);
+    let used_len = u32::from_le_bytes(vault_hex[114..118].try_into().unwrap()) as usize;
+    assert_eq!(used_len, Vault::bitmap_len(LmsType::Sha256M32H5), "H5 bitmap is 4 bytes");
+    let used = vault_hex[118..118 + used_len].to_vec();
+    let p = 118 + used_len;
+    let hist_len = u32::from_le_bytes(vault_hex[p..p + 4].try_into().unwrap()) as usize;
+    let used_keys: Vec<[u8; KEY_HASH_LEN]> = (0..hist_len)
+        .map(|i| vault_hex[p + 4 + 16 * i..p + 4 + 16 * (i + 1)].try_into().unwrap())
+        .collect();
+    assert_eq!(vault_hex.len(), p + 4 + 16 * hist_len, "trailing bytes in vault vector");
     let vault = Vault {
         version: vault_hex[8],
         bump: vault_hex[9],
         vault_id: vault_id_for(&key),
         lms_pubkey: key,
-        next_q: u32::from_le_bytes(vault_hex[98..102].try_into().unwrap()),
-        rotations: u32::from_le_bytes(vault_hex[102..106].try_into().unwrap()),
+        spent: u32::from_le_bytes(vault_hex[98..102].try_into().unwrap()),
+        generation: u32::from_le_bytes(vault_hex[102..106].try_into().unwrap()),
         created_slot: u64::from_le_bytes(vault_hex[106..114].try_into().unwrap()),
+        used,
+        used_keys,
     };
+    assert_eq!(vault.generation as usize, hist_len, "one past key per rotation");
+    assert_eq!(vault.spent, vault.used.iter().map(|b| b.count_ones()).sum::<u32>());
+    let h10: [u8; 56] = hx(&d["inputs"]["h10_pubkey_hex"]).try_into().unwrap();
+    assert!(vault.has_used_key(&h10), "the H10 key is in the vector's history");
     let mut out = Vec::new();
     vault.try_serialize(&mut out).unwrap();
     assert_eq!(out, vault_hex);
-    assert_eq!(out.len(), Vault::SPACE);
+    assert_eq!(out.len(), Vault::space(LmsType::Sha256M32H5, hist_len));
+
+    let sizes = &d["accounts"]["sizes"];
+    assert_eq!(sizes["vault_h5"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H5, 0));
+    assert_eq!(sizes["vault_h10"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H10, 0));
+    assert_eq!(sizes["vault_h15"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H15, 0));
+    assert_eq!(sizes["key_history_entry"].as_u64().unwrap() as usize, KEY_HASH_LEN);
+    assert_eq!(sizes["vault_max_key_history"].as_u64().unwrap(), lamport_vault::MAX_KEY_HISTORY as u64);
 
     let sb_hex = hx(&d["accounts"]["sig_buffer_hex"]);
     let fixed = 8 + 1 + 1 + 32 + 32 + 8;

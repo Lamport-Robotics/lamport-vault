@@ -52,7 +52,8 @@ const again = LmsPrivateKey.fromTree(deriveKeyMaterial(master, 0), fromBase64(lo
 
 `sign(q, message, { C })` with an explicit `C` gives deterministic signatures for test vectors; without it
 `C` is 32 random bytes, as the RFC specifies. The key object does **not** track which leaves were used:
-on Lamport Vault the chain holds `next_q`, and the `VaultSigner` below reads it before every signature.
+on Lamport Vault the chain holds a used-leaf bitmap, and the `VaultSigner` below reads it before every
+signature.
 
 ### Key generation performance
 
@@ -75,13 +76,13 @@ I_k     = HMAC-SHA256(key = "lamport-vault/lms-id/v1",   msg = master || u32be(k
 Recovery:
 
 1. Read the vault account (`decodeVault`): it holds the current `lms_pubkey` (56 bytes, with the
-   typecodes) and `next_q`.
+   typecodes), the used-leaf bitmap and the key `generation`.
 2. Compute `master` from the words (and passphrase, if one was used).
 3. `recoverKey(master, lmsPubkey)` walks `k = 0, 1, 2, …` (up to 64 by default). For each `k` it derives
    `I_k` and compares it with the `I` inside the public key; only a match is expanded into a full tree and
    confirmed against the root. One `Rotate` moves to `k + 1`, so a vault rotated three times is found at
    `k = 3`.
-4. Sign with any `q >= next_q` (`VaultSigner` does this automatically).
+4. Sign with any unspent `q` (`VaultSigner` does this automatically).
 
 
 ## `@lamport-robotics/vault`
@@ -103,20 +104,37 @@ await signer.createVault();                           // one transaction; vault 
 
 // Deposit: a plain SystemProgram.transfer to signer.vault, from anywhere.
 
-// Withdraw: reads next_q, signs, stages, executes. Returns every transaction signature.
+// Withdraw: reads the bitmap + generation, picks a free leaf, signs, stages, executes.
 const res = await signer.execute({ kind: "TransferSol", to, lamports: 1_000_000_000n });
 res.q;            // leaf used
+res.generation;   // key generation the message was bound to
 res.signatures;   // [open_sig_buffer, write_sig, write_sig, execute] for an H10 key
 
 // Other actions
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
-await signer.execute({ kind: "Rotate", newLmsPubkey: nextKey.publicKey });  // next_q resets, vault address unchanged
+await signer.execute({ kind: "Rotate", newLmsPubkey: nextKey.publicKey });  // bitmap cleared, generation + 1, address unchanged
 await signer.execute({ kind: "Close", to });                                  // all lamports to `to`
 ```
 
 `expirySlot` may be given on any action; when omitted the signer uses the current slot plus 300. The
-signer refuses `q < next_q`, `q` beyond the tree, and anything but `Rotate` on the last leaf (the
-exhaustion rule), and it never reuses a leaf within one process even before the chain confirms.
+signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` on the last free leaf (the
+exhaustion rule), a `Rotate` to a key the vault had before or with other typecodes, and it never reuses a
+leaf within one object even before the chain confirms.
+
+Leaves are a bitmap on chain, so several devices can share one key without talking to each other:
+
+```ts
+// device k of n only ever uses leaves q ≡ k (mod n)
+const phone  = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2 });
+const laptop = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2 });
+
+// reserve(q) runs BEFORE a leaf is signed: persist it, and throw if it was ever reserved before.
+// A signer that crashes between signing and submitting then cannot sign that leaf again after restart.
+const robot = new VaultSigner({ rpc, key, payer, reserve: async (q) => store.markUsedOrThrow(q) });
+```
+
+`isLeafUsed(vault, q)`, `firstFreeLeaf(vault, lane, lanes)`, `freeLeaves(vault)` and `hasUsedKey(vault, pubkey)`
+read a decoded account; `signer.nextQ()` is the lane's next free leaf (`undefined` once exhausted).
 
 After a `Rotate`, construct the next `VaultSigner` with the new key and `vault: signer.vault`; the
 vault PDA is derived from the *initial* key and never changes.
@@ -139,8 +157,10 @@ A W4/H10 signature is 2 508 bytes and a Solana transaction carries 1 232, so a s
 2. `write_sig(offset, chunk)` appends the rest in chunks of at most 900 bytes; `offset` must equal the
    bytes written so far.
 3. `execute()` with a 400 000 CU compute-budget request: verifies the LMS signature over
-   `sha256("lamport-vault/v1" || vault || action_bytes)`, sets `next_q = q + 1`, performs the action, and
-   refunds the buffer rent to `payer`.
+   `sha256("lamport-vault/v1" || program_id || vault || u32le(generation) || action_bytes)`
+   (`vaultMessage`), sets bit `q` of the bitmap, performs the action, and refunds the buffer rent to
+   `payer`. `registryMessage` is `sha256("pq-registry/v1" || program_id || owner || u32le(generation) ||
+   new_pq_pubkey)`; `MESSAGE_VERSION` is the `1` in both domain strings.
 
 `buildStagedExecution` returns these instructions grouped per transaction without sending anything;
 `closeSigBufferInstruction` abandons a half-written buffer and refunds it.

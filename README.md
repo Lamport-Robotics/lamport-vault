@@ -28,10 +28,11 @@ cd sdk && npm i && npm test
 
 ## how a withdrawal works
 
-Sign `sha256("lamport-vault/v1" || vault || action)` with leaf `q >= next_q`. The ~2.5 KB signature is
-staged into a buffer account over a few transactions, then `execute` verifies it, bumps `next_q`, does
-the action and refunds the buffer. Rotate installs a fresh key at the same address; the last leaf is
-reserved for that so a vault can't get stuck.
+Sign `sha256("lamport-vault/v1" || program_id || vault || u32le(generation) || action)` with any unspent
+leaf `q`. The ~2.5 KB signature is staged into a buffer account over a few transactions, then `execute`
+verifies it, marks leaf `q` spent in the vault's bitmap, does the action and refunds the buffer. Rotate
+installs a fresh key at the same address (never one the vault had before); the last free leaf is reserved
+for that so a vault can't get stuck.
 
 ## devnet
 

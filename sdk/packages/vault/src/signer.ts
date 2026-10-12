@@ -1,12 +1,13 @@
 /**
  * High-level clients. `VaultSigner` turns "move funds" into the transactions the chain needs:
- * read next_q, sign, open the buffer (carrying the first signature bytes), write the remaining
- * chunks, execute. `RegistryClient` does the same for `rotate_pq`, plus the one-transaction `commit`.
+ * read the vault (bitmap + generation), pick a free leaf, reserve it, sign, open the buffer
+ * (carrying the first signature bytes), write the remaining chunks, execute. `RegistryClient`
+ * does the same for `rotate_pq`, plus the one-transaction `commit`.
  *
  * Both talk to the cluster through the small `Rpc` interface below, which `Connection` satisfies,
  * so tests run against a mock.
  */
-import { LmsPrivateKey, lmsParams, parseLmsPublicKey } from "@lamport-robotics/lms";
+import { LmsPrivateKey } from "@lamport-robotics/lms";
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   type AccountInfo,
@@ -17,7 +18,7 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
-import { type CommitmentAccount, decodeCommitment, decodeVault, hasUsedKey, type VaultAccount } from "./accounts.ts";
+import { type CommitmentAccount, decodeCommitment, decodeVault, firstFreeLeaf, freeLeaves, hasUsedKey, isLeafUsed, leafCount, type VaultAccount } from "./accounts.ts";
 import { type Action, encodeAction } from "./action.ts";
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
@@ -92,6 +93,19 @@ export interface VaultSignerOptions {
   vault?: PublicKey;
   /** Slots an action stays valid when the request has no expiry. Default 300 (about two minutes). */
   defaultExpirySlots?: number;
+  /**
+   * Leaf lane: this signer only uses leaves `q ≡ lane (mod lanes)`. Several devices sharing one
+   * key each take a different lane and never collide. Default: lane 0 of 1 (every leaf).
+   */
+  lane?: number;
+  lanes?: number;
+  /**
+   * Called with the leaf about to be signed, BEFORE the signature exists. Persist it (file,
+   * secure element, database) and throw if it was ever reserved before: a signer that crashes
+   * between signing and submitting then cannot sign the same leaf twice after restart. The
+   * default remembers leaves in memory for the life of this object only.
+   */
+  reserve?: (q: number) => Promise<void> | void;
   /** Signature bytes carried by `open_sig_buffer`. Default "auto": as many as fit. */
   firstChunkSize?: number | "auto";
   chunkSize?: number;
@@ -104,7 +118,7 @@ export interface SignedAction {
   q: number;
   vault: PublicKey;
   /** the vault's key generation the message was bound to */
-  rotations: number;
+  generation: number;
   action: Action;
   actionBytes: Uint8Array;
   message: Uint8Array;
@@ -124,9 +138,11 @@ export class VaultSigner {
   readonly key: LmsPrivateKey;
   readonly payer: Signer;
   readonly vault: PublicKey;
+  readonly lane: number;
+  readonly lanes: number;
   private readonly opts: VaultSignerOptions;
-  /** Leaves this process has already signed with; never reused even before the chain confirms. */
-  private localNextQ = 0;
+  /** Leaves this object has already signed with; never reused even before the chain confirms. */
+  private readonly reserved = new Set<number>();
 
   constructor(opts: VaultSignerOptions) {
     this.opts = opts;
@@ -135,6 +151,10 @@ export class VaultSigner {
     this.key = opts.key;
     this.payer = opts.payer;
     this.vault = opts.vault ?? findVaultPdaForKey(this.programId, opts.key.publicKey).address;
+    this.lanes = opts.lanes ?? 1;
+    this.lane = opts.lane ?? 0;
+    if (!Number.isInteger(this.lanes) || this.lanes < 1) throw new RangeError(`lanes must be >= 1, got ${this.lanes}`);
+    if (!Number.isInteger(this.lane) || this.lane < 0 || this.lane >= this.lanes) throw new RangeError(`lane must be in 0..${this.lanes - 1}, got ${this.lane}`);
   }
 
   /** `create_vault` for this signer's key. One transaction. */
@@ -154,35 +174,46 @@ export class VaultSigner {
     return v;
   }
 
-  /** The smallest leaf this signer will use next: max(chain next_q, leaves already signed here). */
-  async nextQ(): Promise<number> {
+  /**
+   * The leaf this signer will use next: the smallest free leaf of its lane that is neither spent
+   * on chain nor reserved here. `undefined` once the lane is exhausted.
+   */
+  async nextQ(): Promise<number | undefined> {
     const v = await this.fetchVault();
-    return Math.max(v.nextQ, this.localNextQ);
+    return firstFreeLeaf(v, this.lane, this.lanes, (q) => this.reserved.has(q));
   }
 
   /**
-   * Sign `request` with leaf `q` (default: next usable) and bind it to this vault and its current
-   * key generation (`rotations`, read from the account). Pure: nothing is sent. The returned
-   * signature verifies under `key.publicKey` over `message`.
+   * Sign `request` with leaf `q` (default: the lane's next free leaf) and bind it to this vault
+   * and its current key generation (read from the account). The leaf is passed to `reserve`
+   * before anything is signed. Pure otherwise: nothing is sent. The returned signature verifies
+   * under `key.publicKey` over `message`.
    */
   async sign(request: ActionRequest, opts: { q?: number; C?: Uint8Array } = {}): Promise<SignedAction> {
     const vault = await this.fetchVault();
-    const q = opts.q ?? Math.max(vault.nextQ, this.localNextQ);
-    const h = lmsParams(parseLmsPublicKey(vault.lmsPubkey).lmsType).h;
-    if (q < vault.nextQ) throw new Error(`q=${q} is below the vault's next_q=${vault.nextQ}`);
-    if (q >= 2 ** h) throw new Error(`q=${q} is beyond the last leaf of an H${h} key`);
-    if (q === 2 ** h - 1 && request.kind !== "Rotate") {
-      throw new Error("the last leaf may only be spent on Rotate (exhaustion rule); rotate to a fresh key first");
+    const total = leafCount(vault);
+    const q = opts.q ?? firstFreeLeaf(vault, this.lane, this.lanes, (x) => this.reserved.has(x));
+    if (q === undefined) throw new Error(`no free leaf left in lane ${this.lane}/${this.lanes}; rotate to a fresh key`);
+    if (!Number.isInteger(q) || q < 0 || q >= total) throw new Error(`q=${q} is beyond the last leaf of a ${total}-leaf key`);
+    if (isLeafUsed(vault, q)) throw new Error(`q=${q} is already spent on chain`);
+    if (this.reserved.has(q)) throw new Error(`q=${q} was already signed by this signer`);
+    if (freeLeaves(vault) <= 1 && request.kind !== "Rotate") {
+      throw new Error("the last free leaf may only be spent on Rotate (exhaustion rule); rotate to a fresh key first");
     }
-    if (request.kind === "Rotate" && hasUsedKey(vault.usedKeys, request.newLmsPubkey)) {
-      throw new Error("Rotate to a key this vault has used before (the chain would refuse it with KeyReused)");
+    if (request.kind === "Rotate") {
+      if (hasUsedKey(vault, request.newLmsPubkey)) throw new Error("Rotate to a key this vault has used before (the chain would refuse it with KeyReused)");
+      for (let i = 0; i < 8; i++) {
+        if (request.newLmsPubkey[i] !== vault.lmsPubkey[i]) throw new Error("Rotate must keep the vault's LMS/LM-OTS typecodes (RotateTypeMismatch)");
+      }
     }
     const action = await this.withExpiry(request);
     const actionBytes = encodeAction(action);
-    const message = vaultMessage(this.vault, vault.rotations, actionBytes);
+    const message = vaultMessage(this.vault, vault.generation, actionBytes, this.programId);
+    // Reserve first: if persisting fails, no signature for this leaf ever exists.
+    await this.opts.reserve?.(q);
+    this.reserved.add(q);
     const lmsSignature = this.key.sign(q, message, opts.C ? { C: opts.C } : {});
-    this.localNextQ = Math.max(this.localNextQ, q + 1);
-    return { q, vault: this.vault, rotations: vault.rotations, action, actionBytes, message, lmsSignature };
+    return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature };
   }
 
   /** Sign, stage and execute. Returns the signatures of every transaction, in order. */
@@ -267,8 +298,8 @@ export class RegistryClient {
   }
 
   /**
-   * `rotate_pq`: sign sha256("pq-registry/v1" || owner || u32le(generation) || new_pq_pubkey) with
-   * the committed LMS key at leaf q >= next_q, stage it, rotate. Anyone can pay; the owner's
+   * `rotate_pq`: sign sha256("pq-registry/v1" || program_id || owner || u32le(generation) ||
+   * new_pq_pubkey) with the committed LMS key at leaf q >= next_q, stage it, rotate. Anyone can pay; the owner's
    * classical key is not needed. A key that was committed before is refused up front.
    */
   async rotatePq(
@@ -284,10 +315,10 @@ export class RegistryClient {
     }
     const q = opts.q ?? current.nextQ;
     if (q < current.nextQ) throw new Error(`q=${q} is below the commitment's next_q=${current.nextQ}`);
-    if (hasUsedKey(current.usedKeys, newPqPubkey)) {
+    if (hasUsedKey(current, newPqPubkey)) {
       throw new Error("rotation to a key that was committed before (the chain would refuse it with KeyReused)");
     }
-    const message = registryMessage(owner, current.generation, newPqPubkey);
+    const message = registryMessage(owner, current.generation, newPqPubkey, this.programId);
     const lmsSignature = committedKey.sign(q, message);
     const nonce = opts.nonce ?? randomNonce();
     const staged = buildStagedRotatePq({

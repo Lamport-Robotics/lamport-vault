@@ -5,7 +5,7 @@ use anchor_lang::prelude::*;
 /// Every way an instruction can fail that is specific to this program.
 #[error_code]
 pub enum VaultError {
-    #[msg("LMS typecode must be 5..=8 (H5, H10, H15, H20)")]
+    #[msg("LMS typecode must be 5..=7 (H5, H10, H15)")]
     InvalidLmsType, // 6000
     #[msg("LM-OTS typecode must be 3 (SHA256_N32_W4)")]
     InvalidLmotsType, // 6001
@@ -29,13 +29,13 @@ pub enum VaultError {
     SignatureMalformed, // 6010
     #[msg("leaf index q is outside the tree")]
     LeafOutOfRange, // 6011
-    #[msg("leaf index q is below next_q: already used")]
+    #[msg("leaf q is already spent")]
     LeafAlreadyUsed, // 6012
     #[msg("LMS signature does not verify")]
     InvalidSignature, // 6013
     #[msg("action expired: expiry_slot is in the past")]
     ActionExpired, // 6014
-    #[msg("the last leaf may only be spent on Rotate")]
+    #[msg("the last free leaf may only be spent on Rotate")]
     LastLeafReservedForRotate, // 6015
     #[msg("transfer would take the vault below its rent-exempt minimum")]
     InsufficientFunds, // 6016
@@ -61,6 +61,8 @@ pub enum VaultError {
     Overflow, // 6026
     #[msg("vault_id must equal sha256(lms_pubkey)")]
     VaultIdMismatch, // 6027
-    #[msg("vault has used 256 keys; Close it and create a new one")]
-    TooManyRotations, // 6028
+    #[msg("key history is full; Close the vault and create a new one")]
+    HistoryFull, // 6028
+    #[msg("Rotate must keep the vault's LMS and LM-OTS typecodes")]
+    RotateTypeMismatch, // 6029
 }

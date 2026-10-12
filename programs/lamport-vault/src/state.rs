@@ -1,20 +1,24 @@
 //! Account layouts.
 
 use anchor_lang::prelude::*;
-use lamport_lms::LMS_PUBLIC_KEY_LEN;
+use lamport_lms::{LmsType, LMS_PUBLIC_KEY_LEN};
 
 use crate::error::VaultError;
 
 /// Upper bound on a Borsh-encoded [`crate::Action`].
 pub const MAX_ACTION_LEN: usize = 256;
 
-/// Upper bound on `Vault::used_keys`: the initial key plus 255 rotations. A
-/// vault that has used 256 keys must `Close` and be recreated.
-pub const MAX_USED_KEYS: usize = 256;
+/// Length of a `used_keys` entry: `sha256(lms_pubkey)[0..16]`.
+pub const KEY_HASH_LEN: usize = 16;
 
 /// The vault. PDA `["vault", vault_id]`, `vault_id = sha256(initial lms_pubkey)`.
 ///
 /// The address never changes: deposits keep working across key rotations.
+///
+/// Leaf state is a bitmap, not a counter: any unspent leaf may be used in any
+/// order, so several signers can own disjoint lanes of one key. The tree
+/// height is fixed at creation (the bitmap is sized for it); `Rotate` must keep
+/// the parameter set.
 #[account]
 #[derive(Debug)]
 pub struct Vault {
@@ -26,39 +30,70 @@ pub struct Vault {
     pub vault_id: [u8; 32],
     /// Current LMS public key: `u32 lms_type || u32 lmots_type || I[16] || T[1][32]`.
     pub lms_pubkey: [u8; 56],
-    /// Next usable leaf. Signatures with `q < next_q` are rejected.
-    pub next_q: u32,
-    /// How many times the key was replaced.
-    pub rotations: u32,
+    /// Leaves spent under the current key (bits set in `used`).
+    pub spent: u32,
+    /// Key generation: how many times the key was replaced. Part of the signed message.
+    pub generation: u32,
     /// Slot of creation.
     pub created_slot: u64,
-    /// `sha256` of every LMS public key this vault has ever had, oldest first
-    /// (`used_keys[0] == vault_id`). `Rotate` refuses any key listed here, so a
-    /// key whose leaves were spent can never come back with `next_q = 0`.
-    pub used_keys: Vec<[u8; 32]>,
+    /// Used-leaf bitmap of the current key, `2^h / 8` bytes; bit `q` (byte
+    /// `q / 8`, bit `q % 8`) set means leaf `q` is spent. Zeroed on `Rotate`.
+    pub used: Vec<u8>,
+    /// `sha256(lms_pubkey)[0..16]` of every **past** key, oldest first. `Rotate`
+    /// refuses any key listed here and the current one; at most
+    /// [`crate::MAX_KEY_HISTORY`] entries, after which the vault must `Close`.
+    pub used_keys: Vec<[u8; KEY_HASH_LEN]>,
 }
 
 impl Vault {
     /// Current layout version.
     pub const VERSION: u8 = 2;
-    /// Bytes before the `used_keys` entries: discriminator, fixed fields and the
-    /// `Vec` length prefix.
-    pub const FIXED: usize = 8 + 1 + 1 + 32 + LMS_PUBLIC_KEY_LEN + 4 + 4 + 8 + 4;
-    /// Account size, including the discriminator, with `n_keys` entries in `used_keys`.
-    pub const fn space(n_keys: usize) -> usize {
-        Self::FIXED + 32 * n_keys
+    /// Bytes before the two vectors: discriminator and fixed fields.
+    pub const FIXED: usize = 8 + 1 + 1 + 32 + LMS_PUBLIC_KEY_LEN + 4 + 4 + 8;
+
+    /// Bitmap length for a tree of `lms_type`: `2^h / 8` bytes (H5 4, H10 128, H15 4096).
+    pub const fn bitmap_len(lms_type: LmsType) -> usize {
+        (lms_type.leaf_count() as usize) / 8
     }
-    /// Size of a fresh vault (one used key: the initial one).
-    pub const SPACE: usize = Self::space(1);
+
+    /// Account size including the discriminator, for a tree of `lms_type` with
+    /// `history` past keys recorded.
+    pub const fn space(lms_type: LmsType, history: usize) -> usize {
+        Self::FIXED + (4 + Self::bitmap_len(lms_type)) + (4 + KEY_HASH_LEN * history)
+    }
 
     /// The `used_keys` entry for an LMS public key.
-    pub fn key_hash(lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> [u8; 32] {
-        solana_sha256_hasher::hashv(&[lms_pubkey]).to_bytes()
+    pub fn key_hash(lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> [u8; KEY_HASH_LEN] {
+        let full = solana_sha256_hasher::hashv(&[lms_pubkey]).to_bytes();
+        let mut out = [0u8; KEY_HASH_LEN];
+        out.copy_from_slice(&full[..KEY_HASH_LEN]);
+        out
     }
 
-    /// True if `lms_pubkey` has ever been this vault's key (including now).
-    pub fn has_used(&self, lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> bool {
-        self.used_keys.contains(&Self::key_hash(lms_pubkey))
+    /// True if `lms_pubkey` is the current key or any past one.
+    pub fn has_used_key(&self, lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> bool {
+        *lms_pubkey == self.lms_pubkey || self.used_keys.contains(&Self::key_hash(lms_pubkey))
+    }
+
+    /// Whether leaf `q` is spent. Out-of-range leaves count as spent.
+    pub fn leaf_used(&self, q: u32) -> bool {
+        match self.used.get((q / 8) as usize) {
+            Some(byte) => byte & (1u8 << (q % 8)) != 0,
+            None => true,
+        }
+    }
+
+    /// Marks leaf `q` spent. Errors if it already is or lies outside the bitmap.
+    pub fn spend_leaf(&mut self, q: u32) -> Result<()> {
+        let byte = self
+            .used
+            .get_mut((q / 8) as usize)
+            .ok_or(VaultError::LeafOutOfRange)?;
+        let mask = 1u8 << (q % 8);
+        require!(*byte & mask == 0, VaultError::LeafAlreadyUsed);
+        *byte |= mask;
+        self.spent = self.spent.checked_add(1).ok_or(VaultError::Overflow)?;
+        Ok(())
     }
 }
 

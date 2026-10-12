@@ -1,8 +1,10 @@
-import { toHex } from "@lamport-robotics/lms";
+import { fromHex, LMS_SHA256_M32_H10, LMS_SHA256_M32_H15, LMS_SHA256_M32_H5, toHex } from "@lamport-robotics/lms";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
 import {
   COMMITMENT_ACCOUNT_SIZE,
   type CommitmentAccount,
+  commitmentAccountSize,
   decodeCommitment,
   decodePqSigBuffer,
   decodeSigBuffer,
@@ -11,11 +13,18 @@ import {
   encodePqSigBuffer,
   encodeSigBuffer,
   encodeVault,
+  firstFreeLeaf,
+  freeLeaves,
+  hasUsedKey,
+  isLeafUsed,
+  KEY_HASH_LEN,
+  leafCount,
   pqSigBufferSize,
   SCHEME_LMS_SHA256,
   type SigBufferAccount,
   sigBufferSize,
-  VAULT_ACCOUNT_SIZE,
+  usedKeyHash,
+  vaultAccountSize,
   type VaultAccount,
 } from "../src/accounts.ts";
 import { encodeAction } from "../src/action.ts";
@@ -23,34 +32,101 @@ import { ACCOUNT } from "../src/discriminator.ts";
 import { vaultId } from "../src/pda.ts";
 import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22 } from "./fixtures.ts";
 
+/** A past key that only appears hashed (same inputs as scripts/write-kat.ts). */
+const PAST_PUBKEY = fromHex("0000000500000003" + "aa".repeat(16) + "bb".repeat(32));
+
 describe("Vault account", () => {
   const v: VaultAccount = {
-    version: 1,
+    version: 2,
     bump: 254,
     vaultId: vaultId(KAT_H5_PUBKEY),
     lmsPubkey: KAT_H5_PUBKEY,
-    nextQ: 7,
-    rotations: 2,
+    spent: 6,
+    generation: 2,
     createdSlot: 0x1122334455n,
+    used: new Uint8Array([0x07, 0x00, 0x40, 0x81]),
+    usedKeys: [usedKeyHash(KAT_H10_PUBKEY), usedKeyHash(PAST_PUBKEY)],
   };
 
-  it("is disc || version || bump || vault_id || lms_pubkey || next_q_le || rotations_le || created_slot_le", () => {
+  it("is disc || version || bump || vault_id || lms_pubkey || spent || generation || created_slot || vec used || vec used_keys", () => {
     const bytes = encodeVault(v);
-    expect(bytes.length).toBe(VAULT_ACCOUNT_SIZE);
-    expect(VAULT_ACCOUNT_SIZE).toBe(114);
-    expect(toHex(bytes)).toBe(toHex(ACCOUNT.vault) + "01" + "fe" + toHex(v.vaultId) + toHex(KAT_H5_PUBKEY) + "07000000" + "02000000" + "5544332211000000");
+    expect(bytes.length).toBe(vaultAccountSize(LMS_SHA256_M32_H5, 2));
+    expect(vaultAccountSize(LMS_SHA256_M32_H5)).toBe(126);
+    expect(vaultAccountSize(LMS_SHA256_M32_H10)).toBe(250);
+    expect(vaultAccountSize(LMS_SHA256_M32_H15)).toBe(4218);
+    expect(() => vaultAccountSize(8)).toThrow(/not accepted/);
+    expect(toHex(bytes)).toBe(
+      toHex(ACCOUNT.vault) +
+        "02" +
+        "fe" +
+        toHex(v.vaultId) +
+        toHex(KAT_H5_PUBKEY) +
+        "06000000" +
+        "02000000" +
+        "5544332211000000" +
+        "04000000" +
+        "07004081" +
+        "02000000" +
+        toHex(usedKeyHash(KAT_H10_PUBKEY)) +
+        toHex(usedKeyHash(PAST_PUBKEY)),
+    );
     const back = decodeVault(bytes);
-    expect(back.nextQ).toBe(7);
-    expect(back.rotations).toBe(2);
+    expect(back.spent).toBe(6);
+    expect(back.generation).toBe(2);
     expect(back.createdSlot).toBe(0x1122334455n);
     expect(toHex(back.lmsPubkey)).toBe(toHex(KAT_H5_PUBKEY));
+    expect(toHex(back.used)).toBe("07004081");
+    expect(back.usedKeys.map(toHex)).toEqual(v.usedKeys.map(toHex));
   });
 
-  it("rejects a wrong discriminator and short data", () => {
+  it("used_keys entries are sha256(pubkey)[0..16]", () => {
+    expect(usedKeyHash(KAT_H5_PUBKEY).length).toBe(KEY_HASH_LEN);
+    expect(toHex(usedKeyHash(KAT_H5_PUBKEY))).toBe(toHex(sha256(KAT_H5_PUBKEY).subarray(0, 16)));
+    expect(toHex(usedKeyHash(KAT_H5_PUBKEY))).toBe(toHex(vaultId(KAT_H5_PUBKEY).subarray(0, 16)));
+    expect(() => usedKeyHash(KAT_H5_PUBKEY.subarray(1))).toThrow();
+  });
+
+  it("hasUsedKey covers the current key and every past one", () => {
+    expect(hasUsedKey(v, KAT_H5_PUBKEY)).toBe(true);
+    expect(hasUsedKey(v, KAT_H10_PUBKEY)).toBe(true);
+    expect(hasUsedKey(v, PAST_PUBKEY)).toBe(true);
+    const fresh = new Uint8Array(KAT_H5_PUBKEY);
+    fresh[55]! ^= 1;
+    expect(hasUsedKey(v, fresh)).toBe(false);
+  });
+
+  it("reads the bitmap: isLeafUsed, freeLeaves, firstFreeLeaf with lanes", () => {
+    expect(leafCount(v)).toBe(32);
+    expect(freeLeaves(v)).toBe(26);
+    expect([0, 1, 2, 22, 24, 31].every((q) => isLeafUsed(v, q))).toBe(true);
+    expect([3, 4, 7, 8, 23, 30].some((q) => isLeafUsed(v, q))).toBe(false);
+    expect(isLeafUsed(v, 32)).toBe(true); // outside the tree counts as spent
+    expect(() => isLeafUsed(v, -1)).toThrow(RangeError);
+    expect(firstFreeLeaf(v)).toBe(3);
+    expect(firstFreeLeaf(v, 0, 2)).toBe(4);
+    expect(firstFreeLeaf(v, 1, 2)).toBe(3);
+    expect(firstFreeLeaf(v, 0, 2, (q) => q < 10)).toBe(10);
+    expect(firstFreeLeaf(v, 2, 3)).toBe(5);
+    const full = { used: new Uint8Array([0xff, 0xff, 0xff, 0xff]) };
+    expect(firstFreeLeaf(full)).toBeUndefined();
+    expect(() => firstFreeLeaf(v, 2, 2)).toThrow(RangeError);
+    expect(() => firstFreeLeaf(v, 0, 0)).toThrow(RangeError);
+  });
+
+  it("rejects a wrong discriminator, another layout version, a wrong bitmap size, trailing bytes and short data", () => {
     const bytes = encodeVault(v);
     bytes[0]! ^= 1;
     expect(() => decodeVault(bytes)).toThrow(/discriminator/);
+    const v1 = encodeVault(v);
+    v1[8] = 1;
+    expect(() => decodeVault(v1)).toThrow(/version 1/);
     expect(() => decodeVault(encodeVault(v).subarray(0, 100))).toThrow();
+    expect(() => decodeVault(new Uint8Array([...encodeVault(v), 0]))).toThrow(/trailing/);
+    expect(() => encodeVault({ ...v, used: new Uint8Array(128) })).toThrow(/bitmap/);
+    const h10 = encodeVault({ ...v, lmsPubkey: KAT_H10_PUBKEY, used: new Uint8Array(128) });
+    h10.set(KAT_H5_PUBKEY, 10 + 32); // now claims H5 with a 128-byte bitmap
+    expect(() => decodeVault(h10)).toThrow(/bitmap/);
+    expect(() => encodeVault({ ...v, usedKeys: new Array(129).fill(usedKeyHash(KAT_H10_PUBKEY)) })).toThrow(/at most 128/);
   });
 });
 
@@ -84,24 +160,47 @@ describe("SigBuffer account", () => {
 
 describe("Commitment account", () => {
   const c: CommitmentAccount = {
-    version: 1,
+    version: 2,
     bump: 255,
     owner: PK_11,
     scheme: SCHEME_LMS_SHA256,
     pqPubkey: KAT_H10_PUBKEY,
     nextQ: 3,
+    generation: 1,
     createdSlot: 100n,
     updatedSlot: 200n,
+    usedKeys: [usedKeyHash(KAT_H5_PUBKEY)],
   };
 
   it("round-trips and has the documented size", () => {
     const bytes = encodeCommitment(c);
-    expect(bytes.length).toBe(COMMITMENT_ACCOUNT_SIZE);
-    expect(COMMITMENT_ACCOUNT_SIZE).toBe(119);
-    expect(toHex(bytes)).toBe(toHex(ACCOUNT.commitment) + "01ff" + "11".repeat(32) + "01" + toHex(KAT_H10_PUBKEY) + "03000000" + "6400000000000000" + "c800000000000000");
+    expect(bytes.length).toBe(commitmentAccountSize(1));
+    expect(COMMITMENT_ACCOUNT_SIZE).toBe(127);
+    expect(toHex(bytes)).toBe(
+      toHex(ACCOUNT.commitment) +
+        "02ff" +
+        "11".repeat(32) +
+        "01" +
+        toHex(KAT_H10_PUBKEY) +
+        "03000000" +
+        "01000000" +
+        "6400000000000000" +
+        "c800000000000000" +
+        "01000000" +
+        toHex(usedKeyHash(KAT_H5_PUBKEY)),
+    );
     const back = decodeCommitment(bytes);
     expect(back.owner.equals(PK_11)).toBe(true);
+    expect(back.generation).toBe(1);
     expect(back.updatedSlot).toBe(200n);
+    expect(hasUsedKey(back, KAT_H5_PUBKEY)).toBe(true);
+    expect(hasUsedKey(back, KAT_H10_PUBKEY)).toBe(true);
+    expect(hasUsedKey(back, PAST_PUBKEY)).toBe(false);
+    const v1 = encodeCommitment(c);
+    v1[8] = 1;
+    expect(() => decodeCommitment(v1)).toThrow(/version 1/);
+    expect(() => decodeCommitment(new Uint8Array([...bytes, 0]))).toThrow(/trailing/);
+    expect(() => encodeCommitment({ ...c, usedKeys: new Array(33).fill(usedKeyHash(KAT_H5_PUBKEY)) })).toThrow(/at most 32/);
   });
 });
 

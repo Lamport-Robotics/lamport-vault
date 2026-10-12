@@ -18,6 +18,9 @@ no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build"]
 anchor-debug = []
+# Test build: MAX_KEY_HISTORY = 2 so the HistoryFull path is reachable in a test
+# (`anchor test -- --features small-history`). Never deploy with it.
+small-history = []
 custom-heap = []
 custom-panic = []
 

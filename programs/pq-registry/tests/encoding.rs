@@ -4,7 +4,7 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
-use pq_registry::{signed_message, Commitment, PqSigBuffer, PQ_SEED, PQ_SIG_SEED};
+use pq_registry::{signed_message, Commitment, PqSigBuffer, KEY_HASH_LEN, MESSAGE_VERSION, PQ_SEED, PQ_SIG_SEED};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -20,6 +20,9 @@ fn pk(s: &Value) -> Pubkey {
     Pubkey::from_str(s.as_str().unwrap_or_else(|| panic!("missing pubkey field"))).unwrap()
 }
 fn u64s(s: &Value) -> u64 {
+    s.as_str().unwrap().parse().unwrap()
+}
+fn u32s(s: &Value) -> u32 {
     s.as_str().unwrap().parse().unwrap()
 }
 
@@ -73,11 +76,13 @@ fn pdas_and_message() {
 
     let m = &d["messages"];
     assert_eq!(pq_registry::MESSAGE_DOMAIN.to_vec(), hx(&m["registry_prefix_hex"]));
-    let new_key: [u8; 56] = hx(&m["registry_message_inputs"]["new_pq_pubkey_hex"]).try_into().unwrap();
-    assert_eq!(
-        signed_message(&pk(&m["registry_message_inputs"]["owner"]), &new_key).to_vec(),
-        hx(&m["registry_message_hex"])
-    );
+    assert_eq!(m["message_version"].as_u64().unwrap(), MESSAGE_VERSION as u64);
+    let inp = &m["registry_message_inputs"];
+    assert_eq!(pk(&inp["program_id"]), pq_registry::ID);
+    let new_key: [u8; 56] = hx(&inp["new_pq_pubkey_hex"]).try_into().unwrap();
+    let generation = u32s(&inp["generation"]);
+    assert_eq!(signed_message(&pk(&inp["owner"]), generation, &new_key).to_vec(), hx(&m["registry_message_hex"]));
+    assert_ne!(signed_message(&pk(&inp["owner"]), generation + 1, &new_key).to_vec(), hx(&m["registry_message_hex"]));
 }
 
 #[test]
@@ -85,7 +90,13 @@ fn account_layouts() {
     let d = v();
     let h10: [u8; 56] = hx(&d["inputs"]["h10_pubkey_hex"]).try_into().unwrap();
     let c_hex = hx(&d["accounts"]["commitment_hex"]);
-    // disc(8) version bump owner(32) scheme key(56) next_q(4) created(8) updated(8)
+    // disc(8) version bump owner(32) scheme key(56) next_q(4) generation(4) created(8) updated(8)
+    // || vec<[u8;16]> used_keys
+    assert_eq!(c_hex[8], Commitment::VERSION);
+    let hist_len = u32::from_le_bytes(c_hex[123..127].try_into().unwrap()) as usize;
+    let used_keys: Vec<[u8; KEY_HASH_LEN]> =
+        (0..hist_len).map(|i| c_hex[127 + 16 * i..127 + 16 * (i + 1)].try_into().unwrap()).collect();
+    assert_eq!(c_hex.len(), 127 + 16 * hist_len, "trailing bytes in commitment vector");
     let c = Commitment {
         version: c_hex[8],
         bump: c_hex[9],
@@ -93,13 +104,21 @@ fn account_layouts() {
         scheme: c_hex[42],
         pq_pubkey: h10,
         next_q: u32::from_le_bytes(c_hex[99..103].try_into().unwrap()),
-        created_slot: u64::from_le_bytes(c_hex[103..111].try_into().unwrap()),
-        updated_slot: u64::from_le_bytes(c_hex[111..119].try_into().unwrap()),
+        generation: u32::from_le_bytes(c_hex[103..107].try_into().unwrap()),
+        created_slot: u64::from_le_bytes(c_hex[107..115].try_into().unwrap()),
+        updated_slot: u64::from_le_bytes(c_hex[115..123].try_into().unwrap()),
+        used_keys,
     };
+    assert_eq!(c.generation as usize, hist_len);
+    let h5: [u8; 56] = hx(&d["inputs"]["h5_pubkey_hex"]).try_into().unwrap();
+    assert!(c.has_used_key(&h5), "the H5 key is in the vector's history");
     let mut out = Vec::new();
     c.try_serialize(&mut out).unwrap();
     assert_eq!(out, c_hex);
-    assert_eq!(out.len(), Commitment::SPACE);
+    assert_eq!(out.len(), Commitment::space(hist_len));
+    let sizes = &d["accounts"]["sizes"];
+    assert_eq!(sizes["commitment"].as_u64().unwrap() as usize, Commitment::SPACE);
+    assert_eq!(sizes["commitment_max_key_history"].as_u64().unwrap(), pq_registry::MAX_KEY_HISTORY as u64);
 
     let b_hex = hx(&d["accounts"]["pq_sig_buffer_hex"]);
     let h5: [u8; 56] = hx(&d["inputs"]["h5_pubkey_hex"]).try_into().unwrap();

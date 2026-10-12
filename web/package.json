@@ -11,6 +11,7 @@
   "dependencies": {
     "@lamport-robotics/lms": "file:../sdk/packages/lms",
     "@lamport-robotics/vault": "file:../sdk/packages/vault",
+    "@noble/hashes": "^1.8.0",
     "@solana-mobile/wallet-standard-mobile": "^0.7.0",
     "@solana/web3.js": "^1.95.8",
     "@wallet-standard/app": "^1.1.0",

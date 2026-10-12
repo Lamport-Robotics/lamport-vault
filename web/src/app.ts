@@ -8,7 +8,8 @@ import { connectStandard, listWallets, localWallet, onWalletsChange, remember, r
 import * as qr from "./qr.ts";
 import { holdings, destinationTokenAccount, toBase, type Holding } from "./tokens.ts";
 import { tape } from "./tape.ts";
-import { openJournal } from "./journal.ts";
+import { openJournal, keyFingerprint } from "./journal.ts";
+import { equalBytes } from "@lamport-robotics/lms";
 
 // ── state ──
 let wallet: Wallet | null = null;
@@ -96,7 +97,9 @@ void load();
 
 async function load() {
   const h = location.hash.slice(1);
-  vaultAddr = isPubkey(h) ? new PublicKey(h) : null;
+  const next = isPubkey(h) ? new PublicKey(h) : null;
+  if (!next || !vaultAddr || !next.equals(vaultAddr)) hotKey = null;   // a key loaded for one vault never outlives a switch
+  vaultAddr = next;
   vault = null; vaultLamports = 0;
   if (vaultAddr) {
     const info = await rpc.getAccountInfo(vaultAddr, "confirmed").catch(() => null);
@@ -342,7 +345,9 @@ function coldFlow(scope: Scope) {
     try {
       const slot = await rpc.getSlot("confirmed");
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
-      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, issuedSlot: String(slot), expirySlot: String(slot + 9000), action: form.read() };
+      const act = form.read();
+      if (act.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
+      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
       ($("#reqtxt", s) as HTMLTextAreaElement).value = JSON.stringify(req); $("#reqout", s).classList.remove("hidden");
       $("#reqvalid", s).textContent = `Valid until about ${slotToDate(slot + 9000, slot).toLocaleTimeString()} (slot ${slot + 9000}).`;
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
@@ -393,7 +398,9 @@ function hotFlow(scope: Scope) {
         if (!found) throw new Error("These words do not open this vault.");
         hotKey = found.key;
       }
+      if (!equalBytes(hotKey.publicKey, v.lmsPubkey)) { hotKey = null; throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
       const a = form.read();
+      if (a.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
       const slot = await rpc.getSlot("confirmed");
       const until = slotToDate(slot + 1500, slot);
       if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.`))) return;
@@ -401,13 +408,13 @@ function hotFlow(scope: Scope) {
       // never sign the same one-time key twice, even if the chain has not seen the first signature yet
       const journal = await openJournal();
       if (!journal) throw new Error("This browser gives no durable storage for the key journal; signing here is not safe.");
-      const jk = `${vaultAddr!.toBase58()}:${v.generation}`;
-      const rec = journal.get(jk);
+      const jk = keyFingerprint(v.lmsPubkey);
+      const rec = await journal.get(jk);
       const minQ = rec ? rec.maxQ + 1 : 0;
       const q = firstFreeLeaf(v, 0, 1, (x) => x < minQ); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const leaves = 2 ** lmsParams(parseLmsPublicKey(v.lmsPubkey).lmsType).h;
       if (leaves - v.spent <= 1 && action.kind !== "Rotate") throw new Error("Last one-time key: only a rotation is allowed now.");
-      if (!(await journal.reserve(jk, q))) throw new Error(`One-time key ${q} is already recorded as used in this browser.`);
+      if (!(await journal.reserve(jk, q, { vault: vaultAddr!.toBase58(), generation: v.generation }))) throw new Error(`One-time key ${q} is already recorded as used in this browser.`);
       const signature = hotKey.sign(q, vaultMessage(vaultAddr!, v.generation, encodeAction(action)));
       await stageAndExecute(action, signature, q, $("#steps", s), btn);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }

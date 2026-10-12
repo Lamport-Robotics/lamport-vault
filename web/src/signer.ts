@@ -10,7 +10,7 @@ import { LAMPORT_VAULT_PROGRAM_ID } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
-import { openJournal } from "./journal.ts";
+import { openJournal, keyFingerprint } from "./journal.ts";
 
 const app = $("#app");
 app.className = "shell";
@@ -82,11 +82,11 @@ $("#sign").addEventListener("click", async () => {
     // which leaves this signer has used; it advances q past anything it has already signed.
     const journal = await openJournal();
     if (!journal) throw new Error("this browser gives the signer no durable storage, so it cannot remember which one-time keys it used; open the file in Chrome or Firefox, or use a hardware signer");
-    const jk = `${req.vault}:${req.generation ?? 0}`;
-    const rec = journal.get(jk);
+    const jk = keyFingerprint(pub);
+    const rec = await journal.get(jk);
     const q = Math.max(req.nextQ, rec ? rec.maxQ + 1 : 0);
     if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}, but this signer already used it; signing with key ${q} instead`);
-    if (!(await journal.reserve(jk, q))) throw new Error(`key ${q} is already recorded as used by this signer`);
+    if (!(await journal.reserve(jk, q, { vault: req.vault, generation: req.generation ?? 0 }))) throw new Error(`key ${q} is already recorded as used by this signer`);
     const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
     const action = toAction(req);

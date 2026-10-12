@@ -294,4 +294,30 @@ export async function expectError(p: Promise<unknown>, code: string): Promise<vo
   expect(failed, `expected ${code}, but the transaction succeeded`).to.eq(true);
 }
 
+/**
+ * The TypeScript SDK (`sdk/`), built and loaded from its ESM `dist` (Node 22.12+ `require(esm)`).
+ * `tsc -b` is incremental, so this is instant when the build is current. Untyped on purpose:
+ * the test asserts behaviour against the chain, not the SDK's types.
+ */
+export function loadSdk(): { vault: any; lms: any } {
+  const sdkDir = path.resolve(__dirname, "..", "sdk");
+  execFileSync("npm", ["run", "build"], { cwd: sdkDir, stdio: "pipe" });
+  return {
+    vault: require(path.join(sdkDir, "packages", "vault", "dist", "index.js")),
+    lms: require(path.join(sdkDir, "packages", "lms", "dist", "index.js")),
+  };
+}
+
+export async function expectRejects(p: Promise<unknown>, re: RegExp): Promise<void> {
+  let failed = false;
+  try {
+    await p;
+  } catch (e) {
+    failed = true;
+    const msg = String((e as Error).message ?? e);
+    expect(msg, `expected an error matching ${re}, got: ${msg}`).to.match(re);
+  }
+  expect(failed, `expected an error matching ${re}, but the promise resolved`).to.eq(true);
+}
+
 export { Keypair, PublicKey, BN };

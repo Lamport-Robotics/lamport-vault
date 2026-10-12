@@ -15,9 +15,11 @@ import {
   consumedUnits,
   currentSlot,
   expectError,
+  expectRejects,
   fund,
   keyHash,
   leafUsed,
+  loadSdk,
   meta,
   provider as makeProvider,
   randomNonce,
@@ -608,5 +610,161 @@ describe("lamport-vault", () => {
     const bufClose = await stage(vaultF, key, 1, Action.close(heir, await FAR()));
     await execute(vaultF, bufClose, [meta(heir, true)]);
     expect(await connection.getAccountInfo(vaultF, "confirmed")).to.eq(null);
+  });
+
+  // Failure-and-recovery scenarios. Each uses its own H5 vault (32 leaves) so the order of the
+  // tests above does not matter to them.
+
+  it("last leaf signed twice", async () => {
+    const keyP = LmsKey.random(LMS_H5);
+    const vaultP = await createVault(keyP);
+    await fund(provider, vaultP, 0.2);
+    for (let q = 0; q <= 30; q++) await spendLeaf(vaultP, keyP, q);
+    expect(await spent(vaultP)).to.eq(31);
+    expect(await isUsed(vaultP, 31)).to.eq(false);
+
+    // The owner signs two different rotations with the last leaf (both over the generation-0
+    // message) before either reaches the chain: a retried UI, two devices, a leaked signature.
+    const keyB = LmsKey.random(LMS_H5);
+    const keyC2 = LmsKey.random(LMS_H5);
+    const toB = await stage(vaultP, keyP, 31, Action.rotate(keyB.pubkey(), await FAR()));
+    const toC = await stage(vaultP, keyP, 31, Action.rotate(keyC2.pubkey(), await FAR()));
+    await execute(vaultP, toB, []);
+    let v = await fetchVault(vaultP);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyB.pubkey());
+    expect(v.generation).to.eq(1);
+    expect(v.spent).to.eq(0);
+    expect(v.used).to.deep.eq(Buffer.alloc(4));
+
+    // The second rotation. Which error fires: the Rotate zeroed the bitmap, so leaf 31 reads as
+    // free again and LeafAlreadyUsed cannot be what stops it. What does is the binding: the
+    // signature was made by key P over the generation-0 message, and the vault now verifies
+    // under key B over the generation-1 message, so it fails InvalidSignature. Nothing changes.
+    await expectError(execute(vaultP, toC, []), "InvalidSignature");
+    v = await fetchVault(vaultP);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyB.pubkey());
+    expect(v.generation).to.eq(1);
+    expect(leafUsed(v.used, 31)).to.eq(false);
+    expect(v.usedKeys).to.deep.eq([keyHash(keyP.pubkey())]);
+    // Re-signing it with the retired key over the generation-1 message is no better: wrong key.
+    const toC1 = await stage(vaultP, keyP, 31, Action.rotate(keyC2.pubkey(), await FAR()), { generation: 1 });
+    await expectError(execute(vaultP, toC1, []), "InvalidSignature");
+    expect(await isUsed(vaultP, 31)).to.eq(false);
+    // The leaf really is free under the new key: B rotates to C with q = 31 (no longer the last free leaf).
+    const byB = await stage(vaultP, keyB, 31, Action.rotate(keyC2.pubkey(), await FAR()));
+    await execute(vaultP, byB, []);
+    v = await fetchVault(vaultP);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyC2.pubkey());
+    expect(v.generation).to.eq(2);
+    expect(v.usedKeys).to.deep.eq([keyHash(keyP.pubkey()), keyHash(keyB.pubkey())]);
+  });
+
+  it("rotate signature made, device dies, then resumed", async () => {
+    const keyP = LmsKey.random(LMS_H5);
+    const keyQ = LmsKey.random(LMS_H5);
+    const vaultP = await createVault(keyP);
+    await fund(provider, vaultP, 0.2);
+
+    // Leaf 0: a Rotate is signed and staged, then the device dies before `execute`.
+    const rotate = await stage(vaultP, keyP, 0, Action.rotate(keyQ.pubkey(), await FAR()));
+    // Resumed from the next leaf: a transfer with q = 1 goes through first.
+    await spendLeaf(vaultP, keyP, 1);
+    expect(await spent(vaultP)).to.eq(1);
+    expect(await isUsed(vaultP, 0)).to.eq(false);
+    expect((await fetchVault(vaultP)).generation).to.eq(0);
+
+    // The old Rotate turns up: unexpired, leaf unspent, generation unchanged, so it succeeds.
+    await execute(vaultP, rotate, []);
+    const v = await fetchVault(vaultP);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyQ.pubkey());
+    expect(v.generation).to.eq(1);
+    expect(v.spent).to.eq(0);
+    expect(v.used).to.deep.eq(Buffer.alloc(4));
+    expect(v.usedKeys).to.deep.eq([keyHash(keyP.pubkey())]);
+
+    // Everything signed under the old generation is dead now. By the retired key...
+    const spend = Action.transferSol(recipient.publicKey, 1000, await FAR());
+    const byOldKey = await stage(vaultP, keyP, 2, spend, { generation: 0 });
+    await expectError(execute(vaultP, byOldKey, [meta(recipient.publicKey, true)]), "InvalidSignature");
+    // ...and by the new key over a generation-0 message (a signer that cached the old generation).
+    const byOldGen = await stage(vaultP, keyQ, 2, spend, { generation: 0 });
+    await expectError(execute(vaultP, byOldGen, [meta(recipient.publicKey, true)]), "InvalidSignature");
+    expect(await isUsed(vaultP, 2)).to.eq(false);
+    expect(await spent(vaultP)).to.eq(0);
+    // The new key under generation 1 spends normally, from leaf 0 again.
+    await spendLeaf(vaultP, keyQ, 0);
+    await spendLeaf(vaultP, keyQ, 2);
+    expect(await spent(vaultP)).to.eq(2);
+    expect(await isUsed(vaultP, 1)).to.eq(false); // leaf 1 of the old key means nothing to the new bitmap
+  });
+
+  it("stale signer state", async () => {
+    // The SDK's VaultSigner against the real chain. A signer "restored from an old backup" has
+    // no memory of the leaves another signer spent; it must take the bitmap from the vault.
+    const { vault: sdk, lms } = loadSdk();
+    const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
+    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed" });
+    const live = signer();
+    const created = await live.createVault();
+    const vaultS = new PublicKey(created.vault.toBase58());
+    await fund(provider, vaultS, 0.2);
+    const transfer = { kind: "TransferSol", to: recipient.publicKey, lamports: 1000n };
+    for (let i = 0; i < 4; i++) {
+      const res = await live.execute(transfer);
+      expect(res.q).to.eq(i);
+      expect(res.mode).to.eq("staged");
+    }
+    expect(await spent(vaultS)).to.eq(4);
+    const used = (await fetchVault(vaultS)).used;
+    expect([0, 1, 2, 3, 4].map((q) => leafUsed(used, q))).to.deep.eq([true, true, true, true, false]);
+
+    // Fresh object, same key, nothing remembered: it reads 0..3 as spent and picks 4.
+    const restored = signer();
+    expect(await restored.nextQ()).to.eq(4);
+    await expectRejects(restored.sign(transfer, { q: 2 }), /already spent on chain/);
+    const res = await restored.execute(transfer);
+    expect(res.q).to.eq(4);
+    expect(res.generation).to.eq(0);
+    expect(await isUsed(vaultS, 4)).to.eq(true);
+    expect(await spent(vaultS)).to.eq(5);
+    // Both objects now agree on what comes next, whatever they remember.
+    expect(await restored.nextQ()).to.eq(5);
+    expect(await live.nextQ()).to.eq(5);
+  });
+
+  it("expired rotation", async () => {
+    const keyP = LmsKey.random(LMS_H5);
+    const keyQ = LmsKey.random(LMS_H5);
+    const vaultP = await createVault(keyP);
+    await fund(provider, vaultP, 0.2);
+    const sizeBefore = (await connection.getAccountInfo(vaultP, "confirmed"))!.data.length;
+
+    const expiredRotate = async () => Action.rotate(keyQ.pubkey(), Math.max(0, (await currentSlot(provider)) - 1));
+    const stale = await stage(vaultP, keyP, 0, await expiredRotate());
+    await expectError(execute(vaultP, stale, []), "ActionExpired");
+    let v = await fetchVault(vaultP);
+    expect(leafUsed(v.used, 0)).to.eq(false); // the leaf was not burned
+    expect(v.spent).to.eq(0);
+    expect(v.generation).to.eq(0);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyP.pubkey());
+    expect(v.usedKeys).to.deep.eq([]);
+    expect((await connection.getAccountInfo(vaultP, "confirmed"))!.data.length).to.eq(sizeBefore);
+
+    // The same on the last free leaf, where burning it would strand the vault: still not burned.
+    for (let q = 1; q <= 31; q++) await spendLeaf(vaultP, keyP, q);
+    expect(await spent(vaultP)).to.eq(31);
+    const staleLast = await stage(vaultP, keyP, 0, await expiredRotate());
+    await expectError(execute(vaultP, staleLast, []), "ActionExpired");
+    v = await fetchVault(vaultP);
+    expect(leafUsed(v.used, 0)).to.eq(false);
+    expect(v.spent).to.eq(31);
+    expect(v.generation).to.eq(0);
+    // A fresh, unexpired rotation on that leaf goes through.
+    const fresh = await stage(vaultP, keyP, 0, Action.rotate(keyQ.pubkey(), await FAR()));
+    await execute(vaultP, fresh, []);
+    v = await fetchVault(vaultP);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyQ.pubkey());
+    expect(v.generation).to.eq(1);
+    expect(v.spent).to.eq(0);
   });
 });

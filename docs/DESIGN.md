@@ -228,6 +228,7 @@ Recovery = the 24 words plus the vault's typecodes (public, in the account). A `
 | program upgrade by a compromised authority | authority burned; reproducible build |
 | stolen 24 words | full control: a vault is quantum-safe, not owner-safe. This is what the Pincer1 robot adds on top |
 | the tree runs out | the last free leaf is reserved for `Rotate` |
+| rotate to a key the 24 words cannot reproduce (a wrong or injected target) | the chain cannot tell; the SDK's `VaultSigner` refuses a `Rotate` target that is not index k+1 of its `master` seed (`nextKeyMaterial`) unless the caller opts in with `allowForeignKey: true` |
 | key history runs out | after 128 rotations (32 for a commitment) the account refuses to rotate; the vault can still spend and `Close` |
 
 ## 6. Compute and sizes

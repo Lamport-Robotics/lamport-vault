@@ -9,7 +9,7 @@
  * Both talk to the cluster through the small `Rpc` interface below, which `Connection` satisfies,
  * so tests run against a mock.
  */
-import { LmsPrivateKey } from "@lamport-robotics/lms";
+import { deriveKeyMaterial, deriveLmsInputs, equalBytes, type LmsKeyMaterial, LmsPrivateKey, parseLmsPublicKey, RECOVERY_MAX_INDEX } from "@lamport-robotics/lms";
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   type AccountInfo,
@@ -117,6 +117,14 @@ export interface VaultSignerOptions {
    * default remembers leaves in memory for the life of this object only.
    */
   reserve?: (q: number) => Promise<void> | void;
+  /**
+   * The 64-byte BIP-39 master seed the vault key was derived from (docs/SPEC-DERIVATION.md).
+   * With it a `Rotate` is only signed for the next derived key, index k+1 of the current key
+   * (see {@link nextKeyMaterial}); any other target is "foreign" and needs `allowForeignKey`.
+   * Without it every Rotate target is foreign: a vault rotated to a key the words cannot
+   * reproduce is unrecoverable from the words.
+   */
+  master?: Uint8Array;
   /** Signature bytes carried by `open_sig_buffer`. Default "auto": as many as fit. */
   firstChunkSize?: number | "auto";
   chunkSize?: number;
@@ -165,8 +173,21 @@ export interface DirectExecuteResult extends SignedAction {
 
 export type ExecuteResult = StagedExecuteResult | DirectExecuteResult;
 
+export interface SignOpts {
+  q?: number;
+  /** LM-OTS randomizer C; default random. */
+  C?: Uint8Array;
+  /**
+   * Rotate only: sign for a `newLmsPubkey` that is not the next key derived from the signer's
+   * `master` (or when no `master` is known). Off by default; see {@link VaultSignerOptions.master}.
+   */
+  allowForeignKey?: boolean;
+}
+
 export interface ExecuteOpts extends SendOpts {
   q?: number;
+  /** Rotate only: see {@link SignOpts.allowForeignKey}. */
+  allowForeignKey?: boolean;
   nonce?: bigint;
   closeTokenAccounts?: CloseTokenAccount[];
   /** Overrides the signer's default mode for this call. */
@@ -232,7 +253,7 @@ export class VaultSigner {
    * before anything is signed. Pure otherwise: nothing is sent. The returned signature verifies
    * under `key.publicKey` over `message`.
    */
-  async sign(request: ActionRequest, opts: { q?: number; C?: Uint8Array } = {}): Promise<SignedAction> {
+  async sign(request: ActionRequest, opts: SignOpts = {}): Promise<SignedAction> {
     const vault = await this.fetchVault();
     const total = leafCount(vault);
     const q = opts.q ?? firstFreeLeaf(vault, this.lane, this.lanes, (x) => this.reserved.has(x));
@@ -248,6 +269,7 @@ export class VaultSigner {
       for (let i = 0; i < 8; i++) {
         if (request.newLmsPubkey[i] !== vault.lmsPubkey[i]) throw new Error("Rotate must keep the vault's LMS/LM-OTS typecodes (RotateTypeMismatch)");
       }
+      if (!opts.allowForeignKey) await this.checkRotateTarget(vault, request.newLmsPubkey);
     }
     const action = await this.withExpiry(request);
     const actionBytes = encodeAction(action);
@@ -257,6 +279,28 @@ export class VaultSigner {
     this.reserved.add(q);
     const lmsSignature = this.key.sign(q, message, opts.C ? { C: opts.C } : {});
     return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature };
+  }
+
+  /**
+   * Foreign-key guard: a Rotate target must be the public key of `nextKeyMaterial(master, vault)`,
+   * i.e. derived from the signer's words at index k+1. The full tree is built (H10: a fraction
+   * of a second) so a key with the right `I` but a wrong root is refused too: rotating to it
+   * would lock the vault for good.
+   */
+  private async checkRotateTarget(vault: VaultAccount, newLmsPubkey: Uint8Array): Promise<void> {
+    const master = this.opts.master;
+    if (!master) {
+      throw new Error("Rotate to a foreign key: this signer has no master seed to derive the next key from; pass { allowForeignKey: true } to rotate to a key the words cannot reproduce");
+    }
+    const { k, material } = nextKeyMaterial(master, vault);
+    const target = parseLmsPublicKey(newLmsPubkey);
+    if (!equalBytes(target.I, material.I)) {
+      throw new Error(`Rotate to a foreign key: not the next key derived from these words (index ${k + 1}); pass { allowForeignKey: true } to rotate to a key the words cannot reproduce`);
+    }
+    const next = await LmsPrivateKey.generateAsync(material);
+    if (!equalBytes(next.publicKey, newLmsPubkey)) {
+      throw new Error(`Rotate to a foreign key: its I matches index ${k + 1} of these words but its root does not; pass { allowForeignKey: true } to rotate to a key the words cannot reproduce`);
+    }
   }
 
   /** The signer used for v1 messages: the option, else the payer's secret key. */
@@ -270,7 +314,10 @@ export class VaultSigner {
    * transaction, in order: one for "direct-v1", open/write.../execute for "staged".
    */
   async execute(request: ActionRequest, opts: ExecuteOpts = {}): Promise<ExecuteResult> {
-    const signed = await this.sign(request, opts.q !== undefined ? { q: opts.q } : {});
+    const signed = await this.sign(request, {
+      ...(opts.q !== undefined ? { q: opts.q } : {}),
+      ...(opts.allowForeignKey !== undefined ? { allowForeignKey: opts.allowForeignKey } : {}),
+    });
     const mode = opts.mode ?? this.opts.mode ?? "staged";
     if (mode !== "staged") {
       const v1Signer = this.v1Signer;
@@ -331,6 +378,31 @@ export class VaultSigner {
     const expirySlot = BigInt(slot + (this.opts.defaultExpirySlots ?? 300));
     return { ...request, expirySlot } as Action;
   }
+}
+
+export interface NextKeyMaterial {
+  /** Index of the vault's current key under `master`. */
+  k: number;
+  /** Material of the key a `Rotate` should go to: index k+1, the vault's typecodes. */
+  material: LmsKeyMaterial;
+}
+
+/**
+ * The key a vault should rotate to next (SPEC-DERIVATION.md: "each Rotate uses the next index"):
+ * find the index `k` of the vault's current `lms_pubkey` under `master` by its `I` (the first
+ * step of recovery; `I_k` is 128 bits so no tree is built), then derive index k+1 with the
+ * vault's own typecodes. Throws when the current key is not derived from `master` within
+ * `maxIndex` (default `RECOVERY_MAX_INDEX`). Build it with `LmsPrivateKey.generate(material)`.
+ */
+export function nextKeyMaterial(master: Uint8Array, vault: Pick<VaultAccount, "lmsPubkey">, opts: { maxIndex?: number } = {}): NextKeyMaterial {
+  const current = parseLmsPublicKey(vault.lmsPubkey);
+  const max = opts.maxIndex ?? RECOVERY_MAX_INDEX;
+  for (let k = 0; k <= max; k++) {
+    if (!equalBytes(deriveLmsInputs(master, k).I, current.I)) continue;
+    if (k === 0xffffffff) throw new Error("the vault's key is the registry key (index 0xffffffff); it has no next index");
+    return { k, material: deriveKeyMaterial(master, k + 1, current.lmsType, current.lmotsType) };
+  }
+  throw new Error(`the vault's current key is not derived from this master seed (indices 0..${max} tried)`);
 }
 
 export interface RegistryClientOptions {

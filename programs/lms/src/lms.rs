@@ -169,6 +169,7 @@ pub fn parse_lms_signature<'a>(
 /// Only the first `m` bytes are meaningful.
 pub fn lms_root_candidate(pk: &LmsPublicKey, message: &[u8], sig: &LmsSignature<'_>) -> Digest {
     match pk.lms_type.m() {
+        #[cfg(feature = "sha256-192")]
         24 => root_candidate::<24>(pk, message, sig),
         _ => root_candidate::<32>(pk, message, sig),
     }
@@ -252,12 +253,16 @@ mod tests {
         bad[7] = 4;
         assert_eq!(LmsPublicKey::parse(&bad), Err(Error::UnknownLmotsType));
         // SHA-256 tree with a SHA-256/192 one-time signature
-        let mut bad = bytes;
-        bad[7] = 7;
-        assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
+        #[cfg(feature = "sha256-192")]
+        {
+            let mut bad = bytes;
+            bad[7] = 7;
+            assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
+        }
     }
 
     #[test]
+    #[cfg(feature = "sha256-192")]
     fn sha256_192_public_key_round_trip() {
         let mut bytes = [0u8; 48];
         bytes[3] = 11; // LMS_SHA256_M24_H10
@@ -277,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sha256-192")]
     fn rfc9858_signature_lengths() {
         assert_eq!(lms_signature_len(LmsType::Sha256M24H10, LmotsType::Sha256N24W4), 1500);
         assert_eq!(lms_signature_len(LmsType::Sha256M24H10, LmotsType::Sha256N24W8), 900);

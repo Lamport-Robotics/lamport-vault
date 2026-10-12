@@ -105,6 +105,7 @@ pub fn lmots_public_key_candidate(
     // Monomorphized on n so the hot loop has fixed-size slices, exactly as
     // before RFC 9858 support: a runtime n costs ~10% more compute on chain.
     match sig.lmots_type.n() {
+        #[cfg(feature = "sha256-192")]
         24 => candidate::<24>(sig, i_id, q, message),
         _ => candidate::<32>(sig, i_id, q, message),
     }
@@ -185,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "sha256-192")]
     fn checksum_bounds_n24() {
         // W4: 48 digits of 0 -> sum 48 * 15 = 720, << 4 = 11520 = 0x2D00 -> digits 2, 13, 0
         let t = LmotsType::Sha256N24W4;

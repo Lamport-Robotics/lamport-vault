@@ -12,7 +12,7 @@ description = "Compute-unit benchmark: LMS verification per parameter set, on th
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-lamport-lms = { path = "../../programs/lms" }
+lamport-lms = { path = "../../programs/lms", features = ["sha256-192"] }
 solana-program-entrypoint = "2.3"
 solana-account-info = "2.3"
 solana-pubkey = "2.3"

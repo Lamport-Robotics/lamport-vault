@@ -1,7 +1,9 @@
 //! Known-answer tests for the RFC 9858 SHA-256/192 parameter sets, against
 //! `kat/rfc9858_sha256_192.json` (RFC 9858 Appendix A.1 and A.4).
 //!
-//! Run with `cargo test -p lamport-lms --features sign`.
+//! Run with `cargo test -p lamport-lms --features sign` (`sign` enables `sha256-192`).
+
+#![cfg(feature = "sha256-192")]
 
 use lamport_lms::{lms_verify, Error, LmotsType, LmsPublicKey, LmsType};
 use serde::Deserialize;

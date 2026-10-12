@@ -47,8 +47,12 @@ impl LmotsType {
     /// The two RFC 9858 rows are accepted by the parser; whether a program
     /// accepts them is the program's own decision (its key arrays, account
     /// layouts and compute budget).
+    #[cfg(feature = "sha256-192")]
     pub const ACCEPTED: &'static [LmotsType] =
         &[LmotsType::Sha256N32W4, LmotsType::Sha256N24W4, LmotsType::Sha256N24W8];
+    /// Parameter sets this build accepts (without the `sha256-192` feature).
+    #[cfg(not(feature = "sha256-192"))]
+    pub const ACCEPTED: &'static [LmotsType] = &[LmotsType::Sha256N32W4];
 
     /// Looks a typecode up in Table 1 and checks it is in [`Self::ACCEPTED`].
     pub fn from_typecode(code: u32) -> Result<Self, Error> {
@@ -57,9 +61,13 @@ impl LmotsType {
             2 => LmotsType::Sha256N32W2,
             3 => LmotsType::Sha256N32W4,
             4 => LmotsType::Sha256N32W8,
+            #[cfg(feature = "sha256-192")]
             5 => LmotsType::Sha256N24W1,
+            #[cfg(feature = "sha256-192")]
             6 => LmotsType::Sha256N24W2,
+            #[cfg(feature = "sha256-192")]
             7 => LmotsType::Sha256N24W4,
+            #[cfg(feature = "sha256-192")]
             8 => LmotsType::Sha256N24W8,
             _ => return Err(Error::UnknownLmotsType),
         };
@@ -161,6 +169,7 @@ pub enum LmsType {
 
 impl LmsType {
     /// Parameter sets this build accepts.
+    #[cfg(feature = "sha256-192")]
     pub const ACCEPTED: &'static [LmsType] = &[
         LmsType::Sha256M32H5,
         LmsType::Sha256M32H10,
@@ -171,6 +180,14 @@ impl LmsType {
         LmsType::Sha256M24H15,
         LmsType::Sha256M24H20,
     ];
+    /// Parameter sets this build accepts (without the `sha256-192` feature).
+    #[cfg(not(feature = "sha256-192"))]
+    pub const ACCEPTED: &'static [LmsType] = &[
+        LmsType::Sha256M32H5,
+        LmsType::Sha256M32H10,
+        LmsType::Sha256M32H15,
+        LmsType::Sha256M32H20,
+    ];
 
     /// Looks a typecode up in RFC 8554 Table 2 or RFC 9858 Table 2 (H25 is
     /// not implemented).
@@ -180,9 +197,13 @@ impl LmsType {
             6 => Ok(LmsType::Sha256M32H10),
             7 => Ok(LmsType::Sha256M32H15),
             8 => Ok(LmsType::Sha256M32H20),
+            #[cfg(feature = "sha256-192")]
             10 => Ok(LmsType::Sha256M24H5),
+            #[cfg(feature = "sha256-192")]
             11 => Ok(LmsType::Sha256M24H10),
+            #[cfg(feature = "sha256-192")]
             12 => Ok(LmsType::Sha256M24H15),
+            #[cfg(feature = "sha256-192")]
             13 => Ok(LmsType::Sha256M24H20),
             _ => Err(Error::UnknownLmsType),
         }
@@ -258,6 +279,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "sha256-192"))]
+    fn only_w4_accepted_without_the_feature() {
+        assert_eq!(LmotsType::from_typecode(3), Ok(LmotsType::Sha256N32W4));
+        for c in [0u32, 1, 2, 4, 5, 6, 7, 8, 9, u32::MAX] {
+            assert_eq!(LmotsType::from_typecode(c), Err(Error::UnknownLmotsType));
+        }
+        for c in [0u32, 4, 9, 10, 11, 12, 13, 14, u32::MAX] {
+            assert_eq!(LmsType::from_typecode(c), Err(Error::UnknownLmsType));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "sha256-192")]
     fn only_w4_and_rfc9858_w4_w8_accepted() {
         assert_eq!(LmotsType::from_typecode(3), Ok(LmotsType::Sha256N32W4));
         assert_eq!(LmotsType::from_typecode(7), Ok(LmotsType::Sha256N24W4));

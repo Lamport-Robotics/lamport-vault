@@ -59,8 +59,10 @@
 //! | `LMS_SHA256_M24_H15` | 12       | 15       | 32 768    | 1620                          | yes      |
 //! | `LMS_SHA256_M24_H20` | 13       | 20       | 1 048 576 | 1740                          | yes      |
 //!
-//! "Accepted" is what this crate parses. Each program decides for itself:
-//! the vault and the registry still take 56-byte (SHA-256) keys only.
+//! The SHA-256/192 rows need the `sha256-192` feature (on with `sign`);
+//! without it they are not parsed and their code is not compiled in. Each
+//! program decides for itself: the vault and the registry build without the
+//! feature and take 56-byte (SHA-256) keys only.
 //!
 //! ## Byte layouts
 //!

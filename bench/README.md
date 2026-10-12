@@ -12,7 +12,8 @@ cd ../lms-cu && cargo build-sbf                             # builds target/depl
 cd .. && npm i --no-save litesvm@0.8.0 @solana/web3.js@1 && node run.mjs
 ```
 
-Neither crate is a workspace member; both have their own `[workspace]` table.
+Neither crate is a workspace member; both have their own `[workspace]` table. `lms-cu` enables
+`lamport-lms`'s `sha256-192` feature; the vault and registry programs do not.
 
 ## Results
 
@@ -33,6 +34,19 @@ harness measures the same work.
 **Cost of the change to existing keys:** +1 001 CU on average (+0.8%) for N32 W4. A first version that
 zeroed the unused tail of every digest cost +13%, because each `fill` became a `sol_memset` syscall; the
 verifier is now monomorphized on the hash length and never zeroes in the hot loop.
+
+## Program size
+
+The RFC 9858 sets sit behind the `sha256-192` feature, which the programs do not enable, so their verifier
+contains only the SHA-256 path. `cargo build-sbf`, same toolchain:
+
+| program | `main` | this branch | difference |
+|---|---|---|---|
+| `lamport_vault.so` | 303 096 | 305 512 | +2 416 |
+| `pq_registry.so` | 258 800 | 261 128 | +2 328 |
+
+The vault stays 4 488 bytes under its 310 000-byte devnet allocation. Without the feature gate it was 309 432,
+568 bytes under.
 
 ## What it means for the vault
 

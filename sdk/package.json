@@ -18,6 +18,7 @@
     "clean": "node -e \"for (const p of ['packages/lms/dist','packages/vault/dist']) require('node:fs').rmSync(p,{recursive:true,force:true})\""
   },
   "devDependencies": {
+    "@solana/spl-token": "^0.4.15",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
     "vitest": "^5.0.0"

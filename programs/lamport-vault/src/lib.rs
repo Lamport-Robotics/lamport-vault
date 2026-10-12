@@ -11,9 +11,8 @@
 #![allow(unexpected_cfgs)]
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    self, CloseAccount, Mint, TokenAccount, TransferChecked,
-};
+use anchor_lang::error::ErrorCode;
+use anchor_spl::token_interface::{self, CloseAccount, TransferChecked};
 use lamport_lms::{parse_lms_signature, verify_parsed, LmsPublicKey, LmsType, LMS_PUBLIC_KEY_LEN};
 
 pub mod action;
@@ -85,6 +84,230 @@ fn parse_vault_key(bytes: &[u8; LMS_PUBLIC_KEY_LEN]) -> Result<LmsPublicKey> {
     })?;
     require!(ACCEPTED_LMS_TYPES.contains(&pk.lms_type), VaultError::InvalidLmsType);
     Ok(pk)
+}
+
+/// What the signature check establishes before any state changes.
+#[derive(Debug, Clone, Copy)]
+pub struct Verified {
+    /// Leaf index the signature spends.
+    pub q: u32,
+    /// Whether this was the last free leaf before spending it (exhaustion rule).
+    pub last_free: bool,
+    /// The vault's parsed key.
+    pub pk: LmsPublicKey,
+}
+
+/// Steps 2–4 of `execute` (DESIGN.md section 2): bind the message to this
+/// program, the vault and its key generation; parse the signature against the
+/// vault's parameter set; refuse a spent leaf; verify. Pure: nothing changes.
+/// Shared by `execute` (signature from the staging buffer) and
+/// `execute_direct` (signature from instruction data).
+pub fn verify_action_signature(vault: &Vault, vault_key: &Pubkey, action_bytes: &[u8], signature: &[u8]) -> Result<Verified> {
+    let message = signed_message(vault_key, vault.generation, action_bytes);
+    let pk = parse_vault_key(&vault.lms_pubkey)?;
+    let sig = parse_lms_signature(signature, &pk).map_err(|e| match e {
+        lamport_lms::Error::LeafOutOfRange => error!(VaultError::LeafOutOfRange),
+        lamport_lms::Error::LmsTypeMismatch | lamport_lms::Error::LmotsTypeMismatch => {
+            error!(VaultError::SignatureTypeMismatch)
+        }
+        _ => error!(VaultError::SignatureMalformed),
+    })?;
+    require!(!vault.leaf_used(sig.q), VaultError::LeafAlreadyUsed);
+    verify_parsed(&pk, &message, &sig).map_err(|_| error!(VaultError::InvalidSignature))?;
+    // The exhaustion rule looks at the free leaves before this one is spent.
+    let last_free = pk.lms_type.leaf_count() - vault.spent <= 1;
+    Ok(Verified { q: sig.q, last_free, pk })
+}
+
+/// Step 6 before the action runs: decode, expiry, exhaustion rule. Pure.
+pub fn check_action(action_bytes: &[u8], slot: u64, last_free: bool) -> Result<Action> {
+    let action = Action::decode(action_bytes)?;
+    require!(action.expiry_slot() >= slot, VaultError::ActionExpired);
+    // Exhaustion rule: when this is the last free leaf it may only Rotate.
+    if last_free {
+        require!(matches!(action, Action::Rotate { .. }), VaultError::LastLeafReservedForRotate);
+    }
+    Ok(action)
+}
+
+/// Where the rent for a `Rotate`'s extra 16 bytes comes from.
+enum RentSource<'a, 'info> {
+    /// The staging buffer (program-owned, debited directly; closed to its payer at exit).
+    Buffer(&'a AccountInfo<'info>),
+    /// The signing payer of `execute_direct`, via a System Program transfer.
+    Payer { payer: &'a AccountInfo<'info>, system_program: &'a AccountInfo<'info> },
+}
+
+fn is_token_program(key: &Pubkey) -> bool {
+    *key == anchor_spl::token::ID || *key == anchor_spl::token_2022::ID
+}
+
+// Token and Token-2022 share their base layouts (`spl_token::state`): a Mint is
+// 82 bytes with `decimals` at 44 and `is_initialized` at 45; an Account is 165
+// bytes with `owner` at 32..64, `amount` at 64..72 and `state` at 108.
+// Token-2022 appends an account-type byte at 165 (1 = Mint, 2 = Account) before
+// any extensions. Reading the fields directly keeps the extension-parsing code
+// of `InterfaceAccount` out of the binary; the token program re-validates both
+// accounts in the CPI that follows.
+const MINT_LEN: usize = 82;
+const TOKEN_ACCOUNT_LEN: usize = 165;
+
+/// `decimals` of an initialized Token / Token-2022 mint.
+fn mint_decimals(ai: &AccountInfo) -> Result<u8> {
+    let data = ai.try_borrow_data()?;
+    let shape_ok = data.len() == MINT_LEN || (data.len() > TOKEN_ACCOUNT_LEN && data[TOKEN_ACCOUNT_LEN] == 1);
+    require!(shape_ok && data[45] == 1, ErrorCode::AccountDidNotDeserialize);
+    Ok(data[44])
+}
+
+/// `(owner, amount)` of an initialized Token / Token-2022 token account.
+fn token_account_owner_amount(ai: &AccountInfo) -> Result<(Pubkey, u64)> {
+    let data = ai.try_borrow_data()?;
+    let shape_ok = data.len() == TOKEN_ACCOUNT_LEN || (data.len() > TOKEN_ACCOUNT_LEN && data[TOKEN_ACCOUNT_LEN] == 2);
+    require!(shape_ok && data[108] != 0, ErrorCode::AccountDidNotDeserialize);
+    let owner = Pubkey::new_from_array(data[32..64].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[64..72].try_into().unwrap());
+    Ok((owner, amount))
+}
+
+/// Verifies, burns the leaf, checks the action and performs it. Both entry
+/// points end here; they differ only in where the signature and the Rotate
+/// rent come from.
+fn verify_and_act<'info>(
+    vault: &mut Account<'info, Vault>,
+    action_bytes: &[u8],
+    signature: &[u8],
+    rent_source: RentSource<'_, 'info>,
+    remaining: &'info [AccountInfo<'info>],
+) -> Result<()> {
+    let vault_key = vault.key();
+    let verified = verify_action_signature(vault, &vault_key, action_bytes, signature)?;
+    // 5. burn the leaf before doing anything else.
+    vault.spend_leaf(verified.q)?;
+    // 6. decode, expiry, exhaustion rule, perform.
+    let action = check_action(action_bytes, Clock::get()?.slot, verified.last_free)?;
+    let pk = verified.pk;
+
+    let vault_id = vault.vault_id;
+    let bump = vault.bump;
+    let signer_seeds: &[&[u8]] = &[VAULT_SEED, &vault_id, &[bump]];
+
+    match action {
+        Action::TransferSol { to, lamports, .. } => {
+            let to_ai = remaining.first().ok_or(VaultError::MissingAccount)?;
+            require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
+            require_keys_neq!(to, vault_key, VaultError::SelfTransfer);
+            let vault_ai = vault.to_account_info();
+            let min = Rent::get()?.minimum_balance(vault_ai.data_len());
+            let available = vault_ai.lamports().saturating_sub(min);
+            require!(lamports <= available, VaultError::InsufficientFunds);
+            vault_ai.sub_lamports(lamports)?;
+            to_ai.add_lamports(lamports)?;
+        }
+        Action::TransferToken { mint, to, amount, .. } => {
+            require!(remaining.len() >= 4, VaultError::MissingAccount);
+            let from_ai = &remaining[0];
+            let to_ai = &remaining[1];
+            let mint_ai = &remaining[2];
+            let token_program = &remaining[3];
+            require!(is_token_program(token_program.key), VaultError::InvalidTokenProgram);
+            require_keys_eq!(mint_ai.key(), mint, VaultError::WrongMint);
+            require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
+            require_keys_eq!(*mint_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
+            let decimals = mint_decimals(mint_ai)?;
+            token_interface::transfer_checked(
+                CpiContext::new_with_signer(
+                    token_program.clone(),
+                    TransferChecked {
+                        from: from_ai.clone(),
+                        mint: mint_ai.clone(),
+                        to: to_ai.clone(),
+                        authority: vault.to_account_info(),
+                    },
+                    &[signer_seeds],
+                ),
+                amount,
+                decimals,
+            )?;
+        }
+        Action::Rotate { new_lms_pubkey, .. } => {
+            let new_pk = parse_vault_key(&new_lms_pubkey)?;
+            // The bitmap is sized for the height at creation: keep the parameter set.
+            require!(
+                new_pk.lms_type == pk.lms_type && new_pk.lmots_type == pk.lmots_type,
+                VaultError::RotateTypeMismatch
+            );
+            // A key that was ever installed has spent leaves; with a clear
+            // bitmap they would be reusable. Refuse it for good.
+            require!(!vault.has_used_key(&new_lms_pubkey), VaultError::KeyReused);
+            require!(vault.used_keys.len() < MAX_KEY_HISTORY as usize, VaultError::HistoryFull);
+
+            // Grow the account by one history entry. The rent delta comes out
+            // of the staging buffer (closed to its payer at exit) or, with no
+            // buffer, straight from the signing payer.
+            let vault_ai = vault.to_account_info();
+            let new_len = Vault::space(pk.lms_type, vault.used_keys.len() + 1);
+            let rent = Rent::get()?;
+            let delta = rent
+                .minimum_balance(new_len)
+                .saturating_sub(rent.minimum_balance(vault_ai.data_len()));
+            if delta > 0 {
+                match rent_source {
+                    RentSource::Buffer(buf_ai) => {
+                        buf_ai.sub_lamports(delta)?;
+                        vault_ai.add_lamports(delta)?;
+                    }
+                    RentSource::Payer { payer, system_program } => {
+                        anchor_lang::system_program::transfer(
+                            CpiContext::new(
+                                system_program.clone(),
+                                anchor_lang::system_program::Transfer { from: payer.clone(), to: vault_ai.clone() },
+                            ),
+                            delta,
+                        )?;
+                    }
+                }
+            }
+            vault_ai.resize(new_len)?;
+
+            let old_key = vault.lms_pubkey;
+            vault.used_keys.push(Vault::key_hash(&old_key));
+            vault.lms_pubkey = new_lms_pubkey;
+            vault.used.iter_mut().for_each(|b| *b = 0);
+            vault.spent = 0;
+            vault.generation = vault.generation.checked_add(1).ok_or(VaultError::Overflow)?;
+        }
+        Action::Close { to, .. } => {
+            let to_ai = remaining.first().ok_or(VaultError::MissingAccount)?;
+            require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
+            require_keys_neq!(to, vault_key, VaultError::SelfTransfer);
+            if let RentSource::Buffer(buf_ai) = rent_source {
+                require_keys_neq!(to, buf_ai.key(), VaultError::SelfTransfer);
+            }
+            let pairs = &remaining[1..];
+            require!(pairs.chunks_exact(2).remainder().is_empty(), VaultError::MissingAccount);
+            for pair in pairs.chunks_exact(2) {
+                let acc_ai = &pair[0];
+                let token_program = &pair[1];
+                require!(is_token_program(token_program.key), VaultError::InvalidTokenProgram);
+                require_keys_eq!(*acc_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
+                let (owner, amount) = token_account_owner_amount(acc_ai)?;
+                require_keys_eq!(owner, vault_key, VaultError::InvalidTokenProgram);
+                require!(amount == 0, VaultError::TokenAccountNotEmpty);
+                token_interface::close_account(CpiContext::new_with_signer(
+                    token_program.clone(),
+                    CloseAccount {
+                        account: acc_ai.clone(),
+                        destination: to_ai.clone(),
+                        authority: vault.to_account_info(),
+                    },
+                    &[signer_seeds],
+                ))?;
+            }
+            vault.close(to_ai.clone())?;
+        }
+    }
+    Ok(())
 }
 
 #[program]
@@ -175,160 +398,31 @@ pub mod lamport_vault {
         let buf = &ctx.accounts.sig_buffer;
         // 1. buffer complete and bound to this vault (binding also checked by has_one).
         require!(buf.filled == buf.sig_len, VaultError::SignatureIncomplete);
-
-        let vault_key = ctx.accounts.vault.key();
-        let vault = &mut ctx.accounts.vault;
-
-        // 2. message, bound to this program, the vault and the key generation.
-        let message = signed_message(&vault_key, vault.generation, &buf.action);
-
-        // 3. parse: typecodes equal to the vault's, q < 2^h, exact length; then leaf q unspent.
-        let pk = parse_vault_key(&vault.lms_pubkey)?;
-        let sig = parse_lms_signature(&buf.sig, &pk).map_err(|e| {
-            msg!("lms parse: {}", e.name());
-            match e {
-                lamport_lms::Error::LeafOutOfRange => error!(VaultError::LeafOutOfRange),
-                lamport_lms::Error::LmsTypeMismatch | lamport_lms::Error::LmotsTypeMismatch => {
-                    error!(VaultError::SignatureTypeMismatch)
-                }
-                _ => error!(VaultError::SignatureMalformed),
-            }
-        })?;
-        require!(!vault.leaf_used(sig.q), VaultError::LeafAlreadyUsed);
-
-        // 4. verify (Algorithms 4b + 6).
-        verify_parsed(&pk, &message, &sig).map_err(|_| error!(VaultError::InvalidSignature))?;
-
-        // 5. burn the leaf before doing anything else. `last_free` is read first:
-        //    the exhaustion rule looks at the free leaves before this one is spent.
-        let last_free = pk.lms_type.leaf_count() - vault.spent <= 1;
-        vault.spend_leaf(sig.q)?;
-
-        // 6. decode, expiry, exhaustion rule, perform.
-        let action = Action::decode(&buf.action)?;
-        let clock = Clock::get()?;
-        require!(action.expiry_slot() >= clock.slot, VaultError::ActionExpired);
-        // Exhaustion rule: when this is the last free leaf it may only Rotate.
-        if last_free {
-            require!(matches!(action, Action::Rotate { .. }), VaultError::LastLeafReservedForRotate);
-        }
-
-        let vault_id = vault.vault_id;
-        let bump = vault.bump;
-        let signer_seeds: &[&[u8]] = &[VAULT_SEED, &vault_id, &[bump]];
-        let remaining = ctx.remaining_accounts;
-
-        match action {
-            Action::TransferSol { to, lamports, .. } => {
-                let to_ai = remaining.first().ok_or(VaultError::MissingAccount)?;
-                require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
-                require_keys_neq!(to, vault_key, VaultError::SelfTransfer);
-                let vault_ai = vault.to_account_info();
-                let min = Rent::get()?.minimum_balance(vault_ai.data_len());
-                let available = vault_ai.lamports().saturating_sub(min);
-                require!(lamports <= available, VaultError::InsufficientFunds);
-                vault_ai.sub_lamports(lamports)?;
-                to_ai.add_lamports(lamports)?;
-            }
-            Action::TransferToken { mint, to, amount, .. } => {
-                require!(remaining.len() >= 4, VaultError::MissingAccount);
-                let from_ai = &remaining[0];
-                let to_ai = &remaining[1];
-                let mint_ai = &remaining[2];
-                let token_program = &remaining[3];
-                require!(
-                    token_program.key() == anchor_spl::token::ID
-                        || token_program.key() == anchor_spl::token_2022::ID,
-                    VaultError::InvalidTokenProgram
-                );
-                require_keys_eq!(mint_ai.key(), mint, VaultError::WrongMint);
-                require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
-                require_keys_eq!(*mint_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
-                let decimals = InterfaceAccount::<Mint>::try_from(mint_ai)?.decimals;
-                token_interface::transfer_checked(
-                    CpiContext::new_with_signer(
-                        token_program.clone(),
-                        TransferChecked {
-                            from: from_ai.clone(),
-                            mint: mint_ai.clone(),
-                            to: to_ai.clone(),
-                            authority: vault.to_account_info(),
-                        },
-                        &[signer_seeds],
-                    ),
-                    amount,
-                    decimals,
-                )?;
-            }
-            Action::Rotate { new_lms_pubkey, .. } => {
-                let new_pk = parse_vault_key(&new_lms_pubkey)?;
-                // The bitmap is sized for the height at creation: keep the parameter set.
-                require!(
-                    new_pk.lms_type == pk.lms_type && new_pk.lmots_type == pk.lmots_type,
-                    VaultError::RotateTypeMismatch
-                );
-                // A key that was ever installed has spent leaves; with a clear
-                // bitmap they would be reusable. Refuse it for good.
-                require!(!vault.has_used_key(&new_lms_pubkey), VaultError::KeyReused);
-                require!(vault.used_keys.len() < MAX_KEY_HISTORY as usize, VaultError::HistoryFull);
-
-                // Grow the account by one history entry. The rent delta comes
-                // out of the staging buffer, which is closed to its payer at exit.
-                let vault_ai = vault.to_account_info();
-                let new_len = Vault::space(pk.lms_type, vault.used_keys.len() + 1);
-                let rent = Rent::get()?;
-                let delta = rent
-                    .minimum_balance(new_len)
-                    .saturating_sub(rent.minimum_balance(vault_ai.data_len()));
-                if delta > 0 {
-                    let buf_ai = ctx.accounts.sig_buffer.to_account_info();
-                    buf_ai.sub_lamports(delta)?;
-                    vault_ai.add_lamports(delta)?;
-                }
-                vault_ai.resize(new_len)?;
-
-                let old_key = vault.lms_pubkey;
-                vault.used_keys.push(Vault::key_hash(&old_key));
-                vault.lms_pubkey = new_lms_pubkey;
-                vault.used.iter_mut().for_each(|b| *b = 0);
-                vault.spent = 0;
-                vault.generation = vault.generation.checked_add(1).ok_or(VaultError::Overflow)?;
-            }
-            Action::Close { to, .. } => {
-                let to_ai = remaining.first().ok_or(VaultError::MissingAccount)?;
-                require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
-                require_keys_neq!(to, vault_key, VaultError::SelfTransfer);
-                require_keys_neq!(to, ctx.accounts.sig_buffer.key(), VaultError::SelfTransfer);
-                let pairs = &remaining[1..];
-                require!(pairs.chunks_exact(2).remainder().is_empty(), VaultError::MissingAccount);
-                for pair in pairs.chunks_exact(2) {
-                    let acc_ai = &pair[0];
-                    let token_program = &pair[1];
-                    require!(
-                        token_program.key() == anchor_spl::token::ID
-                            || token_program.key() == anchor_spl::token_2022::ID,
-                        VaultError::InvalidTokenProgram
-                    );
-                    require_keys_eq!(*acc_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
-                    let acc = InterfaceAccount::<TokenAccount>::try_from(acc_ai)?;
-                    require_keys_eq!(acc.owner, vault_key, VaultError::InvalidTokenProgram);
-                    require!(acc.amount == 0, VaultError::TokenAccountNotEmpty);
-                    token_interface::close_account(CpiContext::new_with_signer(
-                        token_program.clone(),
-                        CloseAccount {
-                            account: acc_ai.clone(),
-                            destination: to_ai.clone(),
-                            authority: vault.to_account_info(),
-                        },
-                        &[signer_seeds],
-                    ))?;
-                }
-                vault.close(to_ai.clone())?;
-            }
-        }
-
+        let buf_ai = buf.to_account_info();
+        verify_and_act(&mut ctx.accounts.vault, &buf.action, &buf.sig, RentSource::Buffer(&buf_ai), ctx.remaining_accounts)
         // 7. the buffer is closed to `payer` by the `close = payer` constraint.
-        Ok(())
+    }
+
+    /// `execute` without a staging buffer: the action and the whole LMS
+    /// signature arrive in the instruction data, so one transaction does it
+    /// all. Needs a transaction format that carries 2.4–2.7 KB of data (v1,
+    /// SIMD-0385/0296). Same checks, same remaining accounts as `execute`;
+    /// `payer` signs and, on `Rotate`, pays the 16-byte rent delta itself.
+    pub fn execute_direct<'info>(
+        ctx: Context<'_, '_, 'info, 'info, ExecuteDirect<'info>>,
+        action: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> Result<()> {
+        require!(!action.is_empty() && action.len() <= MAX_ACTION_LEN, VaultError::ActionTooLarge);
+        let payer = ctx.accounts.payer.to_account_info();
+        let system_program = ctx.accounts.system_program.to_account_info();
+        verify_and_act(
+            &mut ctx.accounts.vault,
+            &action,
+            &signature,
+            RentSource::Payer { payer: &payer, system_program: &system_program },
+            ctx.remaining_accounts,
+        )
     }
 }
 
@@ -394,6 +488,16 @@ pub struct Execute<'info> {
     /// CHECK: receives the buffer's rent; identity enforced by `has_one = payer`.
     #[account(mut)]
     pub payer: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ExecuteDirect<'info> {
+    #[account(mut)]
+    pub vault: Account<'info, Vault>,
+    /// Pays the transaction and, on `Rotate`, the vault's 16-byte rent delta.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[cfg(test)]
@@ -487,5 +591,145 @@ mod tests {
         // The biggest vault (H15, full history) is under one realloc step and the 10 KB class.
         assert!(Vault::space(LmsType::Sha256M32H15, 128) <= 10 * 1024);
         assert!(!ACCEPTED_LMS_TYPES.contains(&LmsType::Sha256M32H20));
+    }
+
+    // ---- shared verify / act path (what `execute` and `execute_direct` both run) ----
+
+    use lamport_lms::{LmotsType, LmsPrivateKey};
+
+    fn error_code(e: anchor_lang::error::Error) -> u32 {
+        match e {
+            anchor_lang::error::Error::AnchorError(a) => a.error_code_number,
+            anchor_lang::error::Error::ProgramError(p) => match p.program_error {
+                anchor_lang::solana_program::program_error::ProgramError::Custom(c) => c,
+                _ => u32::MAX,
+            },
+        }
+    }
+
+    fn code<T: core::fmt::Debug>(r: Result<T>) -> u32 {
+        error_code(r.expect_err("expected an error"))
+    }
+
+    const fn vault_err(e: VaultError) -> u32 {
+        e as u32 + anchor_lang::error::ERROR_CODE_OFFSET
+    }
+
+    fn h5_key(seed_byte: u8) -> LmsPrivateKey {
+        LmsPrivateKey::new(LmsType::Sha256M32H5, LmotsType::Sha256N32W4, [seed_byte; 16], [seed_byte; 32])
+    }
+
+    fn vault_for(key: &LmsPrivateKey) -> Vault {
+        let pk = key.public_key().to_bytes();
+        Vault {
+            version: Vault::VERSION,
+            bump: 0,
+            vault_id: vault_id_for(&pk),
+            lms_pubkey: pk,
+            spent: 0,
+            generation: 0,
+            created_slot: 0,
+            used: vec![0u8; Vault::bitmap_len(key.lms_type)],
+            used_keys: Vec::new(),
+        }
+    }
+
+    fn transfer_action(expiry_slot: u64) -> Vec<u8> {
+        Action::TransferSol { to: Pubkey::new_unique(), lamports: 1, expiry_slot }.encode()
+    }
+
+    #[test]
+    fn verify_accepts_a_signature_over_the_bound_message_and_reports_q() {
+        let key = h5_key(1);
+        let vault = vault_for(&key);
+        let vault_key = Pubkey::new_unique();
+        let action = transfer_action(10);
+        let tree = key.tree();
+        for q in [0u32, 7, 31] {
+            let sig = key.sign_with_tree(&tree, q, &signed_message(&vault_key, 0, &action));
+            let v = verify_action_signature(&vault, &vault_key, &action, &sig).unwrap();
+            assert_eq!(v.q, q);
+            assert!(!v.last_free);
+            assert_eq!(v.pk.lms_type, LmsType::Sha256M32H5);
+        }
+    }
+
+    #[test]
+    fn verify_binds_vault_generation_and_action() {
+        let key = h5_key(2);
+        let mut vault = vault_for(&key);
+        let vault_key = Pubkey::new_unique();
+        let action = transfer_action(10);
+        let sig = key.sign(3, &signed_message(&vault_key, 0, &action));
+        // Another vault, a later generation, or a different action: the message differs.
+        assert_eq!(code(verify_action_signature(&vault, &Pubkey::new_unique(), &action, &sig)), vault_err(VaultError::InvalidSignature));
+        vault.generation = 1;
+        assert_eq!(code(verify_action_signature(&vault, &vault_key, &action, &sig)), vault_err(VaultError::InvalidSignature));
+        vault.generation = 0;
+        assert_eq!(code(verify_action_signature(&vault, &vault_key, &transfer_action(11), &sig)), vault_err(VaultError::InvalidSignature));
+        // One flipped byte anywhere in the signature body.
+        let mut bad = sig.clone();
+        bad[100] ^= 1;
+        assert_eq!(code(verify_action_signature(&vault, &vault_key, &action, &bad)), vault_err(VaultError::InvalidSignature));
+        // Still fine untouched.
+        assert_eq!(verify_action_signature(&vault, &vault_key, &action, &sig).unwrap().q, 3);
+    }
+
+    #[test]
+    fn verify_refuses_spent_leaf_malformed_and_foreign_signatures() {
+        let key = h5_key(3);
+        let mut vault = vault_for(&key);
+        let vault_key = Pubkey::new_unique();
+        let action = transfer_action(10);
+        let sig = key.sign(5, &signed_message(&vault_key, 0, &action));
+        vault.spend_leaf(5).unwrap();
+        assert_eq!(code(verify_action_signature(&vault, &vault_key, &action, &sig)), vault_err(VaultError::LeafAlreadyUsed));
+        let mut fresh = vault_for(&key);
+        assert_eq!(code(verify_action_signature(&fresh, &vault_key, &action, &sig[..sig.len() - 1])), vault_err(VaultError::SignatureMalformed));
+        assert_eq!(code(verify_action_signature(&fresh, &vault_key, &action, &[])), vault_err(VaultError::SignatureMalformed));
+        // q beyond the tree.
+        let mut far = sig.clone();
+        far[..4].copy_from_slice(&32u32.to_be_bytes());
+        assert_eq!(code(verify_action_signature(&fresh, &vault_key, &action, &far)), vault_err(VaultError::LeafOutOfRange));
+        // An H10 signature for an H5 vault.
+        let h10 = LmsPrivateKey::new(LmsType::Sha256M32H10, LmotsType::Sha256N32W4, [9; 16], [9; 32]);
+        let sig10 = h10.sign(0, &signed_message(&vault_key, 0, &action));
+        assert_eq!(code(verify_action_signature(&fresh, &vault_key, &action, &sig10)), vault_err(VaultError::SignatureTypeMismatch));
+        // A valid signature from another key of the same parameter set.
+        let other = h5_key(4).sign(0, &signed_message(&vault_key, 0, &action));
+        assert_eq!(code(verify_action_signature(&fresh, &vault_key, &action, &other)), vault_err(VaultError::InvalidSignature));
+        // Verification never mutates the vault.
+        assert_eq!(fresh.spent, 0);
+        fresh.spent = 0;
+    }
+
+    #[test]
+    fn verify_flags_the_last_free_leaf() {
+        let key = h5_key(5);
+        let mut vault = vault_for(&key);
+        let vault_key = Pubkey::new_unique();
+        let action = transfer_action(10);
+        for q in 0..31 {
+            vault.spend_leaf(q).unwrap();
+        }
+        let sig = key.sign(31, &signed_message(&vault_key, 0, &action));
+        let v = verify_action_signature(&vault, &vault_key, &action, &sig).unwrap();
+        assert_eq!(v.q, 31);
+        assert!(v.last_free);
+    }
+
+    #[test]
+    fn check_action_expiry_exhaustion_and_decoding() {
+        let transfer = transfer_action(100);
+        assert!(matches!(check_action(&transfer, 100, false).unwrap(), Action::TransferSol { .. }));
+        assert_eq!(code(check_action(&transfer, 101, false)), vault_err(VaultError::ActionExpired));
+        assert_eq!(code(check_action(&transfer, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
+        let rotate = Action::Rotate { new_lms_pubkey: [1; 56], expiry_slot: 100 }.encode();
+        assert!(matches!(check_action(&rotate, 100, true).unwrap(), Action::Rotate { .. }));
+        assert_eq!(code(check_action(&rotate, 101, true)), vault_err(VaultError::ActionExpired));
+        assert_eq!(code(check_action(&[9, 9], 0, false)), vault_err(VaultError::ActionDecode));
+        let mut trailing = transfer.clone();
+        trailing.push(0);
+        assert_eq!(code(check_action(&trailing, 0, false)), vault_err(VaultError::ActionDecode));
     }
 }

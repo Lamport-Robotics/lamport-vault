@@ -24,6 +24,7 @@
       "write_sig": "42e0af3efe15a327",
       "close_sig_buffer": "26ba1463acac19c2",
       "execute": "82ddf29a0dc1bd1d",
+      "execute_direct": "f20759a2228c741e",
       "commit": "df8c8ea5e5d09c4a",
       "open_pq_buffer": "a7f11d8fcb86d944",
       "write_pq_sig": "bcafbb17ab36c3be",

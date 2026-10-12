@@ -18,6 +18,7 @@ export const IX = {
   writeSig: instructionDiscriminator("write_sig"),
   closeSigBuffer: instructionDiscriminator("close_sig_buffer"),
   execute: instructionDiscriminator("execute"),
+  executeDirect: instructionDiscriminator("execute_direct"),
   // pq-registry
   commit: instructionDiscriminator("commit"),
   openPqBuffer: instructionDiscriminator("open_pq_buffer"),

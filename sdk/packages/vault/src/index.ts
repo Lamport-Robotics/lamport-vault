@@ -1,6 +1,7 @@
 export * from "./action.ts";
 export * from "./accounts.ts";
 export * from "./chunk.ts";
+export * from "./direct.ts";
 export * from "./discriminator.ts";
 export * from "./instructions.ts";
 export * from "./message.ts";

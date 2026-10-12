@@ -135,6 +135,7 @@ fn discriminators_and_instruction_data() {
     assert_eq!(I::WriteSig::DISCRIMINATOR.to_vec(), hx(&ix["write_sig"]));
     assert_eq!(I::CloseSigBuffer::DISCRIMINATOR.to_vec(), hx(&ix["close_sig_buffer"]));
     assert_eq!(I::Execute::DISCRIMINATOR.to_vec(), hx(&ix["execute"]));
+    assert_eq!(I::ExecuteDirect::DISCRIMINATOR.to_vec(), hx(&ix["execute_direct"]));
     let acc = &d["discriminators"]["accounts"];
     assert_eq!(Vault::DISCRIMINATOR.to_vec(), hx(&acc["Vault"]));
     assert_eq!(SigBuffer::DISCRIMINATOR.to_vec(), hx(&acc["SigBuffer"]));

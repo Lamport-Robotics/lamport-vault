@@ -1,8 +1,10 @@
 /**
  * High-level clients. `VaultSigner` turns "move funds" into the transactions the chain needs:
- * read the vault (bitmap + generation), pick a free leaf, reserve it, sign, open the buffer
- * (carrying the first signature bytes), write the remaining chunks, execute. `RegistryClient`
- * does the same for `rotate_pq`, plus the one-transaction `commit`.
+ * read the vault (bitmap + generation), pick a free leaf, reserve it, sign, then either send one
+ * v1 transaction (`execute_direct`, mode "direct-v1") or open the buffer (carrying the first
+ * signature bytes), write the remaining chunks and execute (mode "staged"). Mode "auto" tries
+ * direct first and falls back to staged when the wallet or the RPC rejects v1. `RegistryClient`
+ * does the same for `rotate_pq` (staged only), plus the one-transaction `commit`.
  *
  * Both talk to the cluster through the small `Rpc` interface below, which `Connection` satisfies,
  * so tests run against a mock.
@@ -21,6 +23,7 @@ import {
 import { type CommitmentAccount, decodeCommitment, decodeVault, firstFreeLeaf, freeLeaves, hasUsedKey, isLeafUsed, leafCount, type VaultAccount } from "./accounts.ts";
 import { type Action, encodeAction } from "./action.ts";
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
+import { isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
 import { registryMessage, vaultMessage } from "./message.ts";
 import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
@@ -78,6 +81,14 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 /** An Action whose expiry may be left for the signer to fill from the current slot. */
 export type ActionRequest = DistributiveOmit<Action, "expirySlot"> & { expirySlot?: bigint };
 
+/**
+ * How a signed action reaches the chain.
+ * - `"staged"`: open_sig_buffer / write_sig / execute, three or four legacy transactions (works everywhere).
+ * - `"direct-v1"`: one `execute_direct` transaction in format v1 (needs a cluster with SIMD-0385 and a signer that takes v1 bytes).
+ * - `"auto"`: direct first; if the wallet refuses to sign or the RPC refuses the bytes, staged with the same LMS signature.
+ */
+export type ExecuteMode = "direct-v1" | "staged" | "auto";
+
 export interface VaultSignerOptions {
   rpc: Rpc;
   /** Default: the id declared by `programs/lamport-vault`. */
@@ -112,6 +123,15 @@ export interface VaultSignerOptions {
   computeUnits?: number;
   tokenProgram?: PublicKey;
   commitment?: Commitment;
+  /** Default `"staged"`. See {@link ExecuteMode}. */
+  mode?: ExecuteMode;
+  /**
+   * Signs v1 messages for the direct path. Default: ed25519 with `payer.secretKey`. Pass a
+   * wallet-backed signer when the payer is a wallet (see docs/DESIGN.md, "Wallet compatibility").
+   */
+  v1Signer?: V1MessageSigner;
+  /** Header configuration of direct transactions. `computeUnitLimit` defaults to `computeUnits`. */
+  v1Config?: V1Config;
 }
 
 export interface SignedAction {
@@ -125,11 +145,34 @@ export interface SignedAction {
   lmsSignature: Uint8Array;
 }
 
-export interface ExecuteResult extends SignedAction {
+export interface StagedExecuteResult extends SignedAction {
+  mode: "staged";
   nonce: bigint;
   sigBuffer: PublicKey;
   /** open_sig_buffer, write_sig..., execute */
   signatures: string[];
+}
+
+export interface DirectExecuteResult extends SignedAction {
+  mode: "direct-v1";
+  nonce?: undefined;
+  sigBuffer?: undefined;
+  /** the one `execute_direct` transaction */
+  signatures: string[];
+  /** the v1 bytes that were sent */
+  transactionBytes: Uint8Array;
+}
+
+export type ExecuteResult = StagedExecuteResult | DirectExecuteResult;
+
+export interface ExecuteOpts extends SendOpts {
+  q?: number;
+  nonce?: bigint;
+  closeTokenAccounts?: CloseTokenAccount[];
+  /** Overrides the signer's default mode for this call. */
+  mode?: ExecuteMode;
+  /** In "auto" mode: called with the rejection before the staged flow starts. */
+  onFallback?: (error: unknown) => void;
 }
 
 export class VaultSigner {
@@ -216,12 +259,54 @@ export class VaultSigner {
     return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature };
   }
 
-  /** Sign, stage and execute. Returns the signatures of every transaction, in order. */
-  async execute(
-    request: ActionRequest,
-    opts: SendOpts & { q?: number; nonce?: bigint; closeTokenAccounts?: CloseTokenAccount[] } = {},
-  ): Promise<ExecuteResult> {
+  /** The signer used for v1 messages: the option, else the payer's secret key. */
+  get v1Signer(): V1MessageSigner | undefined {
+    if (this.opts.v1Signer) return this.opts.v1Signer;
+    return this.payer.secretKey?.length === 64 ? keypairV1Signer(this.payer.secretKey) : undefined;
+  }
+
+  /**
+   * Sign and execute by the signer's mode (or `opts.mode`). Returns the signatures of every
+   * transaction, in order: one for "direct-v1", open/write.../execute for "staged".
+   */
+  async execute(request: ActionRequest, opts: ExecuteOpts = {}): Promise<ExecuteResult> {
     const signed = await this.sign(request, opts.q !== undefined ? { q: opts.q } : {});
+    const mode = opts.mode ?? this.opts.mode ?? "staged";
+    if (mode !== "staged") {
+      const v1Signer = this.v1Signer;
+      if (!v1Signer && mode === "direct-v1") throw new Error("direct-v1 needs a payer secret key or a v1Signer");
+      if (v1Signer) {
+        try {
+          return await this.sendDirect(signed, v1Signer, opts);
+        } catch (e) {
+          if (mode === "direct-v1" || !isV1Rejection(e)) throw e;
+          opts.onFallback?.(e);
+        }
+      }
+    }
+    return this.sendStaged(signed, opts);
+  }
+
+  private async sendDirect(signed: SignedAction, v1Signer: V1MessageSigner, opts: ExecuteOpts): Promise<DirectExecuteResult> {
+    const cfg = this.opts.v1Config ?? {};
+    const res = await sendDirectV1(this.rpc, v1Signer, {
+      programId: this.programId,
+      vault: this.vault,
+      payer: this.payer.publicKey,
+      action: signed.action,
+      signature: signed.lmsSignature,
+      computeUnitLimit: cfg.computeUnitLimit ?? this.opts.computeUnits ?? EXECUTE_COMPUTE_UNITS,
+      ...(cfg.priorityFeeLamports !== undefined ? { priorityFeeLamports: cfg.priorityFeeLamports } : {}),
+      ...(cfg.loadedAccountsDataSizeLimit !== undefined ? { loadedAccountsDataSizeLimit: cfg.loadedAccountsDataSizeLimit } : {}),
+      ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
+      ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
+      commitment: opts.commitment ?? this.opts.commitment,
+    });
+    opts.onTransaction?.(0, 1, res.signature);
+    return { ...signed, mode: "direct-v1", signatures: [res.signature], transactionBytes: res.transactionBytes };
+  }
+
+  private async sendStaged(signed: SignedAction, opts: ExecuteOpts): Promise<StagedExecuteResult> {
     const nonce = opts.nonce ?? randomNonce();
     const staged = buildStagedExecution({
       programId: this.programId,
@@ -237,7 +322,7 @@ export class VaultSigner {
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
     });
     const signatures = await sendSequence(this.rpc, this.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
-    return { ...signed, nonce, sigBuffer: staged.sigBuffer, signatures };
+    return { ...signed, mode: "staged", nonce, sigBuffer: staged.sigBuffer, signatures };
   }
 
   private async withExpiry(request: ActionRequest): Promise<Action> {

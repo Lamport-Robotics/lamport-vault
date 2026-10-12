@@ -59,7 +59,9 @@ to the PDA's associated token accounts) keep working after a key rotation. The t
 creation: the bitmap is sized once, and `Rotate` must keep the typecodes.
 
 **`SigBuffer`** — PDA, seeds `["sig", vault, payer, nonce_le_u64]`. A W4 signature is 2 348–2 828 bytes and a
-Solana transaction carries 1 232, so the signature is staged in chunks and verified in one `execute`.
+legacy Solana transaction carries 1 232, so the signature is staged in chunks and verified in one `execute`.
+On a cluster with transaction v1 (SIMD-0385, 4 096 bytes) the buffer is not needed: `execute_direct` takes the
+action and the whole signature as instruction data in one transaction. The staged path stays as the fallback.
 
 ```
 version    u8 = 1
@@ -82,11 +84,16 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 | `write_sig(offset, chunk)` | payer | appends; `offset == filled` required |
 | `close_sig_buffer()` | payer | refunds rent, no effect on the vault |
 | `execute()` | anyone | verifies and performs; closes the buffer to `payer` |
+| `execute_direct(action, signature)` | payer | the same checks and effects as `execute` with the action and the signature taken from the instruction data; one transaction v1, no buffer |
 
 `execute` takes the accounts `vault`, `sig_buffer`, `payer` (unsigned, must equal the buffer's payer) and, as
 remaining accounts: `TransferSol` → `[to]`; `TransferToken` → `[vault token account, destination token
 account, mint, token program]`; `Rotate` → none; `Close` → `[to]` followed by any number of
 `[token account, token program]` pairs, each an empty token account owned by the vault that is closed to `to`.
+
+`execute_direct` takes the accounts `vault`, `payer` (signer, writable) and `system_program`, then the same
+remaining accounts as `execute`. `action` must be 1..256 bytes. Steps 2–6 below are one shared code path for
+both instructions; they differ only in where the signature comes from and in who pays a `Rotate`'s rent delta.
 
 `execute`:
 
@@ -126,7 +133,8 @@ bitmap, and a second OTS signature on a spent leaf is a forgery oracle), and the
 (`HistoryFull`). Then the old key's 16-byte hash is appended to `used_keys`, the account grows by 16
 bytes, the bitmap is cleared, `spent = 0`, `generation += 1`. The rent for the 16 bytes is taken from the
 staging buffer before the buffer is closed to its payer, so the buffer's payer pays it and `execute`
-needs no extra signer. After 128 rotations a vault can still spend and `Close`, but not rotate: close it
+needs no extra signer; in `execute_direct` there is no buffer, so the signing `payer` pays it through a
+System Program transfer (hence `system_program` in its accounts). After 128 rotations a vault can still spend and `Close`, but not rotate: close it
 and create a new one. The derivation in `SPEC-DERIVATION.md` never produces a key twice.
 
 **Exhaustion rule.** When one free leaf remains before an `execute` (`2^h - spent <= 1`), that leaf may
@@ -230,6 +238,53 @@ Recovery = the 24 words plus the vault's typecodes (public, in the account). A `
 | verify, hash calls | ≤ 67×15 chain steps + 1 (Q) + 1 (K) + h (path) ≈ 1 010–1 030 |
 | `execute` compute | ~115-145k CU measured for H10, worst case ~210k; client requests 400k |
 | staging | `open_sig_buffer` with a 708-byte first chunk plus `write_sig` chunks of 900 bytes: H5 and H10 take 3 transactions in total, H15 and H20 take 4 |
+| `execute_direct` transaction v1 | H10: TransferSol 2 863 bytes, TransferToken 2 994, Rotate 2 846, Close 2 889; H15 adds 160; the largest (H15 TransferToken) stays under 3 200 of the 4 096 allowed |
+| program binary | 303 096 bytes (`lamport_vault.so`, devnet allocation 310 000) |
+
+### Direct (transaction v1) against staged, measured on devnet
+
+Measured with `sdk/packages/vault/scripts/bench-direct.ts` on devnet (solana-core 4.4.0-beta.0, feature
+`txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL` active), fresh H10 vault, program
+`B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH`, `confirmed` commitment, no priority fee, compute limit 400 000.
+Bytes, compute units and fees are what `getTransaction` reports for the confirmed transactions
+(`maxSupportedTransactionVersion: 1` for v1); the staged row sums its four transactions
+(`open_sig_buffer` with the first chunk, two `write_sig`, `execute`). Wall-clock runs from the first send to the
+last confirmation.
+
+| path | action | transactions | bytes on the wire | compute units | fee (lamports) | wall-clock (ms) |
+|---|---|---|---|---|---|---|
+| direct-v1 | TransferSol | 1 | 2 863 | 124 824 | 5 000 | 928 |
+| staged | TransferSol | 4 | 3 606 | 121 947 | 20 000 | 5 960 |
+| direct-v1 | TransferToken | 1 | 2 994 | 142 335 | 5 000 | 819 |
+| direct-v1 | Rotate | 1 | 2 846 | 121 079 | 5 000 | 924 |
+| direct-v1 | Close | 1 | 2 889 | 129 391 | 5 000 | 1 160 |
+
+Compute units vary by a few thousand from one signature to the next (the LM-OTS chain lengths depend on the
+message digest). Transaction v1 charges the base fee only, 5 000 lamports per signature; the staged path pays
+it four times and also parks the buffer's rent until `execute` returns it. The devnet `Rotate` moved 81 280
+lamports from the payer into the vault for the 16 extra bytes.
+
+A v1 message carries the compute-unit limit, the total priority fee in lamports (not a per-unit price) and
+the loaded-accounts-data-size limit in its header; a v1 transaction that leaves a field unset gets **zero**,
+not the legacy default, so the SDK always writes all three (`@solana/kit` 8.x builds the bytes:
+`createTransactionMessage({ version: 1 })` + `compileTransaction`; the signature envelope is `message ||
+signatures`, no count prefix, and the SDK assembles it itself). `@solana/web3.js` 1.x can neither build nor
+decode v1, so it only forwards the raw bytes.
+
+### Wallet compatibility
+
+Wallet Standard `solana:signAndSendTransaction` (and `solana:signTransaction`) takes the serialised
+transaction bytes and gives back a signature, so a v1 transaction needs nothing new from the interface: the
+app hands over `messageBytes || 64 zero bytes` (the SDK's `unsignedTransaction`) and the wallet signs the
+message, fills the slot and sends. What has to hold is that the wallet's own transaction parser accepts the
+version byte `0x81` (wallets built on web3.js 1.x reject it as an unknown version; those on `@solana/kit`
+8.x or a current `@solana/transactions` decode it) and that the wallet's RPC accepts 4 096-byte packets. The
+feature's `supportedTransactionVersions` set is where a wallet is expected to advertise `1`; until that is
+common, the web app should feature-detect by attempting the direct path and falling back to the staged flow
+when the wallet refuses to sign or the RPC rejects the bytes, which is exactly `VaultSigner`'s `"auto"`
+mode (`isV1Rejection` separates "cannot take v1" from "the program ran and failed"; only the former falls
+back, with the same LMS signature, so no leaf is spent twice). The cold signer is unaffected: it signs the
+same message either way.
 
 ## 7. Test vectors
 

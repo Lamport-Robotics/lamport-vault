@@ -80,6 +80,7 @@ const doc = {
       write_sig: toHex(IX.writeSig),
       close_sig_buffer: toHex(IX.closeSigBuffer),
       execute: toHex(IX.execute),
+      execute_direct: toHex(IX.executeDirect),
       commit: toHex(IX.commit),
       open_pq_buffer: toHex(IX.openPqBuffer),
       write_pq_sig: toHex(IX.writePqSig),

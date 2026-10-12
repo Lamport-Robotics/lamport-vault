@@ -125,7 +125,7 @@ describe("VaultSigner", () => {
     expect(action.kind).toBe("TransferSol");
     if (action.kind === "TransferSol") expect(action.to.equals(to)).toBe(true);
     expect(open.data.readUInt16LE(20 + actionLen)).toBe(2348);
-    expect(open.keys[2]!.pubkey.equals(res.sigBuffer)).toBe(true);
+    expect(open.keys[2]!.pubkey.equals(res.sigBuffer!)).toBe(true);
 
     const { bytes, offsets } = reassemble(rpc.sent.slice(0, 3), IX.openSigBuffer, IX.writeSig, (d) => 20 + d.readUInt32LE(16) + 2);
     expect(toHex(bytes)).toBe(toHex(res.lmsSignature));
@@ -137,7 +137,7 @@ describe("VaultSigner", () => {
     const exec = rpc.sent[3]!;
     expect(exec.instructions.length).toBe(2);
     expect(toHex(exec.instructions[1]!.data)).toBe(toHex(IX.execute));
-    expect(exec.instructions[1]!.keys.map((k) => k.pubkey.toBase58())).toEqual([vault, res.sigBuffer, payer.publicKey, to].map((k) => k.toBase58()));
+    expect(exec.instructions[1]!.keys.map((k) => k.pubkey.toBase58())).toEqual([vault, res.sigBuffer!, payer.publicKey, to].map((k) => k.toBase58()));
     for (const tx of rpc.sent) expect(tx.feePayer!.equals(payer.publicKey)).toBe(true);
   });
 

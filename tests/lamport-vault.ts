@@ -232,6 +232,29 @@ describe("lamport-vault", () => {
     expect(cu).to.be.lessThan(400_000);
   });
 
+  it("execute_direct: wiring on a legacy transaction (a full signature needs a v1 transaction)", async () => {
+    // Agave 2.3 on the local validator has no transaction v1, and a W4 signature
+    // (2348+ bytes) does not fit a 1232-byte legacy transaction, so only the
+    // instruction's wiring and early checks run here; the full path is covered
+    // by the host unit tests of the shared verify code and the devnet benchmark.
+    const action = Action.transferSol(recipient.publicKey, 1000, await FAR());
+    const direct = (actionBytes: Buffer, sig: Buffer) =>
+      program.methods
+        .executeDirect(actionBytes, sig)
+        .accounts({ vault, payer: provider.wallet.publicKey })
+        .remainingAccounts([meta(recipient.publicKey, true)])
+        .preInstructions([COMPUTE_BUDGET_IX])
+        .rpc({ commitment: "confirmed" });
+    await expectError(direct(Buffer.alloc(0), Buffer.alloc(16)), "ActionTooLarge");
+    // Typecodes are checked before the length: zeros are a type mismatch.
+    await expectError(direct(action, Buffer.alloc(600)), "SignatureTypeMismatch");
+    // A truncated real signature (right typecodes, wrong length) is malformed, and nothing is spent.
+    const sig = keyA.sign(1, vaultMessage(program.programId, vault, 0, action));
+    await expectError(direct(action, sig.subarray(0, 600)), "SignatureMalformed");
+    expect(await isUsed(vault, 1)).to.eq(false);
+    expect(await spent(vault)).to.eq(1);
+  });
+
   it("replay", async () => {
     const action = Action.transferSol(recipient.publicKey, 1000, await FAR());
     const buf = await stage(vault, keyA, 0, action);

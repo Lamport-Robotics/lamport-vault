@@ -109,6 +109,7 @@ const res = await signer.execute({ kind: "TransferSol", to, lamports: 1_000_000_
 res.q;            // leaf used
 res.generation;   // key generation the message was bound to
 res.signatures;   // [open_sig_buffer, write_sig, write_sig, execute] for an H10 key
+res.mode;         // "staged"; with { mode: "direct-v1" } one execute_direct transaction v1 (see below), "auto" tries direct first
 
 // Other actions
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
@@ -149,7 +150,7 @@ await registry.rotatePq(owner.publicKey, pqKey, nextPqKey.publicKey); // LMS-sig
 
 ### What happens on the wire
 
-A W4/H10 signature is 2 508 bytes and a Solana transaction carries 1 232, so a signed action is staged:
+A W4/H10 signature is 2 508 bytes and a legacy Solana transaction carries 1 232, so a signed action is staged:
 
 1. `open_sig_buffer(nonce, action, sig_len, first_chunk)` allocates the `SigBuffer` PDA
    `["sig", vault, payer, nonce_le_u64]` and writes as many signature bytes as fit in the same
@@ -164,6 +165,16 @@ A W4/H10 signature is 2 508 bytes and a Solana transaction carries 1 232, so a s
 
 `buildStagedExecution` returns these instructions grouped per transaction without sending anything;
 `closeSigBufferInstruction` abandons a half-written buffer and refunds it.
+
+On a cluster with transaction v1 (SIMD-0385: 4 096-byte transactions, version byte `0x81`, compute limit
+and priority fee in the message header) the same signed action goes in **one** transaction:
+`execute_direct(action, signature)` with accounts `vault`, `payer` (signer), `system_program` and the
+action's remaining accounts. `executeDirectInstruction` builds it, `buildDirectV1Transaction` produces the
+v1 message bytes (via `@solana/kit` 8.x; `@solana/web3.js` 1.x cannot build or parse v1) plus the unsigned
+wire transaction for a wallet, `assembleV1Transaction` appends the signatures, and `sendDirectV1(rpc,
+signer, params)` does the round trip. `VaultSigner` exposes it as `mode: "direct-v1"`, and `"auto"` falls back
+to the staged flow with the same LMS signature when the wallet or RPC rejects v1 (`isV1Rejection`).
+`scripts/bench-direct.ts` measures both paths on devnet; the numbers are in `docs/DESIGN.md` section 6.
 
 ### Byte layouts
 

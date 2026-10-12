@@ -27,6 +27,8 @@ custom-panic = []
 [dev-dependencies]
 serde_json = "1"
 hex = "0.4"
+# Host tests sign real LMS signatures to exercise the shared verify path.
+lamport-lms = { path = "../lms", features = ["sign"] }
 
 [dependencies]
 anchor-lang = "0.32.1"

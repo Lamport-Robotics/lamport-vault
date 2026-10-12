@@ -3,8 +3,8 @@
  * keyed by the LMS public key's fingerprint (sha256), not by vault: a one-time key is one-time
  * wherever it is used. written before a signature exists. localStorage, mirrored to IndexedDB.
  *
- * two tabs must not reserve the same leaf: every reserve runs under a Web Lock (or, where Web Locks
- * are missing, a localStorage lease), and re-reads storage inside the lock instead of trusting memory.
+ * two tabs must not reserve the same leaf: every reserve runs under a Web Lock and re-reads storage
+ * inside the lock instead of trusting memory. no Web Locks, no signing.
  * a wiped profile forgets; after restoring from any backup, rotate the key before signing again.
  */
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -48,24 +48,11 @@ export async function openJournal(): Promise<Journal | null> {
   };
 }
 
-/** Web Locks when available; otherwise a short localStorage lease that other tabs can see. */
+/** Web Locks only. Without them two tabs cannot be kept from reserving the same leaf, so signing is refused. */
 async function withLock<T>(f: () => Promise<T>): Promise<T> {
   const locks = (navigator as Navigator & { locks?: LockManager }).locks;
-  if (locks) return locks.request(LOCK, { mode: "exclusive" }, f);
-  const token = `${Date.now()}:${Math.random()}`;
-  for (let i = 0; i < 50; i++) {
-    const cur = localStorage.getItem(LOCK + ":lease");
-    const stale = !cur || Date.now() - Number(cur.split(":")[0]) > 5000;
-    if (stale) {
-      localStorage.setItem(LOCK + ":lease", token);
-      await new Promise((r) => setTimeout(r, 15));       // let a racing tab's write land
-      if (localStorage.getItem(LOCK + ":lease") === token) {
-        try { return await f(); } finally { if (localStorage.getItem(LOCK + ":lease") === token) localStorage.removeItem(LOCK + ":lease"); }
-      }
-    }
-    await new Promise((r) => setTimeout(r, 40));
-  }
-  throw new Error("another tab is signing; try again in a moment");
+  if (!locks) throw new Error("this browser has no Web Locks, so two tabs could use the same one-time key; use a current Chrome, Firefox or Safari");
+  return locks.request(LOCK, { mode: "exclusive" }, f);
 }
 
 function idbLoad(): Promise<Record<string, JRec> | null> {

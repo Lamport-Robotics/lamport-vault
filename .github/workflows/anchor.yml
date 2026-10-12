@@ -75,7 +75,9 @@ jobs:
 
       - name: Install anchor-cli ${{ env.ANCHOR_VERSION }}
         if: steps.anchor-cache.outputs.cache-hit != 'true'
-        run: cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libudev-dev libssl-dev
+          cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
 
       - uses: actions/setup-node@v4
         with:

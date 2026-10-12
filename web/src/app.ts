@@ -274,6 +274,13 @@ function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest[
   return { node, read };
 }
 
+function describe(a: SignRequest["action"]): string {
+  if (a.kind === "TransferSol") return `Send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`;
+  if (a.kind === "TransferToken") return `Send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
+  if (a.kind === "Rotate") return `Rotate the vault to a new key ${short(a.newLmsPubkey, 10)}`;
+  return `Close the vault and send everything to ${a.to}`;
+}
+
 function toAction(a: SignRequest["action"], expirySlot: bigint): Action {
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), expirySlot };
   if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), expirySlot };
@@ -332,13 +339,14 @@ function hotFlow(scope: Scope) {
   const form = actionForm(scope);
   const s = el("div", {},
     el("div", { class: "notice warn" }, "The words stay in this browser tab until you close it. Fine for small amounts; use the offline signer for anything that matters."),
-    hotKey ? el("div", { class: "ok", style: "margin:0 0 18px" }, "Key loaded for this tab") : el("div", {},
+    hotKey ? el("div", { class: "actions", style: "margin:0 0 18px" }, el("span", { class: "ok", style: "margin:0" }, "Key loaded for this tab"), el("button", { class: "link quiet", id: "forget" }, "Forget it")) : el("div", {},
       el("label", { class: "field" }, el("span", {}, "24 words"), el("textarea", { class: "mono", id: "hwords", rows: "2", autocomplete: "off", spellcheck: "false" })),
       el("label", { class: "field" }, el("span", {}, "Passphrase, if any"), el("input", { class: "mono", id: "hpass", type: "password", autocomplete: "off" }))),
     form.node,
     el("div", { class: "actions" }, el("button", { class: "btn primary", id: "hrun" }, "Sign and execute")),
     el("ul", { class: "steps hidden", id: "steps" }),
     el("div", { class: "err hidden", id: "werr" }));
+  $("#forget", s)?.addEventListener("click", () => { hotKey = null; render(); });
   $("#hrun", s).addEventListener("click", async () => {
     const err = $("#werr", s), btn = $("#hrun", s) as HTMLButtonElement; err.classList.add("hidden");
     try {
@@ -352,6 +360,7 @@ function hotFlow(scope: Scope) {
         hotKey = found.key;
       }
       const a = form.read();
+      if (!confirm(describe(a) + "\n\nSign this with one of the vault's one-time keys?")) return;
       const slot = await rpc.getSlot("confirmed");
       const action = toAction(a, BigInt(slot + 1500));
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
@@ -442,3 +451,11 @@ function registryPanel() {
   });
   return s;
 }
+
+// the hot key lives in this tab only: dropped when the tab is hidden for a while or closed
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hiddenAt = Date.now();
+  else if (hotKey && hiddenAt && Date.now() - hiddenAt > 5 * 60_000) { hotKey = null; render(); }
+});
+addEventListener("pagehide", () => { hotKey = null; });

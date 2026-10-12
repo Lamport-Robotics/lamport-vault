@@ -20,9 +20,13 @@ Of the two standardised stateful schemes,
 LMS (RFC 8554) is simpler than XMSS (RFC 8391): one hash call per chain step, no bitmasks, no PRF layer, so
 the on-chain verifier stays small.
 
-The classic weakness of stateful schemes, reusing a one-time key, is solved **by the chain**: the vault
-account stores a used-leaf bitmap and refuses any leaf whose bit is set. The state lives where it cannot
-be lost or forked, and a leaf may be spent in any order, so several devices can share one key.
+The classic weakness of stateful schemes is reusing a one-time key. The chain closes half of it: the vault
+account stores a used-leaf bitmap and refuses to *execute* any leaf whose bit is set, in any order, so a
+leaf can never be spent twice and several devices can share one key. The other half is the signer's: two
+signatures by the same leaf over two different messages, both released before either executes, let an
+attacker forge a third for that leaf. No chain can see that. So a signer must reserve a leaf durably before
+it signs (the SDK's `reserve` hook, the Pincer1 controller's flash), and devices sharing a key must use
+disjoint lanes. A crash between reservation and signing costs one leaf, never the vault.
 
 **Parameters.** LM-OTS `LMOTS_SHA256_N32_W4` (typecode 3): 67 chains of at most 15 steps, 2180-byte OTS
 signature. LMS heights `H5, H10, H15` (typecodes 5–7): 32, 1 024 or 32 768 signatures per key; the
@@ -286,7 +290,13 @@ mode (`isV1Rejection` separates "cannot take v1" from "the program ran and faile
 back, with the same LMS signature, so no leaf is spent twice). The cold signer is unaffected: it signs the
 same message either way.
 
-## 7. Test vectors
+## 7. Account versions and migration
+
+Vault and Commitment accounts carry a `version` byte (currently 2). Decoders refuse other versions. There
+is no in-place migration: a vault created under an earlier layout is closed and recreated (devnet vaults
+from the first deployment were). Mainnet has never had a deployment, so no live accounts are affected.
+
+## 8. Test vectors
 
 `kat/lms_sha256_w4.json` holds deterministic vectors (H5 and H10, W4) produced by an independent RFC 8554
 implementation with fixed `SEED`/`I`. Every implementation in this repository (Rust, TypeScript, later C)

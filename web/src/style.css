@@ -111,7 +111,7 @@ p.quiet { color: var(--mute); font-size: 13.5px; }
 .link:hover { color: var(--ink); border-color: var(--ink); }
 .link.quiet { font-weight: 500; color: var(--mute); font-size: 12.5px; }
 .actions { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-top: 6px; }
-.arrow::after { content: "→"; margin-left: 8px; }
+.arrow::after { content: "\2192\FE0E"; margin-left: 8px; }
 
 /* statement (vault identity) */
 .statement .addr { font-family: var(--mono); font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; margin: 6px 0 2px; }

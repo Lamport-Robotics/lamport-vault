@@ -70,7 +70,7 @@ lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
              extended from 310 000 with `solana program extend … 40000` before this deployment)
   slot       510317125
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
-  source     pending commit (tree hash 29d8657768a3e6e926845095f24498d3cf0ee8a3): the last-leaf Close / sweep_closed change on
+  source     commit `16b7fe8`: the last-leaf Close / sweep_closed change on
              top of commit `b97fed9` (deployed from the working tree; the commit that lands it is
              the one to verify from)
 

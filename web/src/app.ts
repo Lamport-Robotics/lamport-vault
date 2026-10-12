@@ -2,7 +2,7 @@ import "./polyfill.ts";
 import "./style.css";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
+import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
 import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
@@ -17,6 +17,7 @@ let vaultAddr: PublicKey | null = null;
 let vault: VaultAccount | null = null;
 let vaultLamports = 0;
 let vaultTokens: Holding[] = [];
+let closed = false;   // the address holds a closed vault's tombstone
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
 const SCOPE = { genesisHash: GENESIS_HASH, programId: LAMPORT_VAULT_PROGRAM_ID };
 let lastRun: { vault: string; q: number; kind: string; sigs: string[] } | null = null;
@@ -100,11 +101,11 @@ async function load() {
   const next = isPubkey(h) ? new PublicKey(h) : null;
   if (!next || !vaultAddr || !next.equals(vaultAddr)) hotKey = null;   // a key loaded for one vault never outlives a switch
   vaultAddr = next;
-  vault = null; vaultLamports = 0;
+  vault = null; vaultLamports = 0; closed = false;
   if (vaultAddr) {
     const info = await rpc.getAccountInfo(vaultAddr, "confirmed").catch(() => null);
     if (info && info.owner.equals(LAMPORT_VAULT_PROGRAM_ID)) {
-      try { vault = decodeVault(info.data); } catch (e) { console.warn("vault account not readable", e); vault = null; }
+      try { vault = decodeVault(info.data); } catch (e) { closed = isTombstone(info.data); if (!closed) console.warn("vault account not readable", e); vault = null; }
       vaultLamports = info.lamports;
       try { vaultTokens = await holdings(vaultAddr); } catch (e) { console.error("holdings", e); vaultTokens = []; }
     }
@@ -146,7 +147,7 @@ function home() {
 }
 
 function notFound() {
-  const s = el("div", { class: "page" }, el("div", {}, el("h2", {}, "No vault at this address"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""), el("button", { class: "link arrow", id: "back" }, "Back")));
+  const s = el("div", { class: "page" }, el("div", {}, el("h2", {}, closed ? "This vault was closed" : "No vault at this address"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""), closed ? el("p", { class: "quiet" }, "A closed vault leaves a permanent marker at its address so it can never be reopened under the same key. Create a new vault; your words give the next key.") : null, el("button", { class: "link arrow", id: "back" }, "Back")));
   $("#back", s).addEventListener("click", () => (location.hash = ""));
   return s;
 }

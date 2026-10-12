@@ -61,21 +61,26 @@ Not deployed. The plan, in order:
 
 ## Record
 
-devnet, from commit `17c7880` (`anchor build`, platform-tools v1.56; the same binaries CI built):
+devnet (`anchor build`, platform-tools v1.56):
 
 ```
 lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-  hash       d7481e2404bf89408cb1b76694395b31ae93938120a42db637cb886ece978f85
-  slot       510277112
+  hash       71e4dde1ad281a1f5eb1dc67d9a7f8e423ed6eb371a7b8a81a5478e18d874348
+  size       308 928 bytes (308 913 hashed, trailing zeros trimmed; allocation 310 000)
+  slot       510305889
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
+  source     the Close-tombstone / VaultClosed change on top of commit `e183e3b`
+             (deployed from the working tree; the commit that lands it is the one to verify from)
 
 pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
   hash       3480ae2de802671ee6231c3a191b07b45cc462b5999ee20e29d3ad14ba00bd9f
   slot       510277271
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
+  source     commit `17c7880` (unchanged since)
 ```
 
-earlier: commit `c596d0a`, vault `4d492d9e…d8c1` at slot 510255069, registry `ad3beeab…de81` at slot 510250792.
+earlier: commit `17c7880`, vault `d7481e24…8f85` at slot 510277112; commit `c596d0a`, vault `4d492d9e…d8c1`
+at slot 510255069, registry `ad3beeab…de81` at slot 510250792.
 
 Devnet is redeployed as the code changes; this block is updated with each deployment and the script
 is the source of truth in between.

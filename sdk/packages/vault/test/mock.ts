@@ -1,10 +1,11 @@
 /**
  * A mock cluster for the signer tests: records every transaction, and applies `execute` to the
- * vault account (burns the leaf, performs a Rotate) so journal and generation logic can be
- * exercised end to end without a validator. `failAt` makes the n-th transaction fail at confirmation.
+ * vault account (burns the leaf, performs a Rotate, leaves a tombstone on Close) so journal,
+ * generation and tombstone logic can be exercised end to end without a validator. `failAt` makes
+ * the n-th transaction fail at confirmation.
  */
 import { Keypair, PublicKey, Transaction, type AccountInfo } from "@solana/web3.js";
-import { decodeVault, encodeVault, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
+import { decodeVault, encodeTombstone, encodeVault, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
 import { decodeAction } from "../src/action.ts";
 import { IX } from "../src/discriminator.ts";
 import { LAMPORT_VAULT_PROGRAM_ID } from "../src/programIds.ts";
@@ -62,7 +63,11 @@ export class MockChain implements Rpc {
           v.spent = 0;
           v.generation += 1;
         }
-        this.accounts.set(vaultKey.toBase58(), encodeVault(v));
+        if (action.kind === "Close") {
+          this.accounts.set(vaultKey.toBase58(), encodeTombstone({ version: TOMBSTONE_ACCOUNT_VERSION, vaultId: v.vaultId, closedSlot: BigInt(this.slot) }));
+        } else {
+          this.accounts.set(vaultKey.toBase58(), encodeVault(v));
+        }
       }
     }
     return "sig" + this.sent.length;

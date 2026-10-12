@@ -5,10 +5,10 @@
 //! program would disagree on the wire.
 
 use anchor_lang::prelude::*;
-use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
+use anchor_lang::{AccountDeserialize, AccountSerialize, Discriminator, InstructionData};
 use lamport_lms::LmsType;
 use lamport_vault::{
-    signed_message, vault_id_for, Action, SigBuffer, Vault, KEY_HASH_LEN, MAX_VALIDITY_SLOTS, MESSAGE_VERSION, SIG_SEED, VAULT_SEED,
+    signed_message, vault_id_for, Action, SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_VALIDITY_SLOTS, MESSAGE_VERSION, SIG_SEED, VAULT_SEED,
 };
 use serde_json::Value;
 use std::str::FromStr;
@@ -161,7 +161,9 @@ fn discriminators_and_instruction_data() {
     assert_eq!(I::ExecuteDirect::DISCRIMINATOR.to_vec(), hx(&ix["execute_direct"]));
     let acc = &d["discriminators"]["accounts"];
     assert_eq!(Vault::DISCRIMINATOR.to_vec(), hx(&acc["Vault"]));
+    assert_eq!(Tombstone::DISCRIMINATOR.to_vec(), hx(&acc["Tombstone"]));
     assert_eq!(SigBuffer::DISCRIMINATOR.to_vec(), hx(&acc["SigBuffer"]));
+    assert_ne!(Vault::DISCRIMINATOR, Tombstone::DISCRIMINATOR);
 
     let key = h5(&d);
     assert_eq!(
@@ -232,6 +234,26 @@ fn account_layouts() {
     vault.try_serialize(&mut out).unwrap();
     assert_eq!(out, vault_hex);
     assert_eq!(out.len(), Vault::space(LmsType::Sha256M32H5, hist_len));
+
+    // Tombstone: disc(8) version(0xfe) vault_id(32) closed_slot(8), 49 bytes; reading it as a Vault
+    // says VaultClosed, and a Vault serialised after `Close` marked it writes nothing.
+    let tomb_hex = hx(&d["accounts"]["tombstone_hex"]);
+    assert_eq!(tomb_hex.len(), Tombstone::SPACE);
+    assert_eq!(tomb_hex[8], Tombstone::VERSION);
+    let tomb = Tombstone::try_deserialize(&mut &tomb_hex[..]).unwrap();
+    assert_eq!(tomb.vault_id, vault_id_for(&key));
+    assert_eq!(tomb.closed_slot, 0x1122334466);
+    let mut out = Vec::new();
+    tomb.try_serialize(&mut out).unwrap();
+    assert_eq!(out, tomb_hex);
+    let closed = Vault::try_deserialize(&mut &tomb_hex[..]).expect_err("a tombstone is not a vault");
+    assert_eq!(closed, anchor_lang::error::Error::from(lamport_vault::VaultError::VaultClosed));
+    let mut retired = vault.clone();
+    retired.version = Tombstone::VERSION;
+    let mut none = Vec::new();
+    retired.try_serialize(&mut none).unwrap();
+    assert!(none.is_empty(), "a vault marked closed is never written back");
+    assert!(Vault::try_deserialize(&mut &none[..]).is_err());
 
     let sizes = &d["accounts"]["sizes"];
     assert_eq!(sizes["vault_h5"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H5, 0));

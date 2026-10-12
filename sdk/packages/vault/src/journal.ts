@@ -2,6 +2,13 @@
  * Signer-side leaf journal: the durable record a `VaultSigner` keeps of what it has signed, and
  * the rollback check built on it (docs/DESIGN.md section 2, "Multi-device" and "Signer rollback").
  *
+ * A journal belongs to one LMS key and is keyed by the key's **fingerprint**, `sha256(lms_pubkey)`
+ * in hex ({@link keyFingerprint}): a one-time key is one-time wherever it is used, so the record of
+ * its spent leaves must follow the key, not the vault or the key generation it happens to serve.
+ * The record still names the vault and the generation the key was used under: a journal whose
+ * `vault` is not the signer's vault means the key is being pointed at a second vault, which the
+ * signer refuses outright; `generation` feeds the stale check below.
+ *
  * The chain's bitmap stops a leaf from being *executed* twice. It cannot stop a signer from
  * *signing* a leaf twice, and two LM-OTS signatures by one leaf over two messages are a forgery
  * oracle. Two things make a signer sign a leaf twice: a crash between signing and submitting
@@ -17,14 +24,37 @@
  * `FileLeafJournal` is the Node implementation (write to a temporary file, fsync, rename, fsync
  * the directory; a `<path>.lock` file keeps two processes out of one journal).
  * `BrowserLeafJournal` is the IndexedDB implementation (one database per origin, one record per
- * vault and key generation; the Web Locks API keeps two tabs out of one journal where the
- * browser has it). `MemoryLeafJournal` lives for one object and nothing in it survives a restart:
+ * key fingerprint; the Web Locks API keeps two tabs out of one journal where the browser has it). `MemoryLeafJournal` lives for one object and nothing in it survives a restart:
  * a `VaultSigner` never picks it on its own, it has to be asked for with `journal: "ephemeral"`.
  */
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 
-/** What a journal stores for one (vault, lane, signer). */
+/** An LMS key, as the 56-byte public key or as its fingerprint (64 hex characters). */
+export type KeyLike = Uint8Array | string;
+
+/**
+ * The identity a journal is keyed by: `sha256(lms_pubkey)` as lowercase hex. A fingerprint passed
+ * in is normalised and returned; anything else must be a 56-byte LMS public key. (For a vault's
+ * initial key this is the hex of its `vault_id`.)
+ */
+export function keyFingerprint(key: KeyLike): string {
+  if (typeof key === "string") {
+    const hex = key.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error("key fingerprint must be 64 hex characters (sha256 of the 56-byte LMS public key)");
+    return hex;
+  }
+  if (key.length !== 56) throw new Error("LMS public key must be 56 bytes");
+  return bytesToHex(sha256(key));
+}
+
+/** What a journal stores for one (key, lane, signer). */
 export interface LeafJournalState {
-  /** The vault's key generation this record belongs to. */
+  /** Fingerprint of the key this record belongs to ({@link keyFingerprint}). */
+  key: string;
+  /** The vault (base58) the key is used in. A key never serves two vaults. */
+  vault: string;
+  /** The vault's key generation this key was used under. */
   generation: number;
   /** Spent leaves in this signer's lane when the journal was last synced with the chain. */
   spent: number;
@@ -38,7 +68,10 @@ export interface LeafJournalState {
  * a crash must still `load` the saved state.
  */
 export interface LeafJournal {
+  /** Fingerprint of the key this journal is for; `VaultSigner` refuses a journal of another key. */
+  readonly key: string;
   load(): Promise<LeafJournalState | null>;
+  /** Must reject a state whose `key` is not this journal's. */
   save(state: LeafJournalState): Promise<void>;
   /**
    * Optional identity for serialisation: two journal objects with the same `lockKey` are treated
@@ -73,10 +106,12 @@ export class JournalLockedError extends Error {
 
 /** A journal that lives in this object only. Fine for tests and one-shot scripts; nothing survives a restart. */
 export class MemoryLeafJournal implements LeafJournal {
+  readonly key: string;
   private state: LeafJournalState | null = null;
 
-  constructor(initial: LeafJournalState | null = null) {
-    this.state = initial ? cloneState(initial) : null;
+  constructor(key: KeyLike, initial: Omit<LeafJournalState, "key"> | null = null) {
+    this.key = keyFingerprint(key);
+    this.state = initial ? cloneState(validateState({ ...initial, key: this.key })) : null;
   }
 
   async load(): Promise<LeafJournalState | null> {
@@ -84,17 +119,24 @@ export class MemoryLeafJournal implements LeafJournal {
   }
 
   async save(state: LeafJournalState): Promise<void> {
-    this.state = cloneState(validateState(state));
+    this.state = cloneState(checkKey(validateState(state), this.key, "MemoryLeafJournal"));
   }
 }
 
-const FILE_FORMAT_VERSION = 1;
+/** On-disk / IndexedDB record format: 2 since journals are keyed by the key fingerprint. */
+export const JOURNAL_FORMAT_VERSION = 2;
+const FILE_FORMAT_VERSION = JOURNAL_FORMAT_VERSION;
+
+/** Where a {@link FileLeafJournal} lives: a directory (file `<dir>/<fingerprint>.json`) or an explicit path. */
+export type FileLeafJournalLocation = { dir: string; path?: undefined } | { path: string; dir?: undefined };
 
 /**
  * A journal in one JSON file (Node only; `node:fs/promises` is imported on first use so the
- * package still loads in a browser). Every `save` writes a temporary file next to the journal,
- * fsyncs it, renames it over the journal and fsyncs the directory, so the file on disk is always
- * a complete state: the one before the save or the one after, never a torn write.
+ * package still loads in a browser). The file is `<dir>/<key fingerprint>.json`, or the `path`
+ * given; either way the record inside names the key and `load` refuses a file written for another
+ * key. Every `save` writes a temporary file next to the journal, fsyncs it, renames it over the
+ * journal and fsyncs the directory, so the file on disk is always a complete state: the one before
+ * the save or the one after, never a torn write.
  *
  * Two `FileLeafJournal` objects on the same path share a `lockKey` (the path), so two signers in
  * one process cannot reserve the same leaf. Across processes a `<path>.lock` file does the same:
@@ -104,6 +146,7 @@ const FILE_FORMAT_VERSION = 1;
  * {@link STALE_LOCK_MS} old (younger than that it may still be being written).
  */
 export class FileLeafJournal implements LeafJournal {
+  readonly key: string;
   readonly path: string;
   readonly lockPath: string;
   readonly lockKey: string;
@@ -111,7 +154,9 @@ export class FileLeafJournal implements LeafJournal {
   private nodePath: Promise<typeof import("node:path")> | undefined;
   private held = false;
 
-  constructor(path: string) {
+  constructor(key: KeyLike, location: FileLeafJournalLocation) {
+    this.key = keyFingerprint(key);
+    const path = location.path ?? joinPath(location.dir, `${this.key}.json`);
     this.path = path;
     this.lockPath = `${path}.lock`;
     this.lockKey = `file:${path}`;
@@ -202,15 +247,15 @@ export class FileLeafJournal implements LeafJournal {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw e;
     }
-    return parseJournalFile(text, this.path);
+    return parseJournalFile(text, this.path, this.key);
   }
 
   async save(state: LeafJournalState): Promise<void> {
-    validateState(state);
+    checkKey(validateState(state), this.key, this.path);
     const [fs, nodePath] = await this.modules();
     const dir = nodePath.dirname(this.path);
     const tmp = nodePath.join(dir, `.${nodePath.basename(this.path)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
-    const text = JSON.stringify({ v: FILE_FORMAT_VERSION, generation: state.generation, spent: state.spent, reserved: [...state.reserved] });
+    const text = JSON.stringify(toRecord(state));
     const fh = await fs.open(tmp, "w", 0o600);
     try {
       await fh.writeFile(text, "utf8");
@@ -249,11 +294,9 @@ const BROWSER_JOURNAL_STORE = "journals";
 const BROWSER_JOURNAL_DB_VERSION = 1;
 
 export interface BrowserLeafJournalOptions {
-  /** The vault address (base58, or anything with `toBase58()`). */
-  vault: string | { toBase58(): string };
-  /** The key generation this record is for; a Rotate moves the signer to a new record. */
-  generation: number;
-  /** Database name; default {@link BROWSER_JOURNAL_DB}. One database per origin, shared by every vault. */
+  /** The LMS key this journal is for: its 56-byte public key or its fingerprint. */
+  key: KeyLike;
+  /** Database name; default {@link BROWSER_JOURNAL_DB}. One database per origin, shared by every key. */
   dbName?: string;
   /** The IndexedDB factory; default `globalThis.indexedDB`, read on first use so the module loads anywhere. */
   indexedDB?: IDBFactory;
@@ -263,7 +306,7 @@ export interface BrowserLeafJournalOptions {
 
 /**
  * A journal in the browser's IndexedDB: one database per origin ({@link BROWSER_JOURNAL_DB}),
- * one record per vault and key generation under the key `${vault}:${generation}`. Every `save`
+ * one record per LMS key under its fingerprint ({@link keyFingerprint}). Every `save`
  * resolves when its read-write transaction has committed (requested with `durability:
  * "strict"` where the browser honours it). Two tabs over one record are kept apart by a Web
  * Lock named after the record (`navigator.locks`), taken by `withJournalLock` around every
@@ -274,7 +317,7 @@ export interface BrowserLeafJournalOptions {
  * package loads in Node and the class can be given a fake factory for tests.
  */
 export class BrowserLeafJournal implements LeafJournal {
-  /** `${vault}:${generation}`: the record's key in the object store. */
+  /** The key fingerprint: the record's key in the object store. */
   readonly key: string;
   readonly dbName: string;
   readonly lockKey: string;
@@ -283,11 +326,8 @@ export class BrowserLeafJournal implements LeafJournal {
   private release: (() => void) | undefined;
 
   constructor(opts: BrowserLeafJournalOptions) {
-    if (!isU32(opts.generation)) throw new Error(`BrowserLeafJournal: generation must be a u32, got ${String(opts.generation)}`);
     this.opts = opts;
-    const vault = typeof opts.vault === "string" ? opts.vault : opts.vault.toBase58();
-    if (!vault) throw new Error("BrowserLeafJournal: vault is required");
-    this.key = `${vault}:${opts.generation}`;
+    this.key = keyFingerprint(opts.key);
     this.dbName = opts.dbName ?? BROWSER_JOURNAL_DB;
     this.lockKey = `idb:${this.dbName}:${this.key}`;
   }
@@ -337,17 +377,13 @@ export class BrowserLeafJournal implements LeafJournal {
       tx.onerror = () => reject(tx.error ?? new Error("BrowserLeafJournal: load failed"));
     });
     if (raw === undefined || raw === null) return null;
-    if (typeof raw !== "object") throw new Error(`BrowserLeafJournal: record ${this.key} is not a journal object`);
-    const o = raw as Record<string, unknown>;
-    if (o.v !== FILE_FORMAT_VERSION) throw new Error(`BrowserLeafJournal: record ${this.key} has format ${String(o.v)} (want ${FILE_FORMAT_VERSION})`);
-    if (!Array.isArray(o.reserved)) throw new Error(`BrowserLeafJournal: record ${this.key}: reserved must be an array`);
-    return validateState({ generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])] });
+    return fromRecord(raw, `BrowserLeafJournal: record ${this.key}`, this.key);
   }
 
   async save(state: LeafJournalState): Promise<void> {
-    validateState(state);
+    checkKey(validateState(state), this.key, `BrowserLeafJournal: record ${this.key}`);
     const db = await this.open();
-    const record = { v: FILE_FORMAT_VERSION, generation: state.generation, spent: state.spent, reserved: [...state.reserved] };
+    const record = toRecord(state);
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(BROWSER_JOURNAL_STORE, "readwrite", { durability: "strict" });
       tx.objectStore(BROWSER_JOURNAL_STORE).put(record, this.key);
@@ -404,19 +440,39 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Parses the on-disk JSON form; rejects anything that is not a complete, well-typed state. */
-export function parseJournalFile(text: string, source = "journal"): LeafJournalState {
+/**
+ * Parses the on-disk JSON form (`{ v: 2, key, vault, generation, spent, reserved }`); rejects
+ * anything that is not a complete, well-typed state, and, when `key` is given, a record written
+ * for another key.
+ */
+export function parseJournalFile(text: string, source = "journal", key?: string): LeafJournalState {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
     throw new Error(`${source}: not valid JSON`);
   }
+  return fromRecord(raw, source, key);
+}
+
+/** The stored form of a state. */
+function toRecord(state: LeafJournalState): Record<string, unknown> {
+  return { v: FILE_FORMAT_VERSION, key: state.key, vault: state.vault, generation: state.generation, spent: state.spent, reserved: [...state.reserved] };
+}
+
+function fromRecord(raw: unknown, source: string, key?: string): LeafJournalState {
   if (typeof raw !== "object" || raw === null) throw new Error(`${source}: not a journal object`);
   const o = raw as Record<string, unknown>;
   if (o.v !== FILE_FORMAT_VERSION) throw new Error(`${source}: journal format ${String(o.v)} is not supported (want ${FILE_FORMAT_VERSION})`);
   if (!Array.isArray(o.reserved)) throw new Error(`${source}: reserved must be an array`);
-  return validateState({ generation: o.generation as number, spent: o.spent as number, reserved: o.reserved as number[] });
+  const state = validateState({ key: o.key as string, vault: o.vault as string, generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])] });
+  return key === undefined ? state : checkKey(state, key, source);
+}
+
+/** Throws unless `state.key` is `key`. Returns the state for chaining. */
+function checkKey(state: LeafJournalState, key: string, source: string): LeafJournalState {
+  if (state.key !== key) throw new Error(`${source}: journal belongs to key ${state.key}, not ${key}`);
+  return state;
 }
 
 function isU32(x: unknown): x is number {
@@ -425,6 +481,8 @@ function isU32(x: unknown): x is number {
 
 /** Throws unless `state` is a well-typed journal state. Returns it for chaining. */
 export function validateState(state: LeafJournalState): LeafJournalState {
+  if (typeof state.key !== "string" || !/^[0-9a-f]{64}$/.test(state.key)) throw new Error(`journal: key must be a 64-hex-character fingerprint, got ${String(state.key)}`);
+  if (typeof state.vault !== "string" || state.vault.length === 0) throw new Error(`journal: vault must be a base58 address, got ${String(state.vault)}`);
   if (!isU32(state.generation)) throw new Error(`journal: generation must be a u32, got ${String(state.generation)}`);
   if (!isU32(state.spent)) throw new Error(`journal: spent must be a u32, got ${String(state.spent)}`);
   if (!Array.isArray(state.reserved) || !state.reserved.every(isU32)) throw new Error("journal: reserved must be an array of leaf indices");
@@ -432,7 +490,33 @@ export function validateState(state: LeafJournalState): LeafJournalState {
 }
 
 export function cloneState(s: LeafJournalState): LeafJournalState {
-  return { generation: s.generation, spent: s.spent, reserved: [...s.reserved] };
+  return { key: s.key, vault: s.vault, generation: s.generation, spent: s.spent, reserved: [...s.reserved] };
+}
+
+/** `dir/name` with one separator, without `node:path` (the module must load in a browser). */
+function joinPath(dir: string, name: string): string {
+  if (!dir) throw new Error("FileLeafJournal: dir must not be empty");
+  const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  return dir.endsWith(sep) ? dir + name : dir + sep + name;
+}
+
+/**
+ * Thrown by `VaultSigner` when the journal of its key names another vault: the one-time key is
+ * being pointed at a second vault. Its leaves spent in the first vault would be free in the
+ * second, and a second signature by a spent leaf is a forgery oracle. There is no override:
+ * use a fresh key for the new vault.
+ */
+export class JournalVaultMismatchError extends Error {
+  readonly key: string;
+  readonly journalVault: string;
+  readonly vault: string;
+  constructor(key: string, journalVault: string, vault: string) {
+    super(`key ${key} was used with vault ${journalVault}; this signer is for vault ${vault}. A one-time key never serves two vaults: use a fresh key.`);
+    this.name = "JournalVaultMismatchError";
+    this.key = key;
+    this.journalVault = journalVault;
+    this.vault = vault;
+  }
 }
 
 /** What the chain and the journal said when a signer found itself stale. */

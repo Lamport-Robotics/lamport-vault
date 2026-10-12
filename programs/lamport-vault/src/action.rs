@@ -53,9 +53,10 @@ pub enum Action {
         /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
-    /// Send every lamport to `to` and delete the vault account.
+    /// Send every lamport but a tombstone's rent to `to` and rewrite the account
+    /// as a [`crate::Tombstone`]; the address can never hold a vault again.
     Close {
-        /// Destination of all lamports.
+        /// Destination of the lamports.
         to: Pubkey,
         /// Slot the action was signed at; must not be in the future.
         issued_slot: u64,

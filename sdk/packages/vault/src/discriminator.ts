@@ -29,6 +29,8 @@ export const IX = {
 
 export const ACCOUNT = {
   vault: accountDiscriminator("Vault"),
+  /** What `Close` leaves at a vault's address (see `decodeVaultOrTombstone`). */
+  tombstone: accountDiscriminator("Tombstone"),
   sigBuffer: accountDiscriminator("SigBuffer"),
   commitment: accountDiscriminator("Commitment"),
   pqSigBuffer: accountDiscriminator("PqSigBuffer"),

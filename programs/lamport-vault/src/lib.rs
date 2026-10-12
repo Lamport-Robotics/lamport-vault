@@ -21,7 +21,7 @@ pub mod state;
 
 pub use action::Action;
 pub use error::VaultError;
-pub use state::{SigBuffer, Vault, KEY_HASH_LEN, MAX_ACTION_LEN};
+pub use state::{SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_ACTION_LEN};
 
 declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
 
@@ -35,8 +35,8 @@ pub const MESSAGE_VERSION: u8 = 1;
 pub const MESSAGE_DOMAIN: &[u8] = b"lamport-vault/v1";
 
 /// Most past keys a vault remembers. Rotating beyond it fails with
-/// `HistoryFull`; the vault must then `Close` and be recreated. Each entry is
-/// 16 bytes of account data.
+/// `HistoryFull`; the vault must then `Close` and a new one be created with a
+/// fresh key. Each entry is 16 bytes of account data.
 #[cfg(not(feature = "small-history"))]
 #[constant]
 pub const MAX_KEY_HISTORY: u16 = 128;
@@ -158,6 +158,45 @@ enum RentSource<'a, 'info> {
     Payer { payer: &'a AccountInfo<'info>, system_program: &'a AccountInfo<'info> },
 }
 
+/// Creates `account`, a PDA of this program signed with `seeds`, with `space`
+/// bytes of zeroed data, rent paid by `payer`: `create_account` when the
+/// address holds no lamports, otherwise a top-up to the rent-exempt minimum,
+/// `allocate` and `assign` (the two paths Anchor's `init` takes, so a deposit
+/// made before the vault existed is kept). An address that already holds data
+/// makes the system program's `allocate` fail with `AccountAlreadyInUse`.
+fn create_pda_account<'info>(
+    payer: &AccountInfo<'info>,
+    account: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    space: usize,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    use anchor_lang::system_program::{allocate, assign, create_account, transfer, Allocate, Assign, CreateAccount, Transfer};
+    let rent = Rent::get()?.minimum_balance(space);
+    let current = account.lamports();
+    let signer: &[&[&[u8]]] = &[seeds];
+    if current == 0 {
+        let cpi = CpiContext::new_with_signer(system_program.clone(), CreateAccount { from: payer.clone(), to: account.clone() }, signer);
+        return create_account(cpi, rent, space as u64, &ID);
+    }
+    let top_up = rent.saturating_sub(current);
+    if top_up > 0 {
+        transfer(CpiContext::new(system_program.clone(), Transfer { from: payer.clone(), to: account.clone() }), top_up)?;
+    }
+    allocate(
+        CpiContext::new_with_signer(system_program.clone(), Allocate { account_to_allocate: account.clone() }, signer),
+        space as u64,
+    )?;
+    assign(CpiContext::new_with_signer(system_program.clone(), Assign { account_to_assign: account.clone() }, signer), &ID)
+}
+
+/// Serializes `value` (discriminator first) over the start of `account`'s data.
+fn write_account<T: AccountSerialize>(account: &AccountInfo, value: &T) -> Result<()> {
+    let mut data = account.try_borrow_mut_data()?;
+    let mut dst: &mut [u8] = &mut data;
+    value.try_serialize(&mut dst)
+}
+
 fn is_token_program(key: &Pubkey) -> bool {
     *key == anchor_spl::token::ID || *key == anchor_spl::token_2022::ID
 }
@@ -205,7 +244,8 @@ fn verify_and_act<'info>(
     // 5. burn the leaf before doing anything else.
     vault.spend_leaf(verified.q)?;
     // 6. decode, validity window, exhaustion rule, perform.
-    let action = check_action(action_bytes, Clock::get()?.slot, verified.last_free)?;
+    let slot = Clock::get()?.slot;
+    let action = check_action(action_bytes, slot, verified.last_free)?;
     let pk = verified.pk;
 
     let vault_id = vault.vault_id;
@@ -324,7 +364,21 @@ fn verify_and_act<'info>(
                     &[signer_seeds],
                 ))?;
             }
-            vault.close(to_ai.clone())?;
+            // The address stays occupied by a `Tombstone` holding exactly its
+            // rent-exempt minimum (DESIGN.md section 2, "Close"); `create_vault`
+            // refuses it, so no unexpired pre-close signature can ever verify
+            // against a recreated vault. Everything else goes to `to`.
+            let vault_ai = vault.to_account_info();
+            let keep = Rent::get()?.minimum_balance(Tombstone::SPACE);
+            let payout = vault_ai.lamports().checked_sub(keep).ok_or(VaultError::InsufficientFunds)?;
+            vault_ai.sub_lamports(payout)?;
+            to_ai.add_lamports(payout)?;
+            vault_ai.resize(Tombstone::SPACE)?;
+            let tombstone = Tombstone { version: Tombstone::VERSION, vault_id, closed_slot: slot };
+            write_account(&vault_ai, &tombstone)?;
+            // Anchor writes `vault` back at exit; with this version byte its
+            // serializer writes nothing (see `AccountSerialize for Vault`).
+            vault.version = Tombstone::VERSION;
         }
     }
     Ok(())
@@ -342,20 +396,36 @@ pub mod lamport_vault {
     /// `vault_id` must equal `sha256(lms_pubkey)`. It is passed explicitly so
     /// the PDA seed is a plain argument that the IDL can describe (Anchor's
     /// IDL generator cannot follow a hash of an argument inside `seeds`).
+    ///
+    /// The account is created here rather than by Anchor's `init` so that a
+    /// closed vault's `Tombstone` at the address is reported as `VaultClosed`
+    /// before any system program call; a live vault at the address still fails
+    /// in the system program (`AccountAlreadyInUse`).
     pub fn create_vault(ctx: Context<CreateVault>, vault_id: [u8; 32], lms_pubkey: [u8; 56]) -> Result<()> {
         let pk = parse_vault_key(&lms_pubkey)?;
         require!(vault_id == vault_id_for(&lms_pubkey), VaultError::VaultIdMismatch);
-        let vault = &mut ctx.accounts.vault;
-        vault.version = Vault::VERSION;
-        vault.bump = ctx.bumps.vault;
-        vault.vault_id = vault_id;
-        vault.lms_pubkey = lms_pubkey;
-        vault.spent = 0;
-        vault.generation = 0;
-        vault.created_slot = Clock::get()?.slot;
-        vault.used = vec![0u8; Vault::bitmap_len(pk.lms_type)];
-        vault.used_keys = Vec::new();
-        Ok(())
+        let vault_ai = ctx.accounts.vault.to_account_info();
+        require!(!Tombstone::is_at(&vault_ai), VaultError::VaultClosed);
+        let bump = ctx.bumps.vault;
+        create_pda_account(
+            &ctx.accounts.payer.to_account_info(),
+            &vault_ai,
+            &ctx.accounts.system_program.to_account_info(),
+            Vault::space(pk.lms_type, 0),
+            &[VAULT_SEED, &vault_id, &[bump]],
+        )?;
+        let vault = Vault {
+            version: Vault::VERSION,
+            bump,
+            vault_id,
+            lms_pubkey,
+            spent: 0,
+            generation: 0,
+            created_slot: Clock::get()?.slot,
+            used: vec![0u8; Vault::bitmap_len(pk.lms_type)],
+            used_keys: Vec::new(),
+        };
+        write_account(&vault_ai, &vault)
     }
 
     /// Allocates a staging buffer for one action. `action` is the Borsh
@@ -414,6 +484,10 @@ pub mod lamport_vault {
     /// * `Rotate`: none
     /// * `Close`: `[to (w)]`, then any number of `[token account (w), token program]` pairs,
     ///   each an empty token account owned by the vault; they are closed to `to`.
+    ///   The vault itself becomes a `Tombstone` (its address is never reusable).
+    ///
+    /// On a closed vault (a `Tombstone` at the address) every instruction that
+    /// reads the vault fails with `VaultClosed`.
     pub fn execute<'info>(ctx: Context<'_, '_, 'info, 'info, Execute<'info>>) -> Result<()> {
         let buf = &ctx.accounts.sig_buffer;
         // 1. buffer complete and bound to this vault (binding also checked by has_one).
@@ -451,14 +525,12 @@ pub mod lamport_vault {
 pub struct CreateVault<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    #[account(
-        init,
-        payer = payer,
-        space = Vault::space(parse_vault_key(&lms_pubkey)?.lms_type, 0),
-        seeds = [VAULT_SEED, vault_id.as_ref()],
-        bump,
-    )]
-    pub vault: Account<'info, Vault>,
+    /// The vault PDA, created and written by the handler rather than by `init`
+    /// so a `Tombstone` at the address is refused with `VaultClosed` before any
+    /// system program call (see `create_vault`).
+    /// CHECK: seeds verified here; the handler checks and initialises the data.
+    #[account(mut, seeds = [VAULT_SEED, vault_id.as_ref()], bump)]
+    pub vault: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 

@@ -1,0 +1,109 @@
+name: anchor
+
+# The localnet suite (tests/*.ts) against a real validator: `anchor test`
+# builds both programs with platform-tools v1.56, starts solana-test-validator
+# (agave 2.3.13, the version pinned for devnet) and runs the mocha tests with
+# real LMS signatures from `lms-tool`. Once with the production constants and
+# once with `--features small-history` (MAX_KEY_HISTORY = 2) so the HistoryFull
+# path is exercised. No Docker: everything runs on the runner. The host-side
+# cargo and SDK tests are in test.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  AGAVE_VERSION: "2.3.13"
+  ANCHOR_VERSION: "0.32.1"
+  # cargo-build-sbf reads tools-version from programs/*/Cargo.toml and fetches
+  # this into ~/.cache/solana on first use; the cache below keeps it.
+  PLATFORM_TOOLS: v1.56
+
+jobs:
+  anchor-test:
+    name: anchor test ${{ matrix.features && format('--features {0}', matrix.features) || '(default)' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "small-history"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # One key per feature set: the program builds differ.
+          key: anchor-${{ matrix.features || 'default' }}
+          cache-targets: true
+
+      - name: Cache platform-tools and the SBF toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: platform-tools-${{ env.PLATFORM_TOOLS }}-${{ runner.os }}
+          restore-keys: |
+            platform-tools-${{ env.PLATFORM_TOOLS }}-
+
+      - name: Cache agave ${{ env.AGAVE_VERSION }}
+        id: agave-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana/install
+          key: agave-${{ env.AGAVE_VERSION }}-${{ runner.os }}
+
+      - name: Install agave ${{ env.AGAVE_VERSION }}
+        if: steps.agave-cache.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v${AGAVE_VERSION}/install)"
+
+      - name: Add agave to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Cache anchor-cli ${{ env.ANCHOR_VERSION }}
+        id: anchor-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/anchor
+          key: anchor-cli-${{ env.ANCHOR_VERSION }}-${{ runner.os }}
+
+      - name: Install anchor-cli ${{ env.ANCHOR_VERSION }}
+        if: steps.anchor-cache.outputs.cache-hit != 'true'
+        run: cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install test dependencies (yarn, workspace root)
+        run: yarn install --frozen-lockfile
+
+      - name: Install SDK dependencies (the suite builds and loads sdk/)
+        run: npm ci
+        working-directory: sdk
+
+      - name: Keypair for the test validator wallet (Anchor.toml provider.wallet)
+        run: |
+          mkdir -p ~/.config/solana
+          solana-keygen new --no-bip39-passphrase --silent --outfile ~/.config/solana/id.json
+
+      - name: Versions
+        run: |
+          solana --version
+          anchor --version
+          node --version
+          yarn --version
+
+      - name: anchor test
+        run: anchor test ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
+
+      - name: Validator log on failure
+        if: failure()
+        run: tail -n 200 .anchor/test-ledger/validator.log || true

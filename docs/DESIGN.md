@@ -65,6 +65,27 @@ The vault's address never changes, so deposits (plain `SystemProgram::transfer` 
 to the PDA's associated token accounts) keep working after a key rotation. The tree height is fixed at
 creation: the bitmap is sized once, and `Rotate` must keep the typecodes.
 
+**`Tombstone`** — what `Close` leaves at the vault's address, for good.
+
+```
+version      u8      = 0xFE   reserved: no Vault layout ever carries it
+vault_id     [u8;32]
+closed_slot  u64
+```
+
+49 bytes with the discriminator, holding exactly its rent-exempt minimum. It has its own Anchor
+discriminator (`sha256("account:Tombstone")[0..8]`), so it is never read as a `Vault`: the `Vault`
+deserializer is written out by hand (same discriminator and layout as `#[account]` would derive) so that
+a tombstone where a vault is expected fails with `VaultClosed` (6032) rather than a discriminator mismatch,
+and so that a vault `Close` has rewritten is never serialised back over the tombstone at the end of the
+instruction (the handler marks the in-memory vault with the tombstone's version byte; that version
+serialises to nothing). `create_vault` creates the account itself (not through Anchor's `init`) and
+refuses a tombstone first, with the same error. Why a tombstone and not a deletion: `vault_id` is the
+hash of the initial key, so a deleted vault could be recreated by `create_vault` with that key at
+generation 0 with a clear bitmap, and any signature made before the close and still inside its validity
+window would verify again against the recreated account. With the address occupied the replay has
+nowhere to land; a new vault needs a new key (SDK: `nextFreshKeyIndex`).
+
 **`SigBuffer`** — PDA, seeds `["sig", vault, payer, nonce_le_u64]`. A W4 signature is 2 348–2 828 bytes and a
 legacy Solana transaction carries 1 232, so the signature is staged in chunks and verified in one `execute`.
 On a cluster with transaction v1 (SIMD-0385, 4 096 bytes) the buffer is not needed: `execute_direct` takes the
@@ -86,7 +107,7 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 
 | ix | signer | effect |
 |---|---|---|
-| `create_vault(vault_id, lms_pubkey)` | payer | requires `vault_id == sha256(lms_pubkey)` (passed explicitly so the PDA seed is a plain argument the IDL can describe), validates typecodes (LMS 5..7, LMOTS 3), inits `Vault` with a clear bitmap sized for the key's height, `generation = 0`, empty history |
+| `create_vault(vault_id, lms_pubkey)` | payer | requires `vault_id == sha256(lms_pubkey)` (passed explicitly so the PDA seed is a plain argument the IDL can describe), validates typecodes (LMS 5..7, LMOTS 3), refuses a tombstoned address (`VaultClosed`), creates the PDA (`create_account`, or top-up + `allocate` + `assign` when the address was funded in advance) and writes a `Vault` with a clear bitmap sized for the key's height, `generation = 0`, empty history; a live vault at the address fails in the system program (`AccountAlreadyInUse`) |
 | `open_sig_buffer(nonce, action, sig_len, first_chunk)` | payer | allocates the buffer for one action; `action` must decode, `sig_len` must match the vault's parameter set; `first_chunk` (may be empty) is written at offset 0 |
 | `write_sig(offset, chunk)` | payer | appends; `offset == filled` required |
 | `close_sig_buffer()` | payer | refunds rent, no effect on the vault |
@@ -97,6 +118,8 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 remaining accounts: `TransferSol` → `[to]`; `TransferToken` → `[vault token account, destination token
 account, mint, token program]`; `Rotate` → none; `Close` → `[to]` followed by any number of
 `[token account, token program]` pairs, each an empty token account owned by the vault that is closed to `to`.
+Every instruction that reads the vault (`open_sig_buffer`, `execute`, `execute_direct`) fails with
+`VaultClosed` on a tombstone.
 
 `execute_direct` takes the accounts `vault`, `payer` (signer, writable) and `system_program`, then the same
 remaining accounts as `execute`. `action` must be 1..256 bytes. Steps 2–6 below are one shared code path for
@@ -126,7 +149,7 @@ signed-but-unsubmitted action stays valid. A signature made under generation `g`
 TransferSol   { to: Pubkey, lamports: u64, issued_slot: u64, expiry_slot: u64 }                      57 bytes
 TransferToken { mint: Pubkey, to: Pubkey /* token account */, amount: u64, issued_slot: u64, expiry_slot: u64 }  89 bytes
 Rotate        { new_lms_pubkey: [u8;56], issued_slot: u64, expiry_slot: u64 }   // bitmap cleared, spent = 0, generation += 1   73 bytes
-Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                 // all lamports to `to`; token accounts must be empty  49 bytes
+Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                 // all lamports but the tombstone's rent to `to`; token accounts must be empty  49 bytes
 ```
 
 **Validity window.** Every variant ends in `issued_slot || expiry_slot` (u64 little-endian each). With
@@ -147,8 +170,15 @@ otherwise, and refuses a request whose window the chain would refuse before any 
 
 `TransferSol` leaves the rent-exempt minimum in place. `TransferToken` signs a `transfer_checked` with the
 vault PDA; remaining accounts: vault token account, destination token account, mint, token program (Token
-and Token-2022). `Close` requires every vault token account it is given to be empty; token accounts not
-passed in simply stay owned by the (now closed) PDA, so move them out first.
+and Token-2022).
+
+**Close.** Every vault token account passed in must be empty (`TokenAccountNotEmpty`) and is closed to
+`to`; token accounts not passed in stay owned by the PDA, so move them out first. Then the vault moves
+every lamport above a tombstone's rent-exempt minimum to `to`, shrinks its data to 49 bytes and rewrites
+it as a `Tombstone { version: 0xFE, vault_id, closed_slot }`. The address is never free again:
+`create_vault` on it fails `VaultClosed`, as does every later `open_sig_buffer`, `execute` or
+`execute_direct` against it, including one carrying a signature made before the close (see the
+threat table). Nothing else in the vault's history is preserved; the tombstone's own rent is the only cost.
 
 **Rotate.** The new key must have the vault's typecodes (`RotateTypeMismatch`), must not be the current
 key or any key in `used_keys` (`KeyReused`: a key whose leaves were spent would come back with a clear
@@ -158,7 +188,8 @@ bytes, the bitmap is cleared, `spent = 0`, `generation += 1`. The rent for the 1
 staging buffer before the buffer is closed to its payer, so the buffer's payer pays it and `execute`
 needs no extra signer; in `execute_direct` there is no buffer, so the signing `payer` pays it through a
 System Program transfer (hence `system_program` in its accounts). After 128 rotations a vault can still spend and `Close`, but not rotate: close it
-and create a new one. The derivation in `SPEC-DERIVATION.md` never produces a key twice.
+and create a new one with a fresh key (the closed address is a tombstone). The derivation in
+`SPEC-DERIVATION.md` never produces a key twice.
 
 **Exhaustion rule.** When one free leaf remains before an `execute` (`2^h - spent <= 1`), that leaf may
 only be spent on `Rotate`. A vault can therefore always move to a fresh key; it can never be stranded with funds and no
@@ -182,30 +213,41 @@ restored signer believes leaves are free that it (or its twin) already signed; s
 still be unsubmitted, and a second signature by the same leaf is the forgery oracle above. The SDK's
 `VaultSigner` therefore requires a **leaf journal** (`LeafJournal`: `load()` / `save()`; `FileLeafJournal`
 for Node, written temp-file-then-rename with fsync; `BrowserLeafJournal` on IndexedDB, one database per
-origin and one record per `vault:generation`, resolved on transaction commit) holding, per vault and lane,
-the key `generation`, the number of `spent` leaves in the lane at the last sync and the leaves it has
-`reserved` (written before the signature exists). There is no silent default: a signer that is to keep
-this record in memory only must be built with `journal: "ephemeral"`, says so once on `console.warn` when
-it first signs, and marks every result `ephemeral: true`. Before every signature it compares the journal
-with the account:
+origin, resolved on transaction commit).
 
+A journal belongs to one LMS key and is keyed by the key's **fingerprint**, `sha256(lms_pubkey)` in hex
+(`keyFingerprint`; for a vault's initial key that is the hex of its `vault_id`): a one-time key is
+one-time wherever it is used, so the record of what it has signed must follow the key, not the vault or
+the generation it happens to serve. `FileLeafJournal(key, { dir })` writes `<dir>/<fingerprint>.json`,
+`BrowserLeafJournal({ key })` keeps one IndexedDB record under the fingerprint, and a `VaultSigner`
+refuses a journal built for another key. The record, `{ v: 2, key, vault, generation, spent, reserved }`,
+holds the fingerprint, the vault (base58) the key is used in, the key `generation` it is used under,
+the number of `spent` leaves in the signer's lane at the last sync and the leaves it has `reserved`
+(written before the signature exists). There is no silent default: a signer that is to keep this record
+in memory only must be built with `journal: "ephemeral"`, says so once on `console.warn` when it first
+signs, and marks every result `ephemeral: true`. Before every signature it compares the journal with the
+account:
+
+- the record names another vault: the key is being pointed at a second vault, where its spent leaves
+  would read as free. Refused outright (`JournalVaultMismatchError`), no override; use a fresh key;
 - the chain is at a later `generation` than the journal, or
 - the lane has more spent leaves than `spent` plus the journal's own reserved leaves that are now spent
 
-means the journal is **stale**: a state this journal never saw signed and executed leaves. A stale signer
-throws `StaleSignerError` for everything except `Rotate`, and stays stale until a rotation it performed
-itself lands (it checks the account: generation `+1`, key = its target), after which the journal is reset
-for the new generation. `Rotate` is the safe exit because it retires the whole key: every signature made
-under the old generation, known to the journal or not, is dead afterwards. `acknowledgeStale()` overrides
-the check and is unsafe: it is only correct when the operator knows that no signature made after the
-journal's last save is still unsubmitted. A journal that was never written is initialised from the chain;
-the rule then protects every later restore. Two signers in one process over the same journal (or two
-`FileLeafJournal` objects on one path) are serialised, so they cannot reserve the same leaf. Across
-processes a `FileLeafJournal` takes `<path>.lock` (created `O_EXCL`, holding the owner's pid and the
-time) around every load / save pair: a lock whose owner is alive makes the other signer fail with
-`JournalLockedError` instead of reserving a leaf; one left by a dead process is broken once it is 30 s
-old. A `BrowserLeafJournal` does the same across tabs with a Web Lock named after its record, where the
-browser has the API.
+means (for the last two) the journal is **stale**: a state this journal never saw signed and executed
+leaves. A stale signer throws `StaleSignerError` for everything except `Rotate`, and stays stale until a
+rotation it performed itself lands (it checks the account: generation `+1`, key = its target), after which
+the retired key's record is closed out at the new generation, its leaves kept on record, and the new key
+starts its own journal, initialised from the chain. `Rotate` is the safe exit because it retires the whole
+key: every signature made under the old generation, known to the journal or not, is dead afterwards.
+`acknowledgeStale()` overrides the stale check and is unsafe: it is only correct when the operator knows
+that no signature made after the journal's last save is still unsubmitted. A journal that was never
+written is initialised from the chain; the rule then protects every later restore. Two signers in one
+process over the same journal (or two `FileLeafJournal` objects on one path) are serialised, so they
+cannot reserve the same leaf. Across processes a `FileLeafJournal` takes `<path>.lock` (created `O_EXCL`,
+holding the owner's pid and the time) around every load / save pair: a lock whose owner is alive makes
+the other signer fail with `JournalLockedError` instead of reserving a leaf; one left by a dead process
+is broken once it is 30 s old. A `BrowserLeafJournal` does the same across tabs with a Web Lock named
+after its record, where the browser has the API.
 
 ### What the program does not do
 
@@ -285,6 +327,8 @@ complements the per-message binding of program, account and generation, it does 
 | signer loses track of leaves | read the bitmap from the account and take any clear leaf; several devices take disjoint lanes |
 | signer crashes after signing, before submitting | the signature stays valid until `expiry_slot`; the signer must have recorded the leaf before signing (the leaf journal) so it never signs that leaf again |
 | signer state restored from an old backup, or a copy of the key on another device moved on | the journal is behind the chain (more spent leaves in its lane than it can account for, or a newer generation): the signer refuses everything but `Rotate` until its own rotation lands, which retires every signature it may have forgotten |
+| the same one-time key pointed at a second vault, where its spent leaves read as free | the journal is keyed by the key's fingerprint and names the vault the key serves; a signer whose journal names another vault refuses to sign, with no override |
+| close the vault, recreate it with the same initial key, replay an unexpired pre-close signature (generation 0, leaf free again) | `Close` does not delete the account: it leaves a `Tombstone` at the address holding its own rent, so `create_vault` fails `VaultClosed` and the replay has no vault to land on; a new vault needs a new key |
 | a signature leaks, or is signed and forgotten, with a far `expiry_slot` | impossible by construction: `expiry_slot - issued_slot <= 216 000` (a day) and `issued_slot` cannot be ahead of the clock, so no signature outlives the day it was issued in |
 | the same words used on devnet and on mainnet, or under another deployment of the program | derivation v2 binds every key to the cluster's genesis hash and the program id: those are different keys, and a devnet signature is not even a signature by the mainnet key |
 | rotate back to an earlier key (A → B → A) | `used_keys` remembers every past key; `Rotate` / `rotate_pq` refuse it, so spent leaves never reopen |
@@ -306,13 +350,14 @@ complements the per-message binding of program, account and generation, it does 
 | LMS signature, height h | 4 + 2 180 + 4 + 32·h → H5 2 348, H10 2 508, H15 2 668, H20 2 828 |
 | public key | 56 bytes |
 | `Vault` account | H5 126, H10 250, H15 4 218 bytes, plus 16 per rotation (at most 128) |
+| `Tombstone` account | 49 bytes, left at the address by `Close`, holding its rent-exempt minimum (1 231 920 lamports) |
 | `Commitment` account | 127 bytes, plus 16 per rotation (at most 32) |
 | `Action` | TransferSol 57, TransferToken 89, Rotate 73, Close 49 bytes (16 of each are the validity window) |
 | verify, hash calls | ≤ 67×15 chain steps + 1 (Q) + 1 (K) + h (path) ≈ 1 010–1 030 |
 | `execute` compute | ~115-145k CU measured for H10, worst case ~210k; client requests 400k |
 | staging | `open_sig_buffer` with a 708-byte first chunk plus `write_sig` chunks of 900 bytes: H5 and H10 take 3 transactions in total, H15 and H20 take 4 |
 | `execute_direct` transaction v1 | H10: TransferSol 2 871 bytes, TransferToken 3 002, Rotate 2 854, Close 2 897; H15 adds 160; the largest (H15 TransferToken) stays under 3 200 of the 4 096 allowed |
-| program binaries | `lamport_vault.so` 305 168 bytes (devnet allocation 310 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
+| program binaries | `lamport_vault.so` 308 928 bytes (devnet allocation 310 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
 
 ### Direct (transaction v1) against staged, measured on devnet
 
@@ -365,9 +410,10 @@ same message either way.
 
 ## 7. Account versions and migration
 
-Vault and Commitment accounts carry a `version` byte (currently 2). Decoders refuse other versions. There
-is no in-place migration: a vault created under an earlier layout is closed and recreated (devnet vaults
-from the first deployment were). Mainnet has never had a deployment, so no live accounts are affected.
+Vault and Commitment accounts carry a `version` byte (currently 2); a Tombstone carries `0xFE`. Decoders
+refuse other versions. There is no in-place migration: a vault created under an earlier layout is closed
+and a new one created with a fresh key (devnet vaults from the first deployment were). Mainnet has never
+had a deployment, so no live accounts are affected.
 
 ## 8. Test vectors
 

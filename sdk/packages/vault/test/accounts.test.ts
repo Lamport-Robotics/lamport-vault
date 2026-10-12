@@ -8,24 +8,32 @@ import {
   decodeCommitment,
   decodePqSigBuffer,
   decodeSigBuffer,
+  decodeTombstone,
   decodeVault,
+  decodeVaultOrTombstone,
   encodeCommitment,
   encodePqSigBuffer,
   encodeSigBuffer,
+  encodeTombstone,
   encodeVault,
   firstFreeLeaf,
   freeLeaves,
   hasUsedKey,
   isLeafUsed,
+  isTombstone,
   KEY_HASH_LEN,
   leafCount,
   pqSigBufferSize,
   SCHEME_LMS_SHA256,
   type SigBufferAccount,
   sigBufferSize,
+  TOMBSTONE_ACCOUNT_SIZE,
+  TOMBSTONE_ACCOUNT_VERSION,
+  type TombstoneAccount,
   usedKeyHash,
   vaultAccountSize,
   type VaultAccount,
+  VaultClosedError,
 } from "../src/accounts.ts";
 import { encodeAction } from "../src/action.ts";
 import { ACCOUNT } from "../src/discriminator.ts";
@@ -127,6 +135,46 @@ describe("Vault account", () => {
     h10.set(KAT_H5_PUBKEY, 10 + 32); // now claims H5 with a 128-byte bitmap
     expect(() => decodeVault(h10)).toThrow(/bitmap/);
     expect(() => encodeVault({ ...v, usedKeys: new Array(129).fill(usedKeyHash(KAT_H10_PUBKEY)) })).toThrow(/at most 128/);
+  });
+});
+
+describe("Tombstone account", () => {
+  const t: TombstoneAccount = { version: TOMBSTONE_ACCOUNT_VERSION, vaultId: vaultId(KAT_H5_PUBKEY), closedSlot: 0x1122334455n };
+
+  it("is disc || version 0xfe || vault_id || closed_slot, 49 bytes, with its own discriminator", () => {
+    const bytes = encodeTombstone(t);
+    expect(bytes.length).toBe(TOMBSTONE_ACCOUNT_SIZE);
+    expect(TOMBSTONE_ACCOUNT_SIZE).toBe(49);
+    expect(toHex(ACCOUNT.tombstone)).toBe(toHex(sha256(new TextEncoder().encode("account:Tombstone")).subarray(0, 8)));
+    expect(toHex(bytes)).toBe(toHex(ACCOUNT.tombstone) + "fe" + toHex(t.vaultId) + "5544332211000000");
+    expect(decodeTombstone(bytes)).toEqual(t);
+    expect(isTombstone(bytes)).toBe(true);
+    expect(isTombstone(bytes.subarray(0, 7))).toBe(false);
+  });
+
+  it("decodeVaultOrTombstone tells the two apart; decodeVault names a closed vault", () => {
+    const vault = encodeVault({ version: 2, bump: 0, vaultId: vaultId(KAT_H5_PUBKEY), lmsPubkey: KAT_H5_PUBKEY, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] });
+    expect(isTombstone(vault)).toBe(false);
+    expect(decodeVaultOrTombstone(vault)).toEqual({ kind: "vault", vault: decodeVault(vault) });
+    const tomb = encodeTombstone(t);
+    expect(decodeVaultOrTombstone(tomb)).toEqual({ kind: "tombstone", tombstone: t });
+    let err: unknown;
+    try {
+      decodeVault(tomb);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(VaultClosedError);
+    expect((err as VaultClosedError).tombstone).toEqual(t);
+    expect(String(err)).toMatch(/closed at slot 73588229205/);
+    // the wrong version, trailing bytes, short data and another account are refused
+    const v1 = encodeTombstone(t);
+    v1[8] = 2;
+    expect(() => decodeTombstone(v1)).toThrow(/version 2/);
+    expect(() => decodeTombstone(new Uint8Array([...tomb, 0]))).toThrow(/trailing/);
+    expect(() => decodeTombstone(tomb.subarray(0, 40))).toThrow();
+    expect(() => decodeTombstone(vault)).toThrow(/discriminator/);
+    expect(() => decodeVaultOrTombstone(new Uint8Array(49))).toThrow(/discriminator/);
   });
 });
 

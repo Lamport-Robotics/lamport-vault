@@ -20,6 +20,7 @@ import { createSolanaRpc, signature as asSignature } from "@solana/kit";
 import { createMint, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, type TransactionInstruction } from "@solana/web3.js";
 import { LMS_SHA256_M32_H10, LmsPrivateKey } from "../../lms/src/index.ts";
+import { decodeTombstone, isTombstone } from "../src/accounts.ts";
 import type { Action } from "../src/action.ts";
 import { keypairV1Signer, sendDirectV1 } from "../src/direct.ts";
 import { buildStagedExecution, type CloseTokenAccount } from "../src/instructions.ts";
@@ -165,7 +166,9 @@ async function main(): Promise<void> {
     await measureDirect(signerB, "Close", await signerB.sign({ kind: "Close", to: payer.publicKey }), { closeTokenAccounts: [{ account: vaultAta.address }] }),
   );
   console.log(row(results.at(-1)!));
-  if (await connection.getAccountInfo(vault, COMMITMENT)) throw new Error("vault still exists after Close");
+  const after = await connection.getAccountInfo(vault, COMMITMENT);
+  if (!after || !isTombstone(after.data)) throw new Error("vault is not a tombstone after Close");
+  console.log(`after Close: tombstone at ${vault.toBase58()} (${after.data.length} bytes, ${after.lamports} lamports, closed at slot ${decodeTombstone(after.data).closedSlot})`);
 
   console.log("\n| path | action | transactions | bytes on the wire | compute units | fee (lamports) | wall-clock (ms) |");
   console.log("|---|---|---|---|---|---|---|");

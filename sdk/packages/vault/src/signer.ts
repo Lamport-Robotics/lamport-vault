@@ -16,6 +16,8 @@ import {
   type DerivationScope,
   equalBytes,
   type LmsKeyMaterial,
+  LMOTS_SHA256_N32_W4,
+  LMS_SHA256_M32_H10,
   LmsPrivateKey,
   parseLmsPublicKey,
   RECOVERY_MAX_INDEX,
@@ -34,6 +36,7 @@ import {
   type CommitmentAccount,
   decodeCommitment,
   decodeVault,
+  decodeVaultOrTombstone,
   firstFreeLeaf,
   freeLeaves,
   hasUsedKey,
@@ -46,7 +49,7 @@ import { type Action, checkValidityWindow, encodeAction, type ValidityWindow } f
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
 import { isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
-import { cloneState, type LeafJournal, type LeafJournalState, MemoryLeafJournal, type StaleSignerDetail, StaleSignerError } from "./journal.ts";
+import { cloneState, JournalVaultMismatchError, keyFingerprint, type LeafJournal, type LeafJournalState, MemoryLeafJournal, type StaleSignerDetail, StaleSignerError } from "./journal.ts";
 import { registryMessage, vaultMessage } from "./message.ts";
 import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "./programIds.ts";
@@ -140,16 +143,19 @@ export interface VaultSignerOptions {
   lanes?: number;
   /**
    * Durable record of the leaves this signer signed and of the chain state it last saw
-   * (docs/DESIGN.md "Signer rollback"). A leaf is written to it BEFORE it is signed, so a crash
-   * between signing and submitting cannot lead to a second signature on that leaf after a
-   * restart; and before every signature the journal is compared with the chain: a journal that
-   * is behind (restored from an old backup, or another signer with this key moved on in this
-   * lane) makes the signer stale, and a stale signer refuses everything but Rotate
-   * ({@link StaleSignerError}). Required: a `FileLeafJournal` in Node, a `BrowserLeafJournal`
-   * in a browser, or `"ephemeral"` to say in so many words that this signer keeps its record in
-   * memory only (a `MemoryLeafJournal` that dies with the object; a crash after signing loses
-   * the reservation). An ephemeral signer says so once on `console.warn` when it first signs
-   * and in every result's `ephemeral` flag.
+   * (docs/DESIGN.md "Signer rollback"). It is keyed by `key`'s fingerprint (`sha256(lms_pubkey)`,
+   * {@link keyFingerprint}); a journal built for another key is refused. A leaf is written to it
+   * BEFORE it is signed, so a crash between signing and submitting cannot lead to a second
+   * signature on that leaf after a restart; and before every signature the journal is compared
+   * with the chain: a journal that is behind (restored from an old backup, or another signer
+   * with this key moved on in this lane) makes the signer stale, and a stale signer refuses
+   * everything but Rotate ({@link StaleSignerError}); a journal that names another vault means
+   * the key is being reused and is refused outright ({@link JournalVaultMismatchError}).
+   * Required: a `FileLeafJournal` in Node, a `BrowserLeafJournal` in a browser, or `"ephemeral"`
+   * to say in so many words that this signer keeps its record in memory only (a
+   * `MemoryLeafJournal` that dies with the object; a crash after signing loses the reservation).
+   * An ephemeral signer says so once on `console.warn` when it first signs and in every result's
+   * `ephemeral` flag.
    */
   journal: LeafJournal | "ephemeral";
   /**
@@ -299,6 +305,8 @@ export class VaultSigner {
   readonly rpc: Rpc;
   readonly programId: PublicKey;
   readonly key: LmsPrivateKey;
+  /** `sha256(key.publicKey)` in hex: what the journal is keyed by. */
+  readonly keyId: string;
   readonly payer: Signer;
   readonly vault: PublicKey;
   readonly lane: number;
@@ -323,8 +331,12 @@ export class VaultSigner {
     if (!opts.journal) {
       throw new Error('journal is required: pass a FileLeafJournal (Node) or BrowserLeafJournal (web), or journal: "ephemeral" to keep the leaf record in memory only');
     }
+    this.keyId = keyFingerprint(opts.key.publicKey);
     this.ephemeral = opts.journal === "ephemeral";
-    this.journal = opts.journal === "ephemeral" ? new MemoryLeafJournal() : opts.journal;
+    this.journal = opts.journal === "ephemeral" ? new MemoryLeafJournal(this.keyId) : opts.journal;
+    if (this.journal.key !== this.keyId) {
+      throw new Error(`journal is for key ${this.journal.key}, this signer's key is ${this.keyId}: one journal per LMS key`);
+    }
     if (!Number.isInteger(this.lanes) || this.lanes < 1) throw new RangeError(`lanes must be >= 1, got ${this.lanes}`);
     if (!Number.isInteger(this.lane) || this.lane < 0 || this.lane >= this.lanes) throw new RangeError(`lane must be in 0..${this.lanes - 1}, got ${this.lane}`);
     if (opts.master) {
@@ -336,14 +348,26 @@ export class VaultSigner {
     checkValidityWindow({ issuedSlot: 0n, expirySlot: BigInt(n) });
   }
 
-  /** `create_vault` for this signer's key. One transaction. */
+  /**
+   * `create_vault` for this signer's key. One transaction. Refused before anything is sent when
+   * the address already holds a vault, or the tombstone of a closed one: a closed vault's address
+   * is never reusable, so the next vault needs the next key (see {@link nextFreshKeyIndex}).
+   */
   async createVault(opts: SendOpts = {}): Promise<{ vault: PublicKey; signature: string }> {
     const { instruction, vault } = createVaultInstruction({ programId: this.programId, payer: this.payer.publicKey, lmsPubkey: this.key.publicKey });
+    const occupied = await vaultAddressState(this.rpc, vault, this.opts.commitment);
+    if (occupied === "tombstone") {
+      throw new Error(`vault ${vault.toBase58()} was closed: a tombstone holds its address for good; create the next vault with the next key (nextFreshKeyIndex)`);
+    }
+    if (occupied === "vault") throw new Error(`vault ${vault.toBase58()} already exists`);
     const signature = await sendAndConfirm(this.rpc, [this.payer], [instruction], { ...opts, commitment: opts.commitment ?? this.opts.commitment });
     return { vault, signature };
   }
 
-  /** The vault account as it is on chain, whatever key it currently holds. */
+  /**
+   * The vault account as it is on chain, whatever key it currently holds. A closed vault (its
+   * tombstone) throws `VaultClosedError`.
+   */
   async fetchVaultAccount(): Promise<VaultAccount> {
     const info = await this.rpc.getAccountInfo(this.vault, this.opts.commitment);
     if (!info) throw new Error(`vault ${this.vault.toBase58()} does not exist`);
@@ -361,22 +385,25 @@ export class VaultSigner {
 
   /**
    * Compares the journal with the chain (DESIGN.md "Signer rollback"). A journal that was never
-   * written is initialised from the chain. Otherwise the journal is behind the chain, "stale",
-   * when the chain is at a later key generation, or when this lane has more spent leaves than
-   * the journal's `spent` plus its own `reserved` leaves that are now spent can explain: a
-   * signer state this journal never saw signed and executed them. A stale journal is returned
-   * untouched (so the evidence survives); a fresh one is re-synced: `spent` set to the lane's
-   * count and reserved leaves that are spent on chain dropped (the bitmap guards them for good).
-   * Called under the journal lock.
+   * written is initialised from the chain. A journal that names another vault means this key is
+   * being pointed at a second vault: refused ({@link JournalVaultMismatchError}). Otherwise the
+   * journal is behind the chain, "stale", when the chain is at a later key generation, or when
+   * this lane has more spent leaves than the journal's `spent` plus its own `reserved` leaves
+   * that are now spent can explain: a signer state this journal never saw signed and executed
+   * them. A stale journal is returned untouched (so the evidence survives); a fresh one is
+   * re-synced: `spent` set to the lane's count and reserved leaves that are spent on chain
+   * dropped (the bitmap guards them for good). Called under the journal lock.
    */
   async syncJournal(vault: VaultAccount): Promise<JournalSync> {
     const spentInLane = spentLeavesInLane(vault, this.lane, this.lanes);
+    const vaultAddress = this.vault.toBase58();
     const loaded = await this.journal.load();
     if (!loaded) {
-      const state: LeafJournalState = { generation: vault.generation, spent: spentInLane, reserved: [] };
+      const state: LeafJournalState = { key: this.keyId, vault: vaultAddress, generation: vault.generation, spent: spentInLane, reserved: [] };
       await this.journal.save(state);
       return { state, stale: undefined };
     }
+    if (loaded.vault !== vaultAddress) throw new JournalVaultMismatchError(this.keyId, loaded.vault, vaultAddress);
     const state = cloneState(loaded);
     const reservedSpent = state.reserved.filter((q) => isLeafUsed(vault, q));
     const behind = state.generation !== vault.generation || spentInLane > state.spent + reservedSpent.length;
@@ -544,11 +571,11 @@ export class VaultSigner {
 
   /**
    * Records in the journal that the Rotate in `signed` landed: reads the vault, requires the
-   * generation to be `signed.generation + 1` and the key to be the Rotate's target, then writes
-   * a fresh journal for the new generation (`spent 0`, nothing reserved). `execute` calls this
-   * itself; call it after submitting a Rotate signed with `sign()` by other means. Until it runs
-   * a stale signer stays stale, and the signer of the new key (sharing this journal) would see a
-   * generation mismatch.
+   * generation to be `signed.generation + 1` and the key to be the Rotate's target, then closes
+   * this key's record out at the new generation (the key is retired; its spent and reserved
+   * leaves stay on record). The new key starts its own journal, initialised from the chain on
+   * its first signature. `execute` calls this itself; call it after submitting a Rotate signed
+   * with `sign()` by other means. Until it runs a stale signer stays stale.
    */
   async confirmRotation(signed: SignedAction): Promise<void> {
     if (signed.action.kind !== "Rotate") throw new Error("confirmRotation takes a signed Rotate");
@@ -557,7 +584,10 @@ export class VaultSigner {
     if (v.generation !== signed.generation + 1 || !equalBytes(v.lmsPubkey, target)) {
       throw new Error(`rotation has not landed: the vault is at generation ${v.generation} (signed at ${signed.generation})`);
     }
-    await withJournalLock(this.journal, () => this.journal.save({ generation: v.generation, spent: 0, reserved: [] }));
+    await withJournalLock(this.journal, async () => {
+      const state = (await this.journal.load()) ?? { key: this.keyId, vault: this.vault.toBase58(), generation: signed.generation, spent: 0, reserved: [] };
+      await this.journal.save({ ...state, generation: v.generation });
+    });
     this.staleAcknowledged = false;
   }
 
@@ -614,6 +644,66 @@ export class VaultSigner {
     checkValidityWindow({ issuedSlot, expirySlot });
     return { ...request, issuedSlot, expirySlot } as Action;
   }
+}
+
+/** What sits at a vault address: nothing, a live vault, or the tombstone of a closed one. */
+export type VaultAddressState = "free" | "vault" | "tombstone";
+
+/** Reads the account at `vault` and says which of the three it is. Anything else is an error. */
+export async function vaultAddressState(rpc: Rpc, vault: PublicKey, commitment?: Commitment): Promise<VaultAddressState> {
+  const info = await rpc.getAccountInfo(vault, commitment);
+  if (!info) return "free";
+  return decodeVaultOrTombstone(new Uint8Array(info.data)).kind;
+}
+
+export interface FreshKeyOptions {
+  /** First index to try; default 0. */
+  start?: number;
+  /** Last index to try; default `RECOVERY_MAX_INDEX`. */
+  maxIndex?: number;
+  /** Typecodes of the keys; default H10 / W4 (the vault default). */
+  lmsType?: number;
+  lmotsType?: number;
+  /** Default: the id declared by `programs/lamport-vault`. */
+  programId?: PublicKey;
+  commitment?: Commitment;
+}
+
+export interface FreshKey {
+  /** The index whose vault address is free. */
+  k: number;
+  /** Its key material (build it with `LmsPrivateKey.generate(material)`). */
+  material: LmsKeyMaterial;
+  /** The key, already built (the address needs its root). */
+  key: LmsPrivateKey;
+  /** The vault address `create_vault` would use for it. */
+  vault: PublicKey;
+  /** Indices skipped because their address holds a live vault or a tombstone. */
+  skipped: { k: number; state: Exclude<VaultAddressState, "free"> }[];
+}
+
+/**
+ * The next key index under `master` whose vault address is free: a closed vault leaves a
+ * tombstone at its address for good (DESIGN.md section 2, "Close"), so `create_vault` with that
+ * key fails `VaultClosed`, and an address with a live vault is in use. Walks `k` from `start`,
+ * builds each key (its address needs the root, H10 takes a fraction of a second) and reads the
+ * account. Pass `start` as the index after the last one you know you used to save the probes.
+ */
+export async function nextFreshKeyIndex(master: Uint8Array, scope: DerivationScope, rpc: Rpc, opts: FreshKeyOptions = {}): Promise<FreshKey> {
+  const start = opts.start ?? 0;
+  const max = opts.maxIndex ?? RECOVERY_MAX_INDEX;
+  if (!Number.isInteger(start) || start < 0 || start > max) throw new RangeError(`start must be in 0..${max}, got ${start}`);
+  const programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
+  const skipped: FreshKey["skipped"] = [];
+  for (let k = start; k <= max; k++) {
+    const material = deriveKeyMaterial(master, k, scope, opts.lmsType ?? LMS_SHA256_M32_H10, opts.lmotsType ?? LMOTS_SHA256_N32_W4);
+    const key = await LmsPrivateKey.generateAsync(material);
+    const vault = findVaultPdaForKey(programId, key.publicKey).address;
+    const state = await vaultAddressState(rpc, vault, opts.commitment);
+    if (state === "free") return { k, material, key, vault, skipped };
+    skipped.push({ k, state });
+  }
+  throw new Error(`no free vault address among key indices ${start}..${max}`);
 }
 
 export interface NextKeyMaterial {

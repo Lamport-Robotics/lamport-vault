@@ -69,4 +69,6 @@ pub enum VaultError {
     IssuedInFuture, // 6030
     #[msg("validity window is inverted or longer than MAX_VALIDITY_SLOTS")]
     InvalidValidityWindow, // 6031
+    #[msg("vault is closed: a Tombstone holds its address; create a vault with a fresh key")]
+    VaultClosed, // 6032
 }

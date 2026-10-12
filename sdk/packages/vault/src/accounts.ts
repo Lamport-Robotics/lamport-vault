@@ -11,6 +11,10 @@ import { ACCOUNT } from "./discriminator.ts";
 
 /** Current `Vault` layout version; the decoder refuses anything else. */
 export const VAULT_ACCOUNT_VERSION = 2;
+/** `Tombstone` layout version (0xFE, a value no `Vault` layout carries). */
+export const TOMBSTONE_ACCOUNT_VERSION = 0xfe;
+/** Size of a `Tombstone` account: discriminator, version, vault_id, closed_slot. */
+export const TOMBSTONE_ACCOUNT_SIZE = 8 + 1 + 32 + 8;
 /** Current `Commitment` layout version; the decoder refuses anything else. */
 export const COMMITMENT_ACCOUNT_VERSION = 2;
 /** A `used_keys` entry is `sha256(pubkey)[0..16]`. */
@@ -36,6 +40,29 @@ export interface VaultAccount {
   used: Uint8Array;
   /** sha256[0..16] of every past LMS public key, oldest first (not the current one) */
   usedKeys: Uint8Array[];
+}
+
+/**
+ * What `Close` leaves at a vault's address, for good: the PDA is never free again, so `create_vault`
+ * with the vault's initial key fails (`VaultClosed`) and no signature made before the close can
+ * replay against a recreated vault. Holds exactly its rent-exempt minimum.
+ */
+export interface TombstoneAccount {
+  version: number;
+  /** `vault_id` of the closed vault */
+  vaultId: Uint8Array;
+  /** slot of the `Close` */
+  closedSlot: bigint;
+}
+
+/** Thrown by `decodeVault` on a tombstone: the vault at this address was closed. */
+export class VaultClosedError extends Error {
+  readonly tombstone: TombstoneAccount;
+  constructor(tombstone: TombstoneAccount) {
+    super(`vault is closed: a Tombstone (closed at slot ${tombstone.closedSlot}) holds its address; create a vault with a fresh key`);
+    this.name = "VaultClosedError";
+    this.tombstone = tombstone;
+  }
 }
 
 /** The `used_keys` entry for a 56-byte public key: sha256(pubkey)[0..16]. */
@@ -190,7 +217,36 @@ function writeUsedKeys(w: ByteWriter, keys: Uint8Array[], max: number): ByteWrit
   return w;
 }
 
+/** True when `data` starts with the `Tombstone` discriminator. */
+export function isTombstone(data: Uint8Array): boolean {
+  return data.length >= 8 && ACCOUNT.tombstone.every((b, i) => data[i] === b);
+}
+
+export function decodeTombstone(data: Uint8Array): TombstoneAccount {
+  const r = new ByteReader(data);
+  checkDiscriminator(r, ACCOUNT.tombstone, "Tombstone");
+  const version = r.u8();
+  checkVersion(version, TOMBSTONE_ACCOUNT_VERSION, "Tombstone");
+  const t: TombstoneAccount = { version, vaultId: r.fixed(32), closedSlot: r.u64() };
+  r.finish();
+  return t;
+}
+
+export function encodeTombstone(t: TombstoneAccount): Uint8Array {
+  return new ByteWriter().raw(ACCOUNT.tombstone).u8(t.version).fixed(t.vaultId, 32).u64(t.closedSlot).bytes();
+}
+
+/** Either account that can sit at a vault address: the live vault, or the tombstone `Close` left. */
+export type VaultOrTombstone = { kind: "vault"; vault: VaultAccount } | { kind: "tombstone"; tombstone: TombstoneAccount };
+
+/** Decodes the account at a vault address, whichever of the two it is; throws on anything else. */
+export function decodeVaultOrTombstone(data: Uint8Array): VaultOrTombstone {
+  return isTombstone(data) ? { kind: "tombstone", tombstone: decodeTombstone(data) } : { kind: "vault", vault: decodeVault(data) };
+}
+
+/** Decodes a live vault; a tombstone throws {@link VaultClosedError}, anything else a plain `Error`. */
 export function decodeVault(data: Uint8Array): VaultAccount {
+  if (isTombstone(data)) throw new VaultClosedError(decodeTombstone(data));
   const r = new ByteReader(data);
   checkDiscriminator(r, ACCOUNT.vault, "Vault");
   const version = r.u8();

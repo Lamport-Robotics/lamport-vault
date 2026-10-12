@@ -1,8 +1,8 @@
 name: test
 
 # Host-side tests: the Rust crates (LMS vectors, program unit + encoding
-# tests) and the SDK. The anchor localnet suite (tests/*.ts) needs a
-# validator and real signatures and runs locally with `anchor test`.
+# tests) and the SDK. The anchor localnet suite (tests/*.ts), which needs a
+# validator and real signatures, runs in anchor.yml.
 
 on:
   push:

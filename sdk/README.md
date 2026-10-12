@@ -103,8 +103,11 @@ const payer = Keypair.fromSecretKey(/* classical key: pays rent and fees, nothin
 
 // key: LmsPrivateKey from the lms package. journal: where the signer records a leaf BEFORE signing it
 // (required; FileLeafJournal in Node, BrowserLeafJournal on IndexedDB, or "ephemeral" for memory only).
-const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal("vault.journal.json") });
+// A journal belongs to one key: it is keyed by sha256(key.publicKey) (keyFingerprint), here the file
+// <dir>/<fingerprint>.json.
+const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { dir: "~/.lamport-vault" }) });
 await signer.createVault();                           // one transaction; vault address = PDA of sha256(key.publicKey)
+                                                      // refused if the address holds a vault or the tombstone of a closed one
 
 // Deposit: a plain SystemProgram.transfer to signer.vault, from anywhere.
 
@@ -118,8 +121,14 @@ res.mode;         // "staged" (default): [open_sig_buffer, write_sig, write_sig,
 // Other actions
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
 await signer.execute({ kind: "Rotate", newLmsPubkey: nextKey.publicKey });  // bitmap cleared, generation + 1, address unchanged
-await signer.execute({ kind: "Close", to });                                  // all lamports to `to`
+await signer.execute({ kind: "Close", to });                                  // all lamports to `to`; a Tombstone keeps the address
 ```
+
+A closed vault's address is never reusable (`Close` leaves a 49-byte `Tombstone` holding its own rent;
+`create_vault` on it fails `VaultClosed`), so the next vault needs the next key:
+`nextFreshKeyIndex(master, scope, rpc)` walks the derivation indices and returns the first whose vault
+address is free, skipping tombstones and live vaults; `vaultAddressState(rpc, vault)` is the one-address
+check.
 
 `expirySlot` may be given on any action; when omitted the signer uses the current slot plus 300. The
 signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` on the last free leaf (the
@@ -129,18 +138,25 @@ leaf within one object even before the chain confirms.
 The journal is what stops a leaf from ever being signed twice (docs/DESIGN.md "Signer rollback"): the
 leaf is written to it before the signature exists, and before every signature it is compared with the
 chain; a journal that is behind (restored from a backup, or another copy of the key moved on) makes the
-signer refuse everything but `Rotate` (`StaleSignerError`). `FileLeafJournal` also holds a `<path>.lock`
-across processes (`JournalLockedError` when another live process has it); `BrowserLeafJournal({ vault,
-generation })` keeps one IndexedDB record per vault and generation and a Web Lock across tabs.
-`journal: "ephemeral"` is for tests and one-shot scripts: a memory journal that dies with the object, a
-one-line `console.warn` on the first signature, and `ephemeral: true` on every result.
+signer refuse everything but `Rotate` (`StaleSignerError`). Journals are keyed by the LMS key's
+fingerprint, `sha256(lms_pubkey)` in hex (`keyFingerprint`), because a one-time key is one-time wherever
+it is used: a `VaultSigner` refuses a journal built for another key, and a record that names another
+vault means the key is being pointed at a second vault, which is refused with no override
+(`JournalVaultMismatchError`). The record (`{ v: 2, key, vault, generation, spent, reserved }`) still
+carries the vault and the key generation for the stale check. `FileLeafJournal(key, { dir })` writes
+`<dir>/<fingerprint>.json` (or `{ path }`) and holds a `<path>.lock` across processes
+(`JournalLockedError` when another live process has it); `BrowserLeafJournal({ key })` keeps one
+IndexedDB record per key and a Web Lock across tabs. After a `Rotate` the retired key's record is closed
+out and the new key starts its own. `journal: "ephemeral"` is for tests and one-shot scripts: a memory
+journal that dies with the object, a one-line `console.warn` on the first signature, and
+`ephemeral: true` on every result.
 
 Leaves are a bitmap on chain, so several devices can share one key without talking to each other:
 
 ```ts
 // device k of n only ever uses leaves q ≡ k (mod n); each device keeps its own journal
-const phone  = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2, journal: new BrowserLeafJournal({ vault, generation }) });
-const laptop = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2, journal: new FileLeafJournal("laptop.journal.json") });
+const phone  = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2, journal: new BrowserLeafJournal({ key: key.publicKey }) });
+const laptop = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2, journal: new FileLeafJournal(key.publicKey, { dir: "~/.lamport-vault" }) });
 
 // reserve(q) runs BEFORE a leaf is signed, on top of the journal: an extra hook for a secure element
 // or a database; throw to veto the leaf.
@@ -158,7 +174,9 @@ spends and `Close`s; the next key gets a new vault, created the same way.
 
 `decodeVault` and `decodeCommitment` accept account version 2 (`VAULT_ACCOUNT_VERSION`,
 `COMMITMENT_ACCOUNT_VERSION`) and throw on anything else; there is no in-place migration, an older
-account is closed and recreated.
+vault is closed and a new one created with a fresh key. `decodeVault` on a tombstone throws
+`VaultClosedError` (with the decoded tombstone); `decodeVaultOrTombstone` returns whichever of the two
+sits at the address, `decodeTombstone` / `isTombstone` read the tombstone itself.
 
 The registry:
 
@@ -200,8 +218,8 @@ to the staged flow with the same LMS signature when the wallet or RPC rejects v1
 
 Everything is plain Borsh behind Anchor's 8-byte discriminators (`sha256("global:<ix>")[0..8]` for
 instructions, `sha256("account:<Name>")[0..8]` for accounts). `encodeAction` / `decodeAction` cover the
-`Action` enum exactly as in `docs/DESIGN.md`; `decodeVault`, `decodeSigBuffer`, `decodeCommitment`,
-`decodePqSigBuffer` read the accounts. Account order per instruction follows the program's
+`Action` enum exactly as in `docs/DESIGN.md`; `decodeVault`, `decodeTombstone`, `decodeSigBuffer`,
+`decodeCommitment`, `decodePqSigBuffer` read the accounts. Account order per instruction follows the program's
 `#[derive(Accounts)]` structs and is listed at the top of `src/instructions.ts` and `src/registry.ts`.
 
 Byte-exact vectors for all of this live in [`kat/vault_encoding.json`](../kat/vault_encoding.json) so the

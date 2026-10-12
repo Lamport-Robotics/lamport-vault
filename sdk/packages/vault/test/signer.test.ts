@@ -5,13 +5,13 @@
 import { Connection, Keypair, Transaction } from "@solana/web3.js";
 import { CLUSTERS, deriveKeyMaterial, fromHex, LMS_SHA256_M32_H5, LmsPrivateKey, lmsVerify, mnemonicToMaster, toHex } from "@lamport-robotics/lms";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { encodeCommitment, encodeVault, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
+import { encodeCommitment, encodeVault, usedKeyHash, type VaultAccount, VaultClosedError } from "../src/accounts.ts";
 import { decodeAction } from "../src/action.ts";
 import { IX } from "../src/discriminator.ts";
 import { registryMessage, vaultMessage } from "../src/message.ts";
 import { findCommitmentPda, findVaultPdaForKey, vaultId } from "../src/pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "../src/programIds.ts";
-import { nextKeyMaterial, RegistryClient, type Rpc, VaultSigner } from "../src/signer.ts";
+import { nextFreshKeyIndex, nextKeyMaterial, RegistryClient, type Rpc, vaultAddressState, VaultSigner } from "../src/signer.ts";
 import { MockChain } from "./mock.ts";
 
 /** The mock cluster of ./mock.ts: records transactions and applies `execute` to the vault account. */
@@ -289,9 +289,10 @@ describe("VaultSigner", () => {
     const res = await guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
     expect(res.q).toBe(2);
     // The mock applied the Rotate: the vault now holds `foreign` at generation 1 and the signer's
-    // journal was reset for it. Put the generation-0 account back for the rest of this test.
+    // journal (key 0's) is closed out at that generation with its three leaves on record. Put the
+    // generation-0 account back for the rest of this test.
     expect(rpc.vault(signer.vault).generation).toBe(1);
-    expect(await guarded.journal.load()).toEqual({ generation: 1, spent: 0, reserved: [] });
+    expect(await guarded.journal.load()).toEqual({ key: guarded.keyId, vault: signer.vault.toBase58(), generation: 1, spent: 0, reserved: [0, 1, 2] });
     rpc.accounts.set(signer.vault.toBase58(), account(key0.publicKey, 0, []));
     expect(decodeAction(new Uint8Array(rpc.sent[0]!.instructions[0]!.data.subarray(20, 20 + rpc.sent[0]!.instructions[0]!.data.readUInt32LE(16)))).kind).toBe("Rotate");
     expect(signed).toBe(3);
@@ -400,7 +401,7 @@ describe("VaultSigner", () => {
     expect(rpc.sent.length).toBe(2);
   });
 
-  it("createVault sends one create_vault transaction", async () => {
+  it("createVault sends one create_vault transaction, and refuses an occupied or tombstoned address", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
     const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
@@ -408,6 +409,49 @@ describe("VaultSigner", () => {
     expect(signature).toBe("sig1");
     expect(vault.equals(signer.vault)).toBe(true);
     expect(toHex(rpc.sent[0]!.instructions[0]!.data)).toBe(toHex(IX.createVault) + toHex(vaultId(key.publicKey)) + toHex(key.publicKey));
+    // The address holds a vault: refused before anything is sent.
+    rpc.accounts.set(vault.toBase58(), vaultAccount([]));
+    expect(await vaultAddressState(rpc, vault)).toBe("vault");
+    await expect(signer.createVault()).rejects.toThrow(/already exists/);
+    // Close leaves a tombstone: the address is gone for good, the next vault needs the next key.
+    await signer.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(await vaultAddressState(rpc, vault)).toBe("tombstone");
+    await expect(signer.createVault()).rejects.toThrow(/closed: a tombstone holds its address/);
+    await expect(signer.nextQ()).rejects.toThrow(VaultClosedError);
+    await expect(signer.execute({ kind: "TransferSol", to: payer.publicKey, lamports: 1n })).rejects.toThrow(/vault is closed/);
+    expect(rpc.sent.length).toBe(5); // create + the four staged Close transactions, nothing after
+  });
+
+  it("nextFreshKeyIndex skips indices whose vault address holds a vault or a tombstone", async () => {
+    const master = mnemonicToMaster("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art");
+    const scope = { genesisHash: CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    const rpc = new MockRpc();
+    const payer = Keypair.generate();
+    const keyAt = (k: number) => LmsPrivateKey.generate(deriveKeyMaterial(master, k, scope, LMS_SHA256_M32_H5, 3));
+    const vaultOf = (k: LmsPrivateKey) => findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, k.publicKey).address;
+    // Nothing on chain: index 0 is fresh.
+    const fresh0 = await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5 });
+    expect(fresh0.k).toBe(0);
+    expect(fresh0.skipped).toEqual([]);
+    expect(toHex(fresh0.key.publicKey)).toBe(toHex(keyAt(0).publicKey));
+    expect(fresh0.vault.equals(vaultOf(keyAt(0)))).toBe(true);
+    expect(toHex(LmsPrivateKey.generate(fresh0.material).publicKey)).toBe(toHex(fresh0.key.publicKey));
+    // Index 0's vault was created and closed (tombstone), index 1's is live: index 2 is the next fresh one.
+    const signer0 = new VaultSigner({ rpc, key: keyAt(0), payer, journal: "ephemeral" });
+    rpc.accounts.set(signer0.vault.toBase58(), encodeVault({ version: 2, bump: 0, vaultId: vaultId(keyAt(0).publicKey), lmsPubkey: keyAt(0).publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] }));
+    await signer0.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    rpc.accounts.set(vaultOf(keyAt(1)).toBase58(), encodeVault({ version: 2, bump: 0, vaultId: vaultId(keyAt(1).publicKey), lmsPubkey: keyAt(1).publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] }));
+    const fresh2 = await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5 });
+    expect(fresh2.k).toBe(2);
+    expect(fresh2.skipped).toEqual([
+      { k: 0, state: "tombstone" },
+      { k: 1, state: "vault" },
+    ]);
+    expect(fresh2.vault.equals(vaultOf(keyAt(2)))).toBe(true);
+    // `start` skips the probes for indices already known to be used; the cap is respected.
+    expect((await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, start: 1 })).k).toBe(2);
+    await expect(nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, maxIndex: 1 })).rejects.toThrow(/no free vault address among key indices 0\.\.1/);
+    await expect(nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, start: 5, maxIndex: 4 })).rejects.toThrow(RangeError);
   });
 });
 

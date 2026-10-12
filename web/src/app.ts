@@ -1,5 +1,6 @@
 import "./polyfill.ts";
 import "./style.css";
+import "./pages.css";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
@@ -28,8 +29,9 @@ let mode: Mode = "cold";
 
 const app = $("#app");
 app.className = "shell";
-const top = el("div", { class: "top" },
+const top = el("div", { class: "top app" },
   el("a", { class: "brand", href: "/" }, el("img", { src: "/mark.svg", alt: "" }), el("b", {}, "Lamport Vault"), el("i", {}), el("small", {}, CLUSTER)),
+  el("nav", { class: "nav" }, el("a", { href: "/how-it-works" }, "How it works"), el("a", { href: "/security" }, "Security"), el("a", { href: "/cold-signer" }, "Cold signer"), el("a", { href: "/faq" }, "FAQ")),
   el("div", { class: "wallet", id: "walletbox" }));
 const main = el("div", { id: "main" });
 app.append(top, main, el("footer", {},

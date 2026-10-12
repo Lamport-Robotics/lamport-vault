@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How Lamport Vault works</title>
+<meta name="description" content="One key, one use, and the chain keeps count. How a post-quantum vault on Solana deposits, signs offline, executes and rotates.">
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="How Lamport Vault works">
+<meta property="og:description" content="One key, one use, and the chain keeps count. How a post-quantum vault on Solana deposits, signs offline, executes and rotates.">
+<meta property="og:image" content="https://lamportrobotics.com/og.png">
+</head>
+<body>
+<div class="shell">
+<div class="top pages">
+  <a class="brand" href="/"><img src="/mark.svg" alt=""><b>Lamport Vault</b><i></i><small>devnet</small></a>
+  <nav class="nav">
+    <a href="/">Vault</a>
+    <a href="/how-it-works">How it works</a>
+    <a href="/security">Security</a>
+    <a href="/cold-signer">Cold signer</a>
+    <a href="/faq">FAQ</a>
+  </nav>
+</div>
+
+<section class="hero reveal">
+  <div class="eyebrow">How it works</div>
+  <h1>One key. One use. The chain keeps count.</h1>
+  <p>A Lamport Vault is an account on Solana that moves funds only when it sees a hash-based signature. Hash-based signatures are the oldest post-quantum idea there is: every key signs exactly once, and the vault remembers which ones are gone.</p>
+</section>
+
+<section class="scene reveal">
+  <div class="text"><div class="n">01</div><h2>Your 24 words become a tree of one-time keys.</h2><p>The words are a standard BIP-39 phrase. From them the vault derives a Merkle tree: 1 024 one-time keys at the leaves, one 56-byte public key at the root. Only the root lives on chain.</p><p class="quiet">LMS, RFC 8554, SHA-256 throughout. The derivation is published so any wallet can rebuild the same tree.</p></div>
+  <div class="visual"><svg viewBox="0 0 560 300" aria-label="key tree"><line class="v-line" x1="280.0" y1="40.0" x2="160.0" y2="95.0"/><line class="v-line" x1="280.0" y1="40.0" x2="400.0" y2="95.0"/><line class="v-line" x1="160.0" y1="95.0" x2="100.0" y2="150.0"/><line class="v-line" x1="160.0" y1="95.0" x2="220.0" y2="150.0"/><line class="v-line" x1="400.0" y1="95.0" x2="340.0" y2="150.0"/><line class="v-line" x1="400.0" y1="95.0" x2="460.0" y2="150.0"/><line class="v-line" x1="100.0" y1="150.0" x2="70.0" y2="205.0"/><line class="v-line" x1="100.0" y1="150.0" x2="130.0" y2="205.0"/><line class="v-line" x1="220.0" y1="150.0" x2="190.0" y2="205.0"/><line class="v-line" x1="220.0" y1="150.0" x2="250.0" y2="205.0"/><line class="v-line" x1="340.0" y1="150.0" x2="310.0" y2="205.0"/><line class="v-line" x1="340.0" y1="150.0" x2="370.0" y2="205.0"/><line class="v-line" x1="460.0" y1="150.0" x2="430.0" y2="205.0"/><line class="v-line" x1="460.0" y1="150.0" x2="490.0" y2="205.0"/><line class="v-line" x1="70.0" y1="205.0" x2="55.0" y2="260.0"/><line class="v-line" x1="70.0" y1="205.0" x2="85.0" y2="260.0"/><line class="v-line" x1="130.0" y1="205.0" x2="115.0" y2="260.0"/><line class="v-line" x1="130.0" y1="205.0" x2="145.0" y2="260.0"/><line class="v-line" x1="190.0" y1="205.0" x2="175.0" y2="260.0"/><line class="v-line" x1="190.0" y1="205.0" x2="205.0" y2="260.0"/><line class="v-line" x1="250.0" y1="205.0" x2="235.0" y2="260.0"/><line class="v-line" x1="250.0" y1="205.0" x2="265.0" y2="260.0"/><line class="v-line" x1="310.0" y1="205.0" x2="295.0" y2="260.0"/><line class="v-line" x1="310.0" y1="205.0" x2="325.0" y2="260.0"/><line class="v-line" x1="370.0" y1="205.0" x2="355.0" y2="260.0"/><line class="v-line" x1="370.0" y1="205.0" x2="385.0" y2="260.0"/><line class="v-line" x1="430.0" y1="205.0" x2="415.0" y2="260.0"/><line class="v-line" x1="430.0" y1="205.0" x2="445.0" y2="260.0"/><line class="v-line" x1="490.0" y1="205.0" x2="475.0" y2="260.0"/><line class="v-line" x1="490.0" y1="205.0" x2="505.0" y2="260.0"/><polyline class="v-ink v-path" points="205.0,260.0 190.0,205.0 220.0,150.0 160.0,95.0 280.0,40.0"/><circle cx="175.0" cy="260.0" r="4.5" class="v-mid"/><circle cx="250.0" cy="205.0" r="4.5" class="v-mid"/><circle cx="100.0" cy="150.0" r="4.5" class="v-mid"/><circle cx="400.0" cy="95.0" r="4.5" class="v-mid"/><circle cx="280.0" cy="40.0" r="5" class="v-fill"/><circle cx="160.0" cy="95.0" r="5" class="v-fill"/><circle cx="400.0" cy="95.0" r="5" class="v-dim"/><circle cx="100.0" cy="150.0" r="5" class="v-dim"/><circle cx="220.0" cy="150.0" r="5" class="v-fill"/><circle cx="340.0" cy="150.0" r="5" class="v-dim"/><circle cx="460.0" cy="150.0" r="5" class="v-dim"/><circle cx="70.0" cy="205.0" r="5" class="v-dim"/><circle cx="130.0" cy="205.0" r="5" class="v-dim"/><circle cx="190.0" cy="205.0" r="5" class="v-fill"/><circle cx="250.0" cy="205.0" r="5" class="v-dim"/><circle cx="310.0" cy="205.0" r="5" class="v-dim"/><circle cx="370.0" cy="205.0" r="5" class="v-dim"/><circle cx="430.0" cy="205.0" r="5" class="v-dim"/><circle cx="490.0" cy="205.0" r="5" class="v-dim"/><circle cx="55.0" cy="260.0" r="4" class="v-dim"/><circle cx="85.0" cy="260.0" r="4" class="v-dim"/><circle cx="115.0" cy="260.0" r="4" class="v-dim"/><circle cx="145.0" cy="260.0" r="4" class="v-dim"/><circle cx="175.0" cy="260.0" r="4" class="v-dim"/><circle cx="205.0" cy="260.0" r="4" class="v-fill"/><circle cx="235.0" cy="260.0" r="4" class="v-dim"/><circle cx="265.0" cy="260.0" r="4" class="v-dim"/><circle cx="295.0" cy="260.0" r="4" class="v-dim"/><circle cx="325.0" cy="260.0" r="4" class="v-dim"/><circle cx="355.0" cy="260.0" r="4" class="v-dim"/><circle cx="385.0" cy="260.0" r="4" class="v-dim"/><circle cx="415.0" cy="260.0" r="4" class="v-dim"/><circle cx="445.0" cy="260.0" r="4" class="v-dim"/><circle cx="475.0" cy="260.0" r="4" class="v-dim"/><circle cx="505.0" cy="260.0" r="4" class="v-dim"/><text class="v-text ink" x="292.0" y="30.0">root = public key (56 B)</text><text class="v-text" x="40" y="292">1 024 leaves · one leaf per signature · siblings travel with the signature</text><text class="v-text ink" x="181.0" y="268.0">q = 5</text></svg></div>
+</section>
+
+<section class="scene flip reveal">
+  <div class="visual"><svg viewBox="0 0 560 300" aria-label="deposits">
+<rect x="200" y="100" width="300" height="100" class="v-line" fill="none"/>
+<text class="v-text" x="216" y="126">VAULT</text>
+<text class="v-text ink" x="216" y="152">D3peLheWCB5N…sCt</text>
+<text class="v-text" x="216" y="178">address never changes</text>
+<g class="v-dash"><path d="M40 70 C 120 70, 150 150, 198 150"/><path d="M40 150 L 198 150"/><path d="M40 230 C 120 230, 150 150, 198 150"/></g>
+<text class="v-text ink" x="40" y="62">any wallet</text>
+<text class="v-text ink" x="40" y="142">an exchange</text>
+<text class="v-text ink" x="40" y="222">a plain transfer</text>
+<text class="v-text" x="200" y="236">nothing to sign on the way in</text>
+</svg></div>
+  <div class="text"><div class="n">02</div><h2>Deposits are ordinary transfers.</h2><p>The vault's address is derived from the first key and never changes, not even when the key rotates. Any wallet or exchange can send to it. Nothing on the way in needs a post-quantum signature.</p></div>
+</section>
+
+<section class="scene reveal">
+  <div class="text"><div class="n">03</div><h2>To withdraw, sign somewhere the internet can't reach.</h2><p>The vault page prepares a small request: what to send, where, which key number, until when. You carry it to the cold signer, a single file that runs with the network off, type the words, and bring back a signature. Paste, file or QR; the words never touch an online device.</p><p class="quiet">Signing on this device is possible for small amounts. The page says so every time.</p></div>
+  <div class="visual"><svg viewBox="0 0 560 300" aria-label="offline round trip">
+<rect x="30" y="60" width="200" height="180" class="v-line"/>
+<text class="v-text ink" x="46" y="86">vault page · online</text>
+<text class="v-text" x="46" y="112">prepares the request</text>
+<text class="v-text" x="46" y="130">stages the signature</text>
+<text class="v-text" x="46" y="148">runs execute</text>
+<rect x="330" y="60" width="200" height="180" class="v-line"/>
+<text class="v-text ink" x="346" y="86">cold signer · no network</text>
+<text class="v-text" x="346" y="112">one html file</text>
+<text class="v-text" x="346" y="130">24 words typed here</text>
+<text class="v-text" x="346" y="148">journal written first</text>
+<path class="v-ink v-path" d="M230 110 L 330 110"/>
+<text class="v-text" x="246" y="100">request →</text>
+<path class="v-ink v-path" d="M330 200 L 230 200"/>
+<text class="v-text" x="246" y="222">← signature</text>
+<text class="v-text" x="30" y="282">the words never meet a network interface</text>
+</svg></div>
+</section>
+
+<section class="scene flip reveal">
+  <div class="visual"><svg id="meter" viewBox="0 0 560 300" aria-label="one-time keys">
+<rect class="seg v-dim" x="30.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="38.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="46.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="54.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="62.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="70.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="78.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="86.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="94.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="102.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="111.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="119.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="127.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="135.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="143.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="151.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="159.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="167.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="175.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="183.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="192.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="200.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="208.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="216.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="224.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="232.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="240.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="248.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="256.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="264.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="273.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="281.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="289.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="297.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="305.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="313.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="321.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="329.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="337.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="345.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="354.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="362.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="370.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="378.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="386.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="394.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="402.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="410.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="418.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="426.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="435.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="443.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="451.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="459.3" y="120" width="6" height="40"/><rect class="seg v-dim" x="467.4" y="120" width="6" height="40"/><rect class="seg v-dim" x="475.5" y="120" width="6" height="40"/><rect class="seg v-dim" x="483.6" y="120" width="6" height="40"/><rect class="seg v-dim" x="491.7" y="120" width="6" height="40"/><rect class="seg v-dim" x="499.8" y="120" width="6" height="40"/><rect class="seg v-dim" x="507.9" y="120" width="6" height="40"/><rect class="seg v-dim" x="516.0" y="120" width="6" height="40"/><rect class="seg v-dim" x="524.1" y="120" width="6" height="40"/><rect class="seg v-dim" x="532.2" y="120" width="6" height="40"/><rect class="seg v-dim" x="540.3" y="120" width="6" height="40"/>
+<text class="v-text ink" x="30" y="100">one-time keys of this vault</text>
+<text class="v-text" x="30" y="190">spent keys stay spent · the chain keeps the bitmap</text>
+<text class="v-text ink" x="30" y="240">1 transaction · 2.9 KB · ~125k compute units</text>
+<text class="v-text" x="30" y="260">older wallets: 3 small transactions stage the signature, one verifies it</text>
+</svg></div>
+  <div class="text"><div class="n">04</div><h2>The chain verifies it and marks the key spent.</h2><p>The program recomputes about a thousand SHA-256 hashes, checks the key number against the vault's bitmap, sets the bit, then moves the funds. Since Solana's 4 KB transactions, all of it fits in one transaction. A signed request is valid for at most a day.</p></div>
+</section>
+
+<section class="scene reveal">
+  <div class="text"><div class="n">05</div><h2>When a key runs low, rotate in place.</h2><p>The last key of every generation can only be spent on installing a fresh one at the same address. The vault keeps a record of every key it has ever used and refuses to go back; signatures from an earlier generation are refused by construction. A closed vault leaves a permanent marker so its address can never be reopened.</p></div>
+  <div class="visual"><svg viewBox="0 0 560 300" aria-label="rotation">
+<text class="v-text" x="30" y="60">same address</text>
+<text class="v-text ink" x="30" y="82">D3peLheWCB5N…sCt</text>
+<g>
+<rect x="30" y="120" width="220" height="70" class="v-line"/>
+<text class="v-text ink" x="46" y="146">key A · generation 0</text>
+<text class="v-text" x="46" y="170">1 023 signatures, 1 reserved</text>
+</g>
+<path class="v-ink v-path" d="M250 155 L 310 155"/>
+<g>
+<rect x="310" y="120" width="220" height="70" class="v-line"/>
+<text class="v-text ink" x="326" y="146">key B · generation 1</text>
+<text class="v-text" x="326" y="170">fresh 1 024 · A can never return</text>
+</g>
+<text class="v-text" x="30" y="240">the last key of a generation can only be spent on rotating</text>
+<text class="v-text" x="30" y="260">every past key is remembered; a signature from an old generation is refused</text>
+</svg></div>
+</section>
+
+<div class="stats reveal">
+  <div><b>SHA-256</b><span>the only cryptographic assumption in the funds path</span></div>
+  <div><b>1</b><span>transaction per withdrawal with a v1-capable wallet</span></div>
+  <div><b>0</b><span>admin keys, pause switches or fees in the program</span></div>
+</div>
+
+<div class="cta reveal">
+  <a class="btn primary" href="/">Open the vault</a>
+  <a class="link arrow" href="/security">What has to be true for this to hold</a>
+</div>
+<footer>
+  <a href="https://github.com/Lamport-Robotics/lamport-vault">Source</a>
+  <a href="/signer.html" download="lamport-vault-signer.html">Download the cold signer</a>
+  <a href="https://lamportrobotics.com">Lamport Robotics</a>
+  <span class="ids">MIT · no admin keys · no fees</span>
+</footer>
+</div>
+<script type="module" src="/src/pages.ts"></script>
+</body>
+</html>

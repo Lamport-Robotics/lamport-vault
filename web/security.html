@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamport Vault · Security</title>
+<meta name="description" content="The assumptions, the threat model, and what has been verified: vectors, fuzzing, reproducible builds, devnet deployments.">
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="Lamport Vault · Security">
+<meta property="og:description" content="The assumptions, the threat model, and what has been verified: vectors, fuzzing, reproducible builds, devnet deployments.">
+<meta property="og:image" content="https://lamportrobotics.com/og.png">
+</head>
+<body>
+<div class="shell">
+<div class="top pages">
+  <a class="brand" href="/"><img src="/mark.svg" alt=""><b>Lamport Vault</b><i></i><small>devnet</small></a>
+  <nav class="nav">
+    <a href="/">Vault</a>
+    <a href="/how-it-works">How it works</a>
+    <a href="/security">Security</a>
+    <a href="/cold-signer">Cold signer</a>
+    <a href="/faq">FAQ</a>
+  </nav>
+</div>
+
+<section class="hero reveal">
+  <div class="eyebrow">Security</div>
+  <h1>What has to be true.</h1>
+  <p>A short list, on purpose. Everything the vault promises reduces to these, and everything we test is a test of one of them.</p>
+</section>
+
+<section class="prose reveal">
+  <h2>Assumptions</h2>
+  <ul>
+    <li><b>SHA-256 is a one-way function.</b> That is the whole of the cryptography. No elliptic curve, no lattice, no pairing stands between a key and the funds.</li>
+    <li><b>The program on chain is the program in the repository.</b> Builds are reproducible; anyone can compare the deployed bytes with a commit. On mainnet the upgrade authority is burned at deployment.</li>
+    <li><b>A one-time key is used once.</b> The chain enforces this for execution with a per-key bitmap. Signers enforce it for signing with a durable journal written before any signature exists.</li>
+    <li><b>You keep the 24 words.</b> A vault is quantum-safe, not owner-safe. Whoever holds the words holds the vault.</li>
+  </ul>
+</section>
+
+<section class="prose reveal">
+  <h2>What an attacker gets, and what they don't</h2>
+  <dl class="ledger">
+    <dt>A quantum computer and every past signature</dt><dd>Hash preimages that are already public. Nothing that helps sign a new message.</dd>
+    <dt>A stolen, unexecuted signature</dt><dd>The right to submit exactly what you signed, before it expires. The message binds program, vault, key generation, action and a validity window of at most a day.</dd>
+    <dt>The fee-paying wallet's private key</dt><dd>The rent refund. The fee payer has no authority over the vault.</dd>
+    <dt>A reused key number on another device</dt><dd>Refused by the bitmap once the first is executed. Before that, only the signer's journal stands in the way, which is why signers reserve before they sign and devices sharing a key use separate lanes.</dd>
+    <dt>Rotating back to an old key, or closing and reopening a vault</dt><dd>Refused. Every past key is remembered, and a closed vault leaves a permanent marker at its address.</dd>
+    <dt>Your 24 words</dt><dd>Everything. This is the limit of any wallet, and the reason the same keys can live inside a hardware signer instead.</dd>
+  </dl>
+</section>
+
+<section class="prose reveal">
+  <h2>What has been verified</h2>
+  <ul>
+    <li><b>Three independent vector sources</b> for the signature verifier: RFC 8554 Appendix F, Cisco's hash-sigs reference, NIST ACVP. The verifier reproduces the RFC's signatures byte for byte.</li>
+    <li><b>Fuzzing</b> of the signature parser, the verifier, the action decoder, the key history and the leaf bitmap, on every push and weekly for longer.</li>
+    <li><b>Adversarial tests on a validator</b>: replay, stale generations, rotating back, the last key, expired and future-dated requests, crash recovery, two devices on one key, close and reopen.</li>
+    <li><b>Deployment verification</b>: a script that hashes the on-chain program and the local build and prints MATCH or not, with the upgrade authority and slot.</li>
+  </ul>
+  <h3>Current deployment (devnet)</h3>
+  <dl class="ledger">
+    <dt>vault program</dt><dd class="mono">B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH</dd>
+    <dt>registry program</dt><dd class="mono">48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad</dd>
+    <dt>status</dt><dd>devnet only; an independent audit comes before any mainnet deployment. Hashes and slots are recorded in the repository's VERIFY document.</dd>
+  </dl>
+  <p>Found something? <a class="link" href="https://github.com/Lamport-Robotics/lamport-vault/blob/main/SECURITY.md">The disclosure policy</a> is in the repository.</p>
+</section>
+
+<div class="cta reveal">
+  <a class="btn primary" href="/">Open the vault</a>
+  <a class="link arrow" href="https://github.com/Lamport-Robotics/lamport-vault/blob/main/docs/DESIGN.md">Read the design document</a>
+</div>
+<footer>
+  <a href="https://github.com/Lamport-Robotics/lamport-vault">Source</a>
+  <a href="/signer.html" download="lamport-vault-signer.html">Download the cold signer</a>
+  <a href="https://lamportrobotics.com">Lamport Robotics</a>
+  <span class="ids">MIT · no admin keys · no fees</span>
+</footer>
+</div>
+<script type="module" src="/src/pages.ts"></script>
+</body>
+</html>

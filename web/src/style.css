@@ -186,3 +186,8 @@ footer .ids { margin-left: auto; overflow-wrap: anywhere; }
 .wrow:hover { background: rgba(242, 238, 227, 0.04); }
 .wrow img { width: 26px; height: 26px; border-radius: 6px; display: block; }
 .wrow .wdot { width: 26px; height: 26px; border: 1px dashed var(--line); display: block; }
+
+.top.app { gap: 24px; }
+.top.app .nav { margin-left: auto; }
+.top.app .wallet { margin-left: 0; }
+@media (max-width: 860px) { .top.app .nav { display: none; } }

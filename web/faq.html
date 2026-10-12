@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamport Vault · FAQ</title>
+<meta name="description" content="Short answers about post-quantum custody on Solana: recovery, keys, rotation, what happens if things go wrong.">
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="Lamport Vault · FAQ">
+<meta property="og:description" content="Short answers about post-quantum custody on Solana: recovery, keys, rotation, what happens if things go wrong.">
+<meta property="og:image" content="https://lamportrobotics.com/og.png">
+</head>
+<body>
+<div class="shell">
+<div class="top pages">
+  <a class="brand" href="/"><img src="/mark.svg" alt=""><b>Lamport Vault</b><i></i><small>devnet</small></a>
+  <nav class="nav">
+    <a href="/">Vault</a>
+    <a href="/how-it-works">How it works</a>
+    <a href="/security">Security</a>
+    <a href="/cold-signer">Cold signer</a>
+    <a href="/faq">FAQ</a>
+  </nav>
+</div>
+
+<section class="hero reveal">
+  <div class="eyebrow">FAQ</div>
+  <h1>Plain answers.</h1>
+  <p>The long versions, with the threat model, live in the repository.</p>
+</section>
+
+<section class="faq prose reveal">
+  <details><summary>Why hash-based signatures and not Falcon or Dilithium?</summary><p>Because they rest on SHA-256 alone, the most examined assumption in cryptography, and because the verifier is small enough to read in an afternoon. Lattice schemes are smaller on the wire but add a second, younger assumption. The vault's signatures are larger; since Solana's 4 KB transactions that no longer costs an extra transaction.</p></details>
+  <details><summary>What if I lose the device I sign on?</summary><p>Nothing is lost. The 24 words recreate every key. Open the vault page, prepare a request, sign on a new offline machine. The chain, not the device, remembers which keys were spent.</p></details>
+  <details><summary>What if I lose the 24 words?</summary><p>The funds are gone. There is no recovery back door, by design. Paper or metal, two copies, two places.</p></details>
+  <details><summary>Can Lamport Robotics freeze, pause or move my funds?</summary><p>No. The program has no admin key, no pause switch and no fee switch. On mainnet the upgrade authority is burned at deployment, so not even we can change the program after that.</p></details>
+  <details><summary>How many times can I withdraw?</summary><p>1 024 times per key generation, then you rotate to a fresh key at the same address, up to 128 generations. The vault page shows the count and warns before the last one.</p></details>
+  <details><summary>Why does it say my request is valid for about an hour?</summary><p>A signed request names the slot range in which it may be executed, at most a day wide. If it is not submitted in time it simply expires; the key number it used is not spent, and the signer moves on to the next.</p></details>
+  <details><summary>Is the vault safe from a quantum computer today?</summary><p>The vault is. Your ordinary Solana wallet, the one that pays fees and deposits, is not; it still uses Ed25519. The registry lets that address commit today to a post-quantum key for the day the protocol verifies such signatures natively.</p></details>
+  <details><summary>Can I put tokens in it, not just SOL?</summary><p>Yes, any SPL token (Token and Token-2022). Send them to the vault address as usual; withdraw them from the page. Close the vault only after the tokens are out.</p></details>
+  <details><summary>Where does this run?</summary><p>On devnet, for now. Mainnet follows an independent audit; until then the program holds no real funds and the page says so.</p></details>
+</section>
+
+<div class="cta reveal">
+  <a class="btn primary" href="/">Open the vault</a>
+  <a class="link arrow" href="/security">Security</a>
+</div>
+<footer>
+  <a href="https://github.com/Lamport-Robotics/lamport-vault">Source</a>
+  <a href="/signer.html" download="lamport-vault-signer.html">Download the cold signer</a>
+  <a href="https://lamportrobotics.com">Lamport Robotics</a>
+  <span class="ids">MIT · no admin keys · no fees</span>
+</footer>
+</div>
+<script type="module" src="/src/pages.ts"></script>
+</body>
+</html>

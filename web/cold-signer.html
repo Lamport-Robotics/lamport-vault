@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamport Vault · Cold signer</title>
+<meta name="description" content="How to sign a withdrawal on a machine with no network: one file, your 24 words, a signature to carry back.">
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="Lamport Vault · Cold signer">
+<meta property="og:description" content="How to sign a withdrawal on a machine with no network: one file, your 24 words, a signature to carry back.">
+<meta property="og:image" content="https://lamportrobotics.com/og.png">
+</head>
+<body>
+<div class="shell">
+<div class="top pages">
+  <a class="brand" href="/"><img src="/mark.svg" alt=""><b>Lamport Vault</b><i></i><small>devnet</small></a>
+  <nav class="nav">
+    <a href="/">Vault</a>
+    <a href="/how-it-works">How it works</a>
+    <a href="/security">Security</a>
+    <a href="/cold-signer">Cold signer</a>
+    <a href="/faq">FAQ</a>
+  </nav>
+</div>
+
+<section class="hero reveal">
+  <div class="eyebrow">Cold signer</div>
+  <h1>One file. No network. Your words stay where they are.</h1>
+  <p>The cold signer is a single HTML page. It needs nothing from the internet and sends nothing to it. You run it on a machine with the network off, give it the request the vault page prepared, type the words, and carry the signature back.</p>
+</section>
+
+<section class="prose reveal">
+  <h2>The round trip</h2>
+  <dl class="ledger">
+    <dt>1 · Download</dt><dd>Get <a class="link" href="/signer.html" download="lamport-vault-signer.html">lamport-vault-signer.html</a> once and keep it. It does not change between withdrawals.</dd>
+    <dt>2 · Prepare</dt><dd>On the vault page, choose the action and amount, then <i>Prepare request</i>. Copy it, or show it as a QR code.</dd>
+    <dt>3 · Go offline</dt><dd>Open the file on a machine with Wi-Fi and cables off. The page shows a red pill while it still sees a network; wait for it to turn.</dd>
+    <dt>4 · Sign</dt><dd>Paste or scan the request, check that the destination and amount are what you meant, type the 24 words, press <i>Sign</i>. The signer records the key number it used before it signs, so the same key can never be used twice from that machine.</dd>
+    <dt>5 · Carry back</dt><dd>Copy the signature, save it as a file, or show it as QR frames. Paste it into the vault page and press <i>Verify and execute</i>.</dd>
+  </dl>
+  <h3>Rules worth keeping</h3>
+  <ul>
+    <li>A request is valid for about an hour; after that, prepare a new one.</li>
+    <li>If you restore the offline machine from a backup, rotate the vault key before signing again. Its memory of used keys may be older than the chain's.</li>
+    <li>The words are typed only here. Never into the vault page, never into a chat, never into a photo.</li>
+  </ul>
+</section>
+
+<div class="cta reveal">
+  <a class="btn primary" href="/signer.html" download="lamport-vault-signer.html">Download the cold signer</a>
+  <a class="link arrow" href="/how-it-works">How the whole thing works</a>
+</div>
+<footer>
+  <a href="https://github.com/Lamport-Robotics/lamport-vault">Source</a>
+  <a href="/signer.html" download="lamport-vault-signer.html">Download the cold signer</a>
+  <a href="https://lamportrobotics.com">Lamport Robotics</a>
+  <span class="ids">MIT · no admin keys · no fees</span>
+</footer>
+</div>
+<script type="module" src="/src/pages.ts"></script>
+</body>
+</html>

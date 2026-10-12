@@ -12,6 +12,7 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::error::ErrorCode;
+use anchor_spl::associated_token::{self, get_associated_token_address_with_program_id, AssociatedToken, Create as CreateAta};
 use anchor_spl::token_interface::{self, CloseAccount, TransferChecked};
 use lamport_lms::{parse_lms_signature, verify_parsed, LmsPublicKey, LmsType, LMS_PUBLIC_KEY_LEN};
 
@@ -98,7 +99,8 @@ fn parse_vault_key(bytes: &[u8; LMS_PUBLIC_KEY_LEN]) -> Result<LmsPublicKey> {
 pub struct Verified {
     /// Leaf index the signature spends.
     pub q: u32,
-    /// Whether this was the last free leaf before spending it (exhaustion rule).
+    /// Whether this was the last free leaf before spending it (exhaustion rule:
+    /// only `Rotate` or `Close` may spend it).
     pub last_free: bool,
     /// The vault's parsed key.
     pub pk: LmsPublicKey,
@@ -143,9 +145,14 @@ pub fn check_action(action_bytes: &[u8], slot: u64, last_free: bool) -> Result<A
     let action = Action::decode(action_bytes)?;
     let (issued_slot, expiry_slot) = action.window();
     check_validity_window(issued_slot, expiry_slot, slot)?;
-    // Exhaustion rule: when this is the last free leaf it may only Rotate.
+    // Exhaustion rule: the last free leaf may only Rotate or Close. Transfers
+    // are refused so the vault always keeps a way out: a fresh key, or, when
+    // the key history is full and Rotate would fail, the exit.
     if last_free {
-        require!(matches!(action, Action::Rotate { .. }), VaultError::LastLeafReservedForRotate);
+        require!(
+            matches!(action, Action::Rotate { .. } | Action::Close { .. }),
+            VaultError::LastLeafReservedForRotate
+        );
     }
     Ok(action)
 }
@@ -219,14 +226,16 @@ fn mint_decimals(ai: &AccountInfo) -> Result<u8> {
     Ok(data[44])
 }
 
-/// `(owner, amount)` of an initialized Token / Token-2022 token account.
-fn token_account_owner_amount(ai: &AccountInfo) -> Result<(Pubkey, u64)> {
+/// `(mint, owner, amount)` of an initialized Token / Token-2022 token account
+/// (`mint` at 0..32).
+fn token_account_fields(ai: &AccountInfo) -> Result<(Pubkey, Pubkey, u64)> {
     let data = ai.try_borrow_data()?;
     let shape_ok = data.len() == TOKEN_ACCOUNT_LEN || (data.len() > TOKEN_ACCOUNT_LEN && data[TOKEN_ACCOUNT_LEN] == 2);
     require!(shape_ok && data[108] != 0, ErrorCode::AccountDidNotDeserialize);
+    let mint = Pubkey::new_from_array(data[..32].try_into().unwrap());
     let owner = Pubkey::new_from_array(data[32..64].try_into().unwrap());
     let amount = u64::from_le_bytes(data[64..72].try_into().unwrap());
-    Ok((owner, amount))
+    Ok((mint, owner, amount))
 }
 
 /// Verifies, burns the leaf, checks the action and performs it. Both entry
@@ -351,8 +360,8 @@ fn verify_and_act<'info>(
                 let token_program = &pair[1];
                 require!(is_token_program(token_program.key), VaultError::InvalidTokenProgram);
                 require_keys_eq!(*acc_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
-                let (owner, amount) = token_account_owner_amount(acc_ai)?;
-                require_keys_eq!(owner, vault_key, VaultError::InvalidTokenProgram);
+                let (_, owner, amount) = token_account_fields(acc_ai)?;
+                require_keys_eq!(owner, vault_key, VaultError::NotVaultTokenAccount);
                 require!(amount == 0, VaultError::TokenAccountNotEmpty);
                 token_interface::close_account(CpiContext::new_with_signer(
                     token_program.clone(),
@@ -367,14 +376,16 @@ fn verify_and_act<'info>(
             // The address stays occupied by a `Tombstone` holding exactly its
             // rent-exempt minimum (DESIGN.md section 2, "Close"); `create_vault`
             // refuses it, so no unexpired pre-close signature can ever verify
-            // against a recreated vault. Everything else goes to `to`.
+            // against a recreated vault. Everything else goes to `to`, which the
+            // tombstone records as `heir`: a token account the owner did not
+            // pass in here is recoverable later with `sweep_closed`, to `to` only.
             let vault_ai = vault.to_account_info();
             let keep = Rent::get()?.minimum_balance(Tombstone::SPACE);
             let payout = vault_ai.lamports().checked_sub(keep).ok_or(VaultError::InsufficientFunds)?;
             vault_ai.sub_lamports(payout)?;
             to_ai.add_lamports(payout)?;
             vault_ai.resize(Tombstone::SPACE)?;
-            let tombstone = Tombstone { version: Tombstone::VERSION, vault_id, closed_slot: slot };
+            let tombstone = Tombstone { version: Tombstone::VERSION, vault_id, closed_slot: slot, heir: to };
             write_account(&vault_ai, &tombstone)?;
             // Anchor writes `vault` back at exit; with this version byte its
             // serializer writes nothing (see `AccountSerialize for Vault`).
@@ -484,7 +495,8 @@ pub mod lamport_vault {
     /// * `Rotate`: none
     /// * `Close`: `[to (w)]`, then any number of `[token account (w), token program]` pairs,
     ///   each an empty token account owned by the vault; they are closed to `to`.
-    ///   The vault itself becomes a `Tombstone` (its address is never reusable).
+    ///   The vault itself becomes a `Tombstone` naming `to` as heir (its address is
+    ///   never reusable); a token account not passed in is swept to `to` later by `sweep_closed`.
     ///
     /// On a closed vault (a `Tombstone` at the address) every instruction that
     /// reads the vault fails with `VaultClosed`.
@@ -517,6 +529,74 @@ pub mod lamport_vault {
             RentSource::Payer { payer: &payer, system_program: &system_program },
             ctx.remaining_accounts,
         )
+    }
+
+    /// Recovers a token balance a closed vault still owns. `Close` cannot
+    /// enumerate the vault's token accounts, so one that was not passed to it
+    /// stays owned by the PDA; this moves its whole balance to the heir's
+    /// associated token account (created here if missing, rent paid by `payer`)
+    /// and closes it, its rent to the heir. The heir is the `to` the `Close`
+    /// was signed for, read from the `Tombstone`: anyone may call this, and
+    /// funds can only ever go there. Token and Token-2022, any mint.
+    pub fn sweep_closed(ctx: Context<SweepClosed>) -> Result<()> {
+        let tomb = &ctx.accounts.tombstone;
+        let heir = &ctx.accounts.heir;
+        let token_program = &ctx.accounts.token_program;
+        let mint_ai = &ctx.accounts.mint;
+        let acc_ai = &ctx.accounts.vault_token_account;
+        let heir_ata = &ctx.accounts.heir_token_account;
+
+        require_keys_eq!(heir.key(), tomb.heir, VaultError::WrongHeir);
+        require!(is_token_program(token_program.key), VaultError::InvalidTokenProgram);
+        require_keys_eq!(*mint_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
+        require_keys_eq!(*acc_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
+        let (mint, owner, amount) = token_account_fields(acc_ai)?;
+        require_keys_eq!(owner, tomb.key(), VaultError::NotVaultTokenAccount);
+        require_keys_eq!(mint, mint_ai.key(), VaultError::WrongMint);
+        let expected = get_associated_token_address_with_program_id(&tomb.heir, &mint, token_program.key);
+        require_keys_eq!(heir_ata.key(), expected, VaultError::NotHeirTokenAccount);
+
+        // The heir's ATA, if it does not exist yet. The ATA program checks the
+        // address again and leaves an existing account alone.
+        associated_token::create_idempotent(CpiContext::new(
+            ctx.accounts.associated_token_program.to_account_info(),
+            CreateAta {
+                payer: ctx.accounts.payer.to_account_info(),
+                associated_token: heir_ata.to_account_info(),
+                authority: heir.to_account_info(),
+                mint: mint_ai.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: token_program.to_account_info(),
+            },
+        ))?;
+
+        let signer_seeds: &[&[u8]] = &[VAULT_SEED, &tomb.vault_id, &[ctx.bumps.tombstone]];
+        if amount > 0 {
+            let decimals = mint_decimals(mint_ai)?;
+            token_interface::transfer_checked(
+                CpiContext::new_with_signer(
+                    token_program.to_account_info(),
+                    TransferChecked {
+                        from: acc_ai.to_account_info(),
+                        mint: mint_ai.to_account_info(),
+                        to: heir_ata.to_account_info(),
+                        authority: tomb.to_account_info(),
+                    },
+                    &[signer_seeds],
+                ),
+                amount,
+                decimals,
+            )?;
+        }
+        token_interface::close_account(CpiContext::new_with_signer(
+            token_program.to_account_info(),
+            CloseAccount {
+                account: acc_ai.to_account_info(),
+                destination: heir.to_account_info(),
+                authority: tomb.to_account_info(),
+            },
+            &[signer_seeds],
+        ))
     }
 }
 
@@ -590,6 +670,35 @@ pub struct ExecuteDirect<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
+}
+
+/// Accounts of `sweep_closed`. The token accounts are deliberately unchecked
+/// here and validated in the handler (owner program, owner, mint, ATA address),
+/// which keeps Token-2022 extension parsing out of the binary; the token and
+/// ATA programs re-validate everything in the CPIs.
+#[derive(Accounts)]
+pub struct SweepClosed<'info> {
+    /// Pays for the heir's associated token account when it has to be created.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// The closed vault: a `Tombstone` at the vault PDA (a live vault fails `VaultNotClosed`).
+    #[account(seeds = [VAULT_SEED, tombstone.vault_id.as_ref()], bump)]
+    pub tombstone: Account<'info, Tombstone>,
+    /// CHECK: must equal `tombstone.heir`; receives the token account's rent.
+    #[account(mut)]
+    pub heir: UncheckedAccount<'info>,
+    /// CHECK: the heir's associated token account for `mint` under `token_program`; created if missing.
+    #[account(mut)]
+    pub heir_token_account: UncheckedAccount<'info>,
+    /// CHECK: a token account owned by the closed vault's PDA, for `mint`; emptied and closed.
+    #[account(mut)]
+    pub vault_token_account: UncheckedAccount<'info>,
+    /// CHECK: the mint, owned by `token_program`.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: Token or Token-2022.
+    pub token_program: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
 #[cfg(test)]
@@ -816,8 +925,14 @@ mod tests {
         assert!(matches!(check_action(&transfer, 100, false).unwrap(), Action::TransferSol { .. }));
         assert_eq!(code(check_action(&transfer, 101, false)), vault_err(VaultError::ActionExpired));
         assert_eq!(code(check_action(&transfer, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
+        let token = Action::TransferToken { mint: Pubkey::new_unique(), to: Pubkey::new_unique(), amount: 1, issued_slot: 0, expiry_slot: 100 }.encode();
+        assert_eq!(code(check_action(&token, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
         let rotate = Action::Rotate { new_lms_pubkey: [1; 56], issued_slot: 0, expiry_slot: 100 }.encode();
         assert!(matches!(check_action(&rotate, 100, true).unwrap(), Action::Rotate { .. }));
+        // The exit is always open: Close may spend the last leaf too (a full key history makes Rotate fail).
+        let close = Action::Close { to: Pubkey::new_unique(), issued_slot: 0, expiry_slot: 100 }.encode();
+        assert!(matches!(check_action(&close, 100, true).unwrap(), Action::Close { .. }));
+        assert_eq!(code(check_action(&close, 101, true)), vault_err(VaultError::ActionExpired));
         assert_eq!(code(check_action(&rotate, 101, true)), vault_err(VaultError::ActionExpired));
         assert_eq!(code(check_action(&[9, 9], 0, false)), vault_err(VaultError::ActionDecode));
         let mut trailing = transfer.clone();

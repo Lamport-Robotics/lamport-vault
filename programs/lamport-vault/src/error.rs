@@ -35,7 +35,7 @@ pub enum VaultError {
     InvalidSignature, // 6013
     #[msg("action expired: expiry_slot is in the past")]
     ActionExpired, // 6014
-    #[msg("the last free leaf may only be spent on Rotate")]
+    #[msg("the last free leaf may only be spent on Rotate or Close")]
     LastLeafReservedForRotate, // 6015
     #[msg("transfer would take the vault below its rent-exempt minimum")]
     InsufficientFunds, // 6016
@@ -71,4 +71,12 @@ pub enum VaultError {
     InvalidValidityWindow, // 6031
     #[msg("vault is closed: a Tombstone holds its address; create a vault with a fresh key")]
     VaultClosed, // 6032
+    #[msg("vault is not closed: sweep_closed needs the Tombstone a Close leaves")]
+    VaultNotClosed, // 6033
+    #[msg("heir does not match the tombstone's heir (the Close action's `to`)")]
+    WrongHeir, // 6034
+    #[msg("destination must be the heir's associated token account for this mint and token program")]
+    NotHeirTokenAccount, // 6035
+    #[msg("token account is not owned by the closed vault")]
+    NotVaultTokenAccount, // 6036
 }

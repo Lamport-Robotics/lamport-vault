@@ -9,7 +9,7 @@ import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { fromHex, toHex } from "../../lms/src/index.ts";
-import { commitmentAccountSize, COMMITMENT_MAX_KEY_HISTORY, encodeCommitment, encodePqSigBuffer, encodeSigBuffer, encodeTombstone, encodeVault, KEY_HASH_LEN, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, vaultAccountSize, VAULT_MAX_KEY_HISTORY } from "../src/accounts.ts";
+import { commitmentAccountSize, COMMITMENT_MAX_KEY_HISTORY, encodeCommitment, encodePqSigBuffer, encodeSigBuffer, encodeTombstone, encodeVault, KEY_HASH_LEN, TOMBSTONE_ACCOUNT_SIZE, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, vaultAccountSize, VAULT_MAX_KEY_HISTORY } from "../src/accounts.ts";
 import { type Action, ACTION_SIZES, encodeAction, MAX_VALIDITY_SLOTS } from "../src/action.ts";
 import { ACCOUNT, IX } from "../src/discriminator.ts";
 import { createVaultInstruction, openSigBufferInstruction, writeSigInstruction } from "../src/instructions.ts";
@@ -163,8 +163,8 @@ const doc = {
         usedKeys: [usedKeyHash(H10_PUBKEY), usedKeyHash(H5_PAST_PUBKEY)],
       }),
     ),
-    // What Close leaves at the vault's address: version 0xfe, the vault id, the slot of the close.
-    tombstone_hex: toHex(encodeTombstone({ version: TOMBSTONE_ACCOUNT_VERSION, vaultId: id, closedSlot: 0x1122334466n })),
+    // What Close leaves at the vault's address: version 0xfe, the vault id, the slot of the close, the heir (the Close's `to`, pk_22).
+    tombstone_hex: toHex(encodeTombstone({ version: TOMBSTONE_ACCOUNT_VERSION, vaultId: id, closedSlot: 0x1122334466n, heir: PK_22 })),
     sig_buffer_hex: toHex(
       encodeSigBuffer({
         version: 1,
@@ -214,6 +214,7 @@ const doc = {
       vault_h15: vaultAccountSize(7),
       key_history_entry: KEY_HASH_LEN,
       vault_max_key_history: VAULT_MAX_KEY_HISTORY,
+      tombstone: TOMBSTONE_ACCOUNT_SIZE,
       commitment: commitmentAccountSize(0),
       commitment_max_key_history: COMMITMENT_MAX_KEY_HISTORY,
     },

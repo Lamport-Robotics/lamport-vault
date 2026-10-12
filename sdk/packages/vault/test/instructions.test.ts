@@ -15,10 +15,11 @@ import {
   executeRemainingAccounts,
   openSigBufferFirstChunkCapacity,
   openSigBufferInstruction,
+  sweepClosedInstruction,
   writeSigInstruction,
   writeSigInstructions,
 } from "../src/instructions.ts";
-import { associatedTokenAddress, findSigBufferPda, findVaultPdaForKey, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, vaultId } from "../src/pda.ts";
+import { ASSOCIATED_TOKEN_PROGRAM_ID, associatedTokenAddress, findSigBufferPda, findVaultPdaForKey, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, vaultId } from "../src/pda.ts";
 import { buildStagedRotatePq, closePqBufferInstruction, commitInstruction, openPqBufferInstruction, writePqSigInstruction } from "../src/registry.ts";
 import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22, PK_33, REGISTRY_PROGRAM_ID, VAULT_PROGRAM_ID } from "./fixtures.ts";
 
@@ -156,6 +157,29 @@ describe("vault instruction data and accounts", () => {
     const tok22 = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_2022_PROGRAM_ID);
     expect(tok22[0]!.pubkey.equals(associatedTokenAddress(vault, PK_22, TOKEN_2022_PROGRAM_ID))).toBe(true);
     expect(tok22[3]!.pubkey.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+  });
+
+  it("sweep_closed: payer, tombstone, heir, heir ATA, vault token account, mint, token program, system, ATA program; only the discriminator", () => {
+    const { instruction, heirTokenAccount } = sweepClosedInstruction({ programId: VAULT_PROGRAM_ID, payer, vault, heir: PK_22, mint: PK_11, vaultTokenAccount: PK_33 });
+    expect(toHex(instruction.data)).toBe(toHex(IX.sweepClosed));
+    expect(toHex(IX.sweepClosed)).toBe(toHex(instructionDiscriminator("sweep_closed")));
+    expect(heirTokenAccount.equals(associatedTokenAddress(PK_22, PK_11, TOKEN_PROGRAM_ID))).toBe(true);
+    expect(keysOf(instruction)).toEqual([
+      [payer.toBase58(), true, true],
+      [vault.toBase58(), false, false],
+      [PK_22.toBase58(), false, true],
+      [heirTokenAccount.toBase58(), false, true],
+      [PK_33.toBase58(), false, true],
+      [PK_11.toBase58(), false, false],
+      [TOKEN_PROGRAM_ID.toBase58(), false, false],
+      [SystemProgram.programId.toBase58(), false, false],
+      [ASSOCIATED_TOKEN_PROGRAM_ID.toBase58(), false, false],
+    ]);
+    // Token-2022: the heir's ATA is the one under that program, and the program is passed along.
+    const t22 = sweepClosedInstruction({ programId: VAULT_PROGRAM_ID, payer, vault, heir: PK_22, mint: PK_11, vaultTokenAccount: PK_33, tokenProgram: TOKEN_2022_PROGRAM_ID });
+    expect(t22.heirTokenAccount.equals(associatedTokenAddress(PK_22, PK_11, TOKEN_2022_PROGRAM_ID))).toBe(true);
+    expect(t22.instruction.keys[3]!.pubkey.equals(t22.heirTokenAccount)).toBe(true);
+    expect(t22.instruction.keys[6]!.pubkey.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
   });
 
   it("execute transaction requests 400k compute units first", () => {

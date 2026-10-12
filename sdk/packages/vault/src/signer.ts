@@ -484,8 +484,8 @@ export class VaultSigner {
     if (isLeafUsed(vault, q)) throw new Error(`q=${q} is already spent on chain`);
     if (reserved.has(q)) throw new Error(`q=${q} was already signed by this signer (journal)`);
     if (stale && request.kind !== "Rotate") throw new StaleSignerError(stale);
-    if (freeLeaves(vault) <= 1 && request.kind !== "Rotate") {
-      throw new Error("the last free leaf may only be spent on Rotate (exhaustion rule); rotate to a fresh key first");
+    if (freeLeaves(vault) <= 1 && request.kind !== "Rotate" && request.kind !== "Close") {
+      throw new Error("the last free leaf may only be spent on Rotate or Close (exhaustion rule); rotate to a fresh key first");
     }
     if (request.kind === "Rotate") {
       if (hasUsedKey(vault, request.newLmsPubkey)) throw new Error("Rotate to a key this vault has used before (the chain would refuse it with KeyReused)");

@@ -151,9 +151,14 @@ impl Vault {
 /// the close would verify again. Own discriminator (`sha256("account:Tombstone")`),
 /// so it is never read as a `Vault`; `version` is a value no `Vault` layout
 /// carries, so even the byte after the discriminator tells the two apart. The
-/// account holds exactly its rent-exempt minimum; `Close` sent the rest to `to`.
-#[account]
-#[derive(Debug)]
+/// account holds exactly its rent-exempt minimum; `Close` sent the rest to `to`,
+/// recorded here as `heir`: the only destination `sweep_closed` will ever move a
+/// token balance the closed vault still owns to.
+///
+/// The Anchor account traits are written out (same discriminator and layout as
+/// `#[account]` derives) so that a live `Vault` where a tombstone is expected
+/// fails with [`VaultError::VaultNotClosed`] instead of a discriminator mismatch.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct Tombstone {
     /// Layout version, [`Tombstone::VERSION`] (0xFE).
     pub version: u8,
@@ -161,13 +166,53 @@ pub struct Tombstone {
     pub vault_id: [u8; 32],
     /// Slot of the `Close`.
     pub closed_slot: u64,
+    /// The `to` of the `Close`: where its lamports went, and where `sweep_closed`
+    /// sends any token balance found later.
+    pub heir: Pubkey,
+}
+
+impl Discriminator for Tombstone {
+    /// `sha256("account:Tombstone")[..8]`, the value `#[account]` derives.
+    const DISCRIMINATOR: &'static [u8] = &[45, 187, 252, 155, 232, 114, 36, 22];
+}
+
+impl Owner for Tombstone {
+    fn owner() -> Pubkey {
+        crate::ID
+    }
+}
+
+impl AccountSerialize for Tombstone {
+    fn try_serialize<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
+        if writer.write_all(Self::DISCRIMINATOR).is_err() || AnchorSerialize::serialize(self, writer).is_err() {
+            return err!(ErrorCode::AccountDidNotSerialize);
+        }
+        Ok(())
+    }
+}
+
+impl AccountDeserialize for Tombstone {
+    fn try_deserialize(buf: &mut &[u8]) -> Result<Self> {
+        require!(buf.len() >= 8, ErrorCode::AccountDiscriminatorNotFound);
+        // A live vault: say so, instead of "not a Tombstone".
+        require!(buf[..8] != *Vault::DISCRIMINATOR, VaultError::VaultNotClosed);
+        require!(buf[..8] == *Self::DISCRIMINATOR, ErrorCode::AccountDiscriminatorMismatch);
+        Self::try_deserialize_unchecked(buf)
+    }
+
+    fn try_deserialize_unchecked(buf: &mut &[u8]) -> Result<Self> {
+        let mut data: &[u8] = &buf[8..];
+        let tomb: Tombstone = AnchorDeserialize::deserialize(&mut data).map_err(|_| error!(ErrorCode::AccountDidNotDeserialize))?;
+        require!(tomb.version == Self::VERSION, ErrorCode::AccountDidNotDeserialize);
+        Ok(tomb)
+    }
 }
 
 impl Tombstone {
     /// Layout version; reserved, no `Vault` ever has it.
     pub const VERSION: u8 = 0xFE;
-    /// Account size including the discriminator: 49 bytes.
-    pub const SPACE: usize = 8 + 1 + 32 + 8;
+    /// Account size including the discriminator: 81 bytes.
+    pub const SPACE: usize = 8 + 1 + 32 + 8 + 32;
 
     /// True when `ai` is a tombstone written by this program.
     pub fn is_at(ai: &AccountInfo) -> bool {

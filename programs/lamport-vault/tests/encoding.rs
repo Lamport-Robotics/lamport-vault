@@ -235,19 +235,24 @@ fn account_layouts() {
     assert_eq!(out, vault_hex);
     assert_eq!(out.len(), Vault::space(LmsType::Sha256M32H5, hist_len));
 
-    // Tombstone: disc(8) version(0xfe) vault_id(32) closed_slot(8), 49 bytes; reading it as a Vault
-    // says VaultClosed, and a Vault serialised after `Close` marked it writes nothing.
+    // Tombstone: disc(8) version(0xfe) vault_id(32) closed_slot(8) heir(32), 81 bytes; reading it as
+    // a Vault says VaultClosed, reading a Vault as a Tombstone says VaultNotClosed, and a Vault
+    // serialised after `Close` marked it writes nothing.
     let tomb_hex = hx(&d["accounts"]["tombstone_hex"]);
     assert_eq!(tomb_hex.len(), Tombstone::SPACE);
+    assert_eq!(Tombstone::SPACE, 81);
     assert_eq!(tomb_hex[8], Tombstone::VERSION);
     let tomb = Tombstone::try_deserialize(&mut &tomb_hex[..]).unwrap();
     assert_eq!(tomb.vault_id, vault_id_for(&key));
     assert_eq!(tomb.closed_slot, 0x1122334466);
+    assert_eq!(tomb.heir, pk(&d["inputs"]["pk_22"]), "the heir is the Close action's `to`");
     let mut out = Vec::new();
     tomb.try_serialize(&mut out).unwrap();
     assert_eq!(out, tomb_hex);
     let closed = Vault::try_deserialize(&mut &tomb_hex[..]).expect_err("a tombstone is not a vault");
     assert_eq!(closed, anchor_lang::error::Error::from(lamport_vault::VaultError::VaultClosed));
+    let live = Tombstone::try_deserialize(&mut &vault_hex[..]).expect_err("a vault is not a tombstone");
+    assert_eq!(live, anchor_lang::error::Error::from(lamport_vault::VaultError::VaultNotClosed));
     let mut retired = vault.clone();
     retired.version = Tombstone::VERSION;
     let mut none = Vec::new();
@@ -260,6 +265,7 @@ fn account_layouts() {
     assert_eq!(sizes["vault_h10"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H10, 0));
     assert_eq!(sizes["vault_h15"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H15, 0));
     assert_eq!(sizes["key_history_entry"].as_u64().unwrap() as usize, KEY_HASH_LEN);
+    assert_eq!(sizes["tombstone"].as_u64().unwrap() as usize, Tombstone::SPACE);
     assert_eq!(sizes["vault_max_key_history"].as_u64().unwrap(), lamport_vault::MAX_KEY_HISTORY as u64);
 
     let sb_hex = hx(&d["accounts"]["sig_buffer_hex"]);

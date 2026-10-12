@@ -213,25 +213,32 @@ describe("VaultSigner", () => {
     expect([...store].sort()).toEqual([4, 5]);
   });
 
-  it("enforces the exhaustion rule (last free leaf is Rotate only) and Rotate preconditions", async () => {
+  it("enforces the exhaustion rule (last free leaf is Rotate or Close only) and Rotate preconditions", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
     const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount(range(32).filter((q) => q !== 7)));
     expect(await signer.nextQ()).toBe(7);
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate/);
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: key.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/used before/);
+    await expect(signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    await expect(signer.sign({ kind: "TransferToken", mint: payer.publicKey, to: payer.publicKey, amount: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    // Close is the exit when Rotate cannot run (full key history): it may spend the last leaf.
+    const close = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(close.q).toBe(7);
+    expect(lmsVerify(key.publicKey, close.message, close.lmsSignature)).toBe(true);
+    // (signed, not sent: leaf 7 is still free on the mock chain; the journal remembers it, so take a fresh signer)
+    const signer2 = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: key.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/used before/);
     const h10 = LmsPrivateKey.generate({ lmsType: 6, lmotsType: 3, seed: new Uint8Array(32).fill(4), I: KAT_I });
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: h10.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/typecodes/);
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: h10.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/typecodes/);
     const next = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H5, lmotsType: 3, seed: new Uint8Array(32).fill(5), I: KAT_I });
     // `next` is a random key, not derived from any words: the foreign-key guard wants an explicit opt-in.
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key/);
-    const rot = await signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key/);
+    const rot = await signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
     expect(rot.q).toBe(7);
     expect(lmsVerify(key.publicKey, rot.message, rot.lmsSignature)).toBe(true);
     // a past key is refused too
-    rpc.accounts.set(signer.vault.toBase58(), vaultAccount([], { generation: 1, usedKeys: [usedKeyHash(next.publicKey)] }));
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).rejects.toThrow(/used before/);
+    rpc.accounts.set(signer2.vault.toBase58(), vaultAccount([], { generation: 1, usedKeys: [usedKeyHash(next.publicKey)] }));
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).rejects.toThrow(/used before/);
   });
 
   it("rotate to a key not from the words", async () => {

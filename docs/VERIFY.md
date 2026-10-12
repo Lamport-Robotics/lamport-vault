@@ -65,12 +65,14 @@ devnet (`anchor build`, platform-tools v1.56):
 
 ```
 lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-  hash       71e4dde1ad281a1f5eb1dc67d9a7f8e423ed6eb371a7b8a81a5478e18d874348
-  size       308 928 bytes (308 913 hashed, trailing zeros trimmed; allocation 310 000)
-  slot       510305889
+  hash       4dd776964d179c5827c8533953cd0026d82344f928e0e2b70678986fa1982f98
+  size       330 880 bytes (330 865 hashed, trailing zeros trimmed; allocation 350 000,
+             extended from 310 000 with `solana program extend … 40000` before this deployment)
+  slot       510317125
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
-  source     the Close-tombstone / VaultClosed change on top of commit `e183e3b`
-             (deployed from the working tree; the commit that lands it is the one to verify from)
+  source     pending commit (tree hash 29d8657768a3e6e926845095f24498d3cf0ee8a3): the last-leaf Close / sweep_closed change on
+             top of commit `b97fed9` (deployed from the working tree; the commit that lands it is
+             the one to verify from)
 
 pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
   hash       3480ae2de802671ee6231c3a191b07b45cc462b5999ee20e29d3ad14ba00bd9f
@@ -79,7 +81,8 @@ pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
   source     commit `17c7880` (unchanged since)
 ```
 
-earlier: commit `17c7880`, vault `d7481e24…8f85` at slot 510277112; commit `c596d0a`, vault `4d492d9e…d8c1`
+earlier: commit `e8b3446`, vault `71e4dde1…4348` at slot 510305889 (308 928 bytes, allocation 310 000);
+commit `17c7880`, vault `d7481e24…8f85` at slot 510277112; commit `c596d0a`, vault `4d492d9e…d8c1`
 at slot 510255069, registry `ad3beeab…de81` at slot 510250792.
 
 Devnet is redeployed as the code changes; this block is updated with each deployment and the script

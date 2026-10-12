@@ -96,7 +96,7 @@ in `programs/`); every builder and client also accepts an explicit `programId`.
 
 ```ts
 import { Connection, Keypair } from "@solana/web3.js";
-import { FileLeafJournal, VaultSigner, RegistryClient } from "@lamport-robotics/vault";
+import { FileLeafJournal, VaultSigner, RegistryClient, sweepClosed } from "@lamport-robotics/vault";
 
 const rpc = new Connection("https://api.devnet.solana.com", "confirmed");
 const payer = Keypair.fromSecretKey(/* classical key: pays rent and fees, nothing more */);
@@ -122,17 +122,21 @@ res.mode;         // "staged" (default): [open_sig_buffer, write_sig, write_sig,
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
 await signer.execute({ kind: "Rotate", newLmsPubkey: nextKey.publicKey });  // bitmap cleared, generation + 1, address unchanged
 await signer.execute({ kind: "Close", to });                                  // all lamports to `to`; a Tombstone keeps the address
+
+// Tokens the Close was not handed (closeTokenAccounts) stay owned by the PDA: anyone can sweep them to
+// `to`, the tombstone's heir, and nowhere else. One sweep_closed transaction per token account of the mint.
+await sweepClosed(rpc, payer, signer.vault, mint);                             // { heir, heirTokenAccount, swept: [{ account, signature }] }
 ```
 
-A closed vault's address is never reusable (`Close` leaves a 49-byte `Tombstone` holding its own rent;
-`create_vault` on it fails `VaultClosed`), so the next vault needs the next key:
+A closed vault's address is never reusable (`Close` leaves an 81-byte `Tombstone` holding its own rent and
+naming the heir; `create_vault` on it fails `VaultClosed`), so the next vault needs the next key:
 `nextFreshKeyIndex(master, scope, rpc)` walks the derivation indices and returns the first whose vault
 address is free, skipping tombstones and live vaults; `vaultAddressState(rpc, vault)` is the one-address
 check.
 
 `expirySlot` may be given on any action; when omitted the signer uses the current slot plus 300. The
-signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` on the last free leaf (the
-exhaustion rule), a `Rotate` to a key the vault had before or with other typecodes, and it never reuses a
+signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` or `Close` on the last free leaf
+(the exhaustion rule), a `Rotate` to a key the vault had before or with other typecodes, and it never reuses a
 leaf within one object even before the chain confirms.
 
 The journal is what stops a leaf from ever being signed twice (docs/DESIGN.md "Signer rollback"): the
@@ -176,7 +180,9 @@ spends and `Close`s; the next key gets a new vault, created the same way.
 `COMMITMENT_ACCOUNT_VERSION`) and throw on anything else; there is no in-place migration, an older
 vault is closed and a new one created with a fresh key. `decodeVault` on a tombstone throws
 `VaultClosedError` (with the decoded tombstone); `decodeVaultOrTombstone` returns whichever of the two
-sits at the address, `decodeTombstone` / `isTombstone` read the tombstone itself.
+sits at the address, `decodeTombstone` / `isTombstone` read the tombstone itself (`heir` included;
+`sweepClosedInstruction` builds one `sweep_closed`, `sweepClosed` finds and sweeps a closed vault's token
+accounts for a mint).
 
 The registry:
 

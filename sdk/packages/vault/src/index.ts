@@ -9,5 +9,6 @@ export * from "./message.ts";
 export * from "./pda.ts";
 export * from "./registry.ts";
 export * from "./signer.ts";
+export * from "./sweep.ts";
 export { ByteReader, ByteWriter, u64le } from "./borsh.ts";
 export * from "./programIds.ts";

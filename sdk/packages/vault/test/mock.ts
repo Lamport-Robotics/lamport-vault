@@ -2,17 +2,31 @@
  * A mock cluster for the signer tests: records every transaction, and applies `execute` to the
  * vault account (burns the leaf, performs a Rotate, leaves a tombstone on Close) so journal,
  * generation and tombstone logic can be exercised end to end without a validator. `failAt` makes
- * the n-th transaction fail at confirmation.
+ * the n-th transaction fail at confirmation. Token accounts and mints are a flat table (`mints`,
+ * `tokenAccounts`) so `sweep_closed` can be applied too: it checks what the program checks (a
+ * tombstone, its heir, the heir's ATA, a vault-owned account of the mint) and moves the balance.
  */
 import { Keypair, PublicKey, Transaction, type AccountInfo } from "@solana/web3.js";
-import { decodeVault, encodeTombstone, encodeVault, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
+import { decodeTombstone, decodeVault, encodeTombstone, encodeVault, isTombstone, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
 import { decodeAction } from "../src/action.ts";
 import { IX } from "../src/discriminator.ts";
+import { associatedTokenAddress } from "../src/pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID } from "../src/programIds.ts";
 import type { Rpc } from "../src/signer.ts";
+import type { SweepRpc } from "../src/sweep.ts";
 
-export class MockChain implements Rpc {
+export interface MockTokenAccount {
+  owner: PublicKey;
+  mint: PublicKey;
+  amount: bigint;
+}
+
+export class MockChain implements Rpc, SweepRpc {
   accounts = new Map<string, Uint8Array>();
+  /** mint address -> the token program that owns it */
+  mints = new Map<string, PublicKey>();
+  /** token account address -> owner, mint, balance (the program is the mint's) */
+  tokenAccounts = new Map<string, MockTokenAccount>();
   sent: Transaction[] = [];
   slot = 1000;
   failAt: number | null = null;
@@ -25,8 +39,19 @@ export class MockChain implements Rpc {
 
   async getAccountInfo(pk: PublicKey): Promise<AccountInfo<Buffer> | null> {
     const data = this.accounts.get(pk.toBase58());
-    if (!data) return null;
-    return { data: Buffer.from(data), executable: false, lamports: 1, owner: LAMPORT_VAULT_PROGRAM_ID };
+    if (data) return { data: Buffer.from(data), executable: false, lamports: 1, owner: LAMPORT_VAULT_PROGRAM_ID };
+    const mintProgram = this.mints.get(pk.toBase58());
+    if (mintProgram) return { data: Buffer.alloc(82), executable: false, lamports: 1, owner: mintProgram };
+    const token = this.tokenAccounts.get(pk.toBase58());
+    if (token) return { data: Buffer.alloc(165), executable: false, lamports: 1, owner: this.mints.get(token.mint.toBase58())! };
+    return null;
+  }
+  async getTokenAccountsByOwner(owner: PublicKey, filter: { mint: PublicKey }): Promise<{ value: { pubkey: PublicKey }[] }> {
+    const value: { pubkey: PublicKey }[] = [];
+    for (const [address, t] of this.tokenAccounts) {
+      if (t.owner.equals(owner) && t.mint.equals(filter.mint)) value.push({ pubkey: new PublicKey(address) });
+    }
+    return { value };
   }
   async getLatestBlockhash() {
     return { blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 10 };
@@ -64,10 +89,26 @@ export class MockChain implements Rpc {
           v.generation += 1;
         }
         if (action.kind === "Close") {
-          this.accounts.set(vaultKey.toBase58(), encodeTombstone({ version: TOMBSTONE_ACCOUNT_VERSION, vaultId: v.vaultId, closedSlot: BigInt(this.slot) }));
+          this.accounts.set(vaultKey.toBase58(), encodeTombstone({ version: TOMBSTONE_ACCOUNT_VERSION, vaultId: v.vaultId, closedSlot: BigInt(this.slot), heir: action.to }));
         } else {
           this.accounts.set(vaultKey.toBase58(), encodeVault(v));
         }
+      } else if (disc === Buffer.from(IX.sweepClosed).toString("hex")) {
+        const [, tombstoneKey, heir, heirAta, vaultTa, mint, tokenProgram] = ix.keys.map((k) => k.pubkey) as PublicKey[];
+        const data = this.accounts.get(tombstoneKey!.toBase58());
+        if (!data || !isTombstone(data)) throw new Error("mock: VaultNotClosed");
+        const tomb = decodeTombstone(data);
+        if (!tomb.heir.equals(heir!)) throw new Error("mock: WrongHeir");
+        const program = this.mints.get(mint!.toBase58());
+        if (!program || !program.equals(tokenProgram!)) throw new Error("mock: InvalidTokenProgram");
+        if (!heirAta!.equals(associatedTokenAddress(heir!, mint!, program))) throw new Error("mock: NotHeirTokenAccount");
+        const from = this.tokenAccounts.get(vaultTa!.toBase58());
+        if (!from || !from.owner.equals(tombstoneKey!)) throw new Error("mock: NotVaultTokenAccount");
+        if (!from.mint.equals(mint!)) throw new Error("mock: WrongMint");
+        const to = this.tokenAccounts.get(heirAta!.toBase58()) ?? { owner: heir!, mint: mint!, amount: 0n };
+        to.amount += from.amount;
+        this.tokenAccounts.set(heirAta!.toBase58(), to);
+        this.tokenAccounts.delete(vaultTa!.toBase58());
       }
     }
     return "sig" + this.sent.length;

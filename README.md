@@ -41,8 +41,10 @@ Keys are LMS over SHA-256, trees of height 5, 10 or 15 (32, 1 024 or 32 768 leav
 installs a fresh key at the same address, never one the vault had before: the vault remembers 128 past
 keys (a registry commitment 32). When that history is full the vault can still spend and `Close`;
 the next key goes in a new vault. `Close` leaves a tombstone at the address, so a closed vault can never
-be recreated and no signature from before the close can replay. The last free leaf is only ever spent on
-Rotate, so a vault can't get stuck. Accounts carry version 2; there's no in-place migration, an older
+be recreated and no signature from before the close can replay; it also names the heir, so a token
+account the close didn't get handed can be swept to the heir later (`sweep_closed`, anyone may call it,
+funds go nowhere else). The last free leaf is only ever spent on Rotate or Close, so a vault can't get
+stuck: not even with a full key history. Accounts carry version 2; there's no in-place migration, an older
 vault is closed and a new one created with a fresh key.
 
 Key derivation from the 24 words, `issued_slot` and the v2 derivation: `docs/SPEC-DERIVATION.md`,

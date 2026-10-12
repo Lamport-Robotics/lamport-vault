@@ -13,8 +13,8 @@ import { ACCOUNT } from "./discriminator.ts";
 export const VAULT_ACCOUNT_VERSION = 2;
 /** `Tombstone` layout version (0xFE, a value no `Vault` layout carries). */
 export const TOMBSTONE_ACCOUNT_VERSION = 0xfe;
-/** Size of a `Tombstone` account: discriminator, version, vault_id, closed_slot. */
-export const TOMBSTONE_ACCOUNT_SIZE = 8 + 1 + 32 + 8;
+/** Size of a `Tombstone` account: discriminator, version, vault_id, closed_slot, heir. */
+export const TOMBSTONE_ACCOUNT_SIZE = 8 + 1 + 32 + 8 + 32;
 /** Current `Commitment` layout version; the decoder refuses anything else. */
 export const COMMITMENT_ACCOUNT_VERSION = 2;
 /** A `used_keys` entry is `sha256(pubkey)[0..16]`. */
@@ -45,7 +45,9 @@ export interface VaultAccount {
 /**
  * What `Close` leaves at a vault's address, for good: the PDA is never free again, so `create_vault`
  * with the vault's initial key fails (`VaultClosed`) and no signature made before the close can
- * replay against a recreated vault. Holds exactly its rent-exempt minimum.
+ * replay against a recreated vault. Holds exactly its rent-exempt minimum. `heir` is the `to` the
+ * Close was signed for: the only account `sweep_closed` can move a token balance the closed vault
+ * still owns to (see `sweepClosedInstruction` / `sweepClosed`).
  */
 export interface TombstoneAccount {
   version: number;
@@ -53,6 +55,8 @@ export interface TombstoneAccount {
   vaultId: Uint8Array;
   /** slot of the `Close` */
   closedSlot: bigint;
+  /** the Close action's `to`: where the lamports went and where swept tokens go */
+  heir: PublicKey;
 }
 
 /** Thrown by `decodeVault` on a tombstone: the vault at this address was closed. */
@@ -227,13 +231,13 @@ export function decodeTombstone(data: Uint8Array): TombstoneAccount {
   checkDiscriminator(r, ACCOUNT.tombstone, "Tombstone");
   const version = r.u8();
   checkVersion(version, TOMBSTONE_ACCOUNT_VERSION, "Tombstone");
-  const t: TombstoneAccount = { version, vaultId: r.fixed(32), closedSlot: r.u64() };
+  const t: TombstoneAccount = { version, vaultId: r.fixed(32), closedSlot: r.u64(), heir: r.pubkey() };
   r.finish();
   return t;
 }
 
 export function encodeTombstone(t: TombstoneAccount): Uint8Array {
-  return new ByteWriter().raw(ACCOUNT.tombstone).u8(t.version).fixed(t.vaultId, 32).u64(t.closedSlot).bytes();
+  return new ByteWriter().raw(ACCOUNT.tombstone).u8(t.version).fixed(t.vaultId, 32).u64(t.closedSlot).pubkey(t.heir).bytes();
 }
 
 /** Either account that can sit at a vault address: the live vault, or the tombstone `Close` left. */

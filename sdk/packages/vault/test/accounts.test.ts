@@ -38,7 +38,7 @@ import {
 import { encodeAction } from "../src/action.ts";
 import { ACCOUNT } from "../src/discriminator.ts";
 import { vaultId } from "../src/pda.ts";
-import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22 } from "./fixtures.ts";
+import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22, PK_33 } from "./fixtures.ts";
 
 /** A past key that only appears hashed (same inputs as scripts/write-kat.ts). */
 const PAST_PUBKEY = fromHex("0000000500000003" + "aa".repeat(16) + "bb".repeat(32));
@@ -139,14 +139,15 @@ describe("Vault account", () => {
 });
 
 describe("Tombstone account", () => {
-  const t: TombstoneAccount = { version: TOMBSTONE_ACCOUNT_VERSION, vaultId: vaultId(KAT_H5_PUBKEY), closedSlot: 0x1122334455n };
+  const t: TombstoneAccount = { version: TOMBSTONE_ACCOUNT_VERSION, vaultId: vaultId(KAT_H5_PUBKEY), closedSlot: 0x1122334455n, heir: PK_33 };
 
-  it("is disc || version 0xfe || vault_id || closed_slot, 49 bytes, with its own discriminator", () => {
+  it("is disc || version 0xfe || vault_id || closed_slot || heir, 81 bytes, with its own discriminator", () => {
     const bytes = encodeTombstone(t);
     expect(bytes.length).toBe(TOMBSTONE_ACCOUNT_SIZE);
-    expect(TOMBSTONE_ACCOUNT_SIZE).toBe(49);
+    expect(TOMBSTONE_ACCOUNT_SIZE).toBe(81);
     expect(toHex(ACCOUNT.tombstone)).toBe(toHex(sha256(new TextEncoder().encode("account:Tombstone")).subarray(0, 8)));
-    expect(toHex(bytes)).toBe(toHex(ACCOUNT.tombstone) + "fe" + toHex(t.vaultId) + "5544332211000000");
+    expect(toHex(bytes)).toBe(toHex(ACCOUNT.tombstone) + "fe" + toHex(t.vaultId) + "5544332211000000" + "33".repeat(32));
+    expect(decodeTombstone(bytes).heir.equals(PK_33)).toBe(true);
     expect(decodeTombstone(bytes)).toEqual(t);
     expect(isTombstone(bytes)).toBe(true);
     expect(isTombstone(bytes.subarray(0, 7))).toBe(false);
@@ -173,8 +174,9 @@ describe("Tombstone account", () => {
     expect(() => decodeTombstone(v1)).toThrow(/version 2/);
     expect(() => decodeTombstone(new Uint8Array([...tomb, 0]))).toThrow(/trailing/);
     expect(() => decodeTombstone(tomb.subarray(0, 40))).toThrow();
+    expect(() => decodeTombstone(tomb.subarray(0, 49))).toThrow(); // the pre-heir layout is not accepted
     expect(() => decodeTombstone(vault)).toThrow(/discriminator/);
-    expect(() => decodeVaultOrTombstone(new Uint8Array(49))).toThrow(/discriminator/);
+    expect(() => decodeVaultOrTombstone(new Uint8Array(81))).toThrow(/discriminator/);
   });
 });
 

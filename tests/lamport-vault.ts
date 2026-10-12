@@ -55,8 +55,8 @@ describe("lamport-vault", () => {
 
   /** A window issued now, open for 5 000 slots. */
   const FAR = () => window(provider);
-  /** What `Close` leaves behind: discriminator, version, vault_id, closed_slot. */
-  const TOMBSTONE_SIZE = 8 + 1 + 32 + 8;
+  /** What `Close` leaves behind: discriminator, version, vault_id, closed_slot, heir. */
+  const TOMBSTONE_SIZE = 8 + 1 + 32 + 8 + 32;
 
   async function createVault(key: LmsKey): Promise<PublicKey> {
     const [pda] = vaultPda(program.programId, key.pubkey());
@@ -634,7 +634,10 @@ describe("lamport-vault", () => {
     expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
     const closedSlotLe = Buffer.alloc(8);
     closedSlotLe.writeBigUInt64LE(BigInt(closedSlot));
-    expect(tomb!.data).to.deep.eq(Buffer.concat([sha256(Buffer.from("account:Tombstone")).subarray(0, 8), Buffer.from([0xfe]), sha256(keyT.pubkey()), closedSlotLe]));
+    expect(tomb!.data).to.deep.eq(Buffer.concat([sha256(Buffer.from("account:Tombstone")).subarray(0, 8), Buffer.from([0xfe]), sha256(keyT.pubkey()), closedSlotLe, heir.toBuffer()]));
+    const fetched = await program.account.tombstone.fetch(vaultT);
+    expect(fetched.heir.equals(heir)).to.eq(true);
+    expect(fetched.closedSlot.toNumber()).to.eq(closedSlot);
     const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
     expect(tomb!.lamports).to.eq(tombRent);
     expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
@@ -644,6 +647,7 @@ describe("lamport-vault", () => {
     expect(decoded.tombstone.version).to.eq(0xfe);
     expect(Buffer.from(decoded.tombstone.vaultId)).to.deep.eq(sha256(keyT.pubkey()));
     expect(decoded.tombstone.closedSlot).to.eq(BigInt(closedSlot));
+    expect(decoded.tombstone.heir.equals(heir)).to.eq(true);
     expect(() => sdk.decodeVault(new Uint8Array(tomb!.data))).to.throw(/vault is closed/);
     expect(sdk.isTombstone(new Uint8Array(tomb!.data))).to.eq(true);
 
@@ -720,13 +724,138 @@ describe("lamport-vault", () => {
     const bFull = await stage(vaultF, key, 0, Action.rotate(LmsKey.random(LMS_H5).pubkey(), await FAR()));
     await expectError(execute(vaultF, bFull, []), "HistoryFull");
     expect(await spent(vaultF)).to.eq(0);
-    // Funds still move, and the vault can be closed.
-    await spendLeaf(vaultF, key, 0);
-    expect(await spent(vaultF)).to.eq(1);
+    // Funds still move: spend down to exactly one free leaf (q = 31).
+    for (let q = 0; q <= 30; q++) await spendLeaf(vaultF, key, q);
+    expect(await spent(vaultF)).to.eq(31);
+    expect(await isUsed(vaultF, 31)).to.eq(false);
+    // The deadlock the exhaustion rule must not create: with the history full, Rotate on the last
+    // leaf fails HistoryFull and a transfer fails LastLeafReservedForRotate; Close is the exit.
+    const lastRotate = await stage(vaultF, key, 31, Action.rotate(LmsKey.random(LMS_H5).pubkey(), await FAR()));
+    await expectError(execute(vaultF, lastRotate, []), "HistoryFull");
+    const lastSpend = await stage(vaultF, key, 31, Action.transferSol(recipient.publicKey, 1000, await FAR()));
+    await expectError(execute(vaultF, lastSpend, [meta(recipient.publicKey, true)]), "LastLeafReservedForRotate");
+    expect(await spent(vaultF)).to.eq(31);
     const heir = Keypair.generate().publicKey;
-    const bufClose = await stage(vaultF, key, 1, Action.close(heir, await FAR()));
+    const vaultLamports = await connection.getBalance(vaultF, "confirmed");
+    const bufClose = await stage(vaultF, key, 31, Action.close(heir, await FAR()));
     await execute(vaultF, bufClose, [meta(heir, true)]);
-    expect((await connection.getAccountInfo(vaultF, "confirmed"))!.data.length).to.eq(TOMBSTONE_SIZE);
+    const tomb = await connection.getAccountInfo(vaultF, "confirmed");
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
+    expect((await program.account.tombstone.fetch(vaultF)).heir.equals(heir)).to.eq(true);
+  });
+
+  it("last free leaf: transfers refused, Close accepted (h5)", async () => {
+    const keyL = LmsKey.random(LMS_H5);
+    const vaultL = await createVault(keyL);
+    await fund(provider, vaultL, 0.2);
+    for (let q = 1; q <= 31; q++) await spendLeaf(vaultL, keyL, q);
+    expect(await spent(vaultL)).to.eq(31);
+    expect(await isUsed(vaultL, 0)).to.eq(false);
+    const spend = await stage(vaultL, keyL, 0, Action.transferSol(recipient.publicKey, 1000, await FAR()));
+    await expectError(execute(vaultL, spend, [meta(recipient.publicKey, true)]), "LastLeafReservedForRotate");
+    expect(await isUsed(vaultL, 0)).to.eq(false);
+    // Close on the last leaf: everything but the tombstone's rent to the heir, the heir on record.
+    const heir = Keypair.generate().publicKey;
+    const vaultLamports = await connection.getBalance(vaultL, "confirmed");
+    const close = await stage(vaultL, keyL, 0, Action.close(heir, await FAR()));
+    await execute(vaultL, close, [meta(heir, true)]);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
+    const tomb = await program.account.tombstone.fetch(vaultL);
+    expect(tomb.heir.equals(heir)).to.eq(true);
+    expect(Buffer.from(tomb.vaultId)).to.deep.eq(sha256(keyL.pubkey()));
+    await expectError(execute(vaultL, spend, [meta(recipient.publicKey, true)]), "VaultClosed");
+  });
+
+  it("sweep_closed: tokens a Close left behind go to the heir, and nowhere else", async () => {
+    const { vault: sdk } = loadSdk();
+    const wallet = (provider.wallet as anchor.Wallet).payer;
+    const keyS = LmsKey.random(LMS_H5);
+    const vaultS = await createVault(keyS);
+    await fund(provider, vaultS, 0.2);
+    // Under Token: the vault's ATA with 700 units and a second, non-associated account with 300;
+    // under Token-2022: the vault's ATA with 11 units. None of them is passed to Close.
+    const mintA = await spl.createMint(connection, wallet, wallet.publicKey, null, 2, undefined, { commitment: "confirmed" });
+    const ataA = await spl.createAssociatedTokenAccount(connection, wallet, mintA, vaultS, { commitment: "confirmed" }, spl.TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+    await spl.mintTo(connection, wallet, mintA, ataA, wallet, 700, [], { commitment: "confirmed" });
+    const auxA = await spl.createAccount(connection, wallet, mintA, vaultS, Keypair.generate(), { commitment: "confirmed" });
+    await spl.mintTo(connection, wallet, mintA, auxA, wallet, 300, [], { commitment: "confirmed" });
+    const mint22 = await spl.createMint(connection, wallet, wallet.publicKey, null, 0, undefined, { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID);
+    const ata22 = await spl.createAssociatedTokenAccount(connection, wallet, mint22, vaultS, { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+    await spl.mintTo(connection, wallet, mint22, ata22, wallet, 11, [], { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID);
+    const mintB = await spl.createMint(connection, wallet, wallet.publicKey, null, 0, undefined, { commitment: "confirmed" });
+
+    const heir = Keypair.generate().publicKey;
+    const other = Keypair.generate().publicKey;
+    const stranger = Keypair.generate();
+    await fund(provider, stranger.publicKey, 0.1);
+    const ataOf = (owner: PublicKey, mint: PublicKey, tokenProgram = spl.TOKEN_PROGRAM_ID) => spl.getAssociatedTokenAddressSync(mint, owner, true, tokenProgram);
+    const sweep = (a: { heir?: PublicKey; heirTokenAccount?: PublicKey; vaultTokenAccount?: PublicKey; mint?: PublicKey; tokenProgram?: PublicKey } = {}) =>
+      program.methods
+        .sweepClosed()
+        .accounts({
+          payer: stranger.publicKey,
+          tombstone: vaultS,
+          heir: a.heir ?? heir,
+          heirTokenAccount: a.heirTokenAccount ?? ataOf(a.heir ?? heir, a.mint ?? mintA, a.tokenProgram),
+          vaultTokenAccount: a.vaultTokenAccount ?? ataA,
+          mint: a.mint ?? mintA,
+          tokenProgram: a.tokenProgram ?? spl.TOKEN_PROGRAM_ID,
+        })
+        .signers([stranger])
+        .rpc({ commitment: "confirmed" });
+
+    // A live vault cannot be swept: only a Close hands its tokens to anyone.
+    await expectError(sweep(), "VaultNotClosed");
+
+    // Close without passing any token account (allowed: they stay owned by the PDA).
+    const bufClose = await stage(vaultS, keyS, 0, Action.close(heir, await FAR()));
+    await execute(vaultS, bufClose, [meta(heir, true)]);
+    expect((await program.account.tombstone.fetch(vaultS)).heir.equals(heir)).to.eq(true);
+    expect((await spl.getAccount(connection, ataA, "confirmed")).owner.equals(vaultS)).to.eq(true);
+
+    // Not to anyone but the heir: another heir, the heir's tokens into another wallet's ATA,
+    // an account the vault does not own, the wrong mint for the account.
+    await expectError(sweep({ heir: other }), "WrongHeir");
+    await expectError(sweep({ heirTokenAccount: ataOf(other, mintA) }), "NotHeirTokenAccount");
+    const otherAta = await spl.createAssociatedTokenAccount(connection, wallet, mintA, other, { commitment: "confirmed" });
+    await expectError(sweep({ vaultTokenAccount: otherAta }), "NotVaultTokenAccount");
+    await expectError(sweep({ mint: mintB }), "WrongMint");
+    await expectError(sweep({ tokenProgram: spl.TOKEN_2022_PROGRAM_ID }), "InvalidTokenProgram");
+    expect(Number((await spl.getAccount(connection, ataA, "confirmed")).amount)).to.eq(700);
+
+    // The sweep, paid by a stranger: the heir's ATA did not exist and is created, the balance moves,
+    // the vault's account is closed and its rent goes to the heir.
+    const heirAtaA = ataOf(heir, mintA);
+    expect(await connection.getAccountInfo(heirAtaA, "confirmed")).to.eq(null);
+    const heirBefore = await connection.getBalance(heir, "confirmed");
+    const ataRent = await connection.getBalance(ataA, "confirmed");
+    const strangerBefore = await connection.getBalance(stranger.publicKey, "confirmed");
+    await sweep();
+    expect(Number((await spl.getAccount(connection, heirAtaA, "confirmed")).amount)).to.eq(700);
+    expect(await connection.getAccountInfo(ataA, "confirmed")).to.eq(null);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(heirBefore + ataRent);
+    expect(strangerBefore - (await connection.getBalance(stranger.publicKey, "confirmed"))).to.be.greaterThanOrEqual(ataRent); // the ATA's rent (plus the fee, where the cluster charges one)
+    // The second account of the same mint: the ATA exists now (idempotent create), balances add up.
+    await sweep({ vaultTokenAccount: auxA });
+    expect(Number((await spl.getAccount(connection, heirAtaA, "confirmed")).amount)).to.eq(1000);
+    expect(await connection.getAccountInfo(auxA, "confirmed")).to.eq(null);
+    // Token-2022, through the SDK helper: finds the vault's accounts of the mint and sweeps each.
+    const res = await sdk.sweepClosed(connection, stranger, vaultS, mint22, { commitment: "confirmed" });
+    expect(res.heir.equals(heir)).to.eq(true);
+    expect(res.swept.map((s: { account: PublicKey }) => s.account.toBase58())).to.deep.eq([ata22.toBase58()]);
+    expect(res.heirTokenAccount.equals(ataOf(heir, mint22, spl.TOKEN_2022_PROGRAM_ID))).to.eq(true);
+    expect(Number((await spl.getAccount(connection, res.heirTokenAccount, "confirmed", spl.TOKEN_2022_PROGRAM_ID)).amount)).to.eq(11);
+    expect(await connection.getAccountInfo(ata22, "confirmed")).to.eq(null);
+    // Nothing left: the helper finds no account and sends nothing.
+    const again = await sdk.sweepClosed(connection, stranger, vaultS, mintA, { commitment: "confirmed" });
+    expect(again.swept).to.deep.eq([]);
+    // The tombstone is untouched by all of it.
+    const tomb = await connection.getAccountInfo(vaultS, "confirmed");
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    expect(tomb!.lamports).to.eq(await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE));
   });
 
   // Failure-and-recovery scenarios. Each uses its own H5 vault (32 leaves) so the order of the

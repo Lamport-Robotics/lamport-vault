@@ -71,12 +71,14 @@ creation: the bitmap is sized once, and `Rotate` must keep the typecodes.
 version      u8      = 0xFE   reserved: no Vault layout ever carries it
 vault_id     [u8;32]
 closed_slot  u64
+heir         Pubkey           the Close action's `to`: where the lamports went, and the only place sweep_closed sends tokens
 ```
 
-49 bytes with the discriminator, holding exactly its rent-exempt minimum. It has its own Anchor
-discriminator (`sha256("account:Tombstone")[0..8]`), so it is never read as a `Vault`: the `Vault`
-deserializer is written out by hand (same discriminator and layout as `#[account]` would derive) so that
-a tombstone where a vault is expected fails with `VaultClosed` (6032) rather than a discriminator mismatch,
+81 bytes with the discriminator, holding exactly its rent-exempt minimum. It has its own Anchor
+discriminator (`sha256("account:Tombstone")[0..8]`), so it is never read as a `Vault`: both
+deserializers are written out by hand (same discriminator and layout as `#[account]` would derive) so that
+a tombstone where a vault is expected fails with `VaultClosed` (6032), a vault where a tombstone is
+expected (`sweep_closed`) fails with `VaultNotClosed` (6033), neither a discriminator mismatch,
 and so that a vault `Close` has rewritten is never serialised back over the tombstone at the end of the
 instruction (the handler marks the in-memory vault with the tombstone's version byte; that version
 serialises to nothing). `create_vault` creates the account itself (not through Anchor's `init`) and
@@ -84,7 +86,10 @@ refuses a tombstone first, with the same error. Why a tombstone and not a deleti
 hash of the initial key, so a deleted vault could be recreated by `create_vault` with that key at
 generation 0 with a clear bitmap, and any signature made before the close and still inside its validity
 window would verify again against the recreated account. With the address occupied the replay has
-nowhere to land; a new vault needs a new key (SDK: `nextFreshKeyIndex`).
+nowhere to land; a new vault needs a new key (SDK: `nextFreshKeyIndex`). The tombstone also carries the
+`heir`: the program cannot enumerate a vault's token accounts, so a token account the owner did not hand
+to `Close` stays owned by the PDA, and `sweep_closed` (below) can move it to the heir, and to nobody else,
+at any later time.
 
 **`SigBuffer`** — PDA, seeds `["sig", vault, payer, nonce_le_u64]`. A W4 signature is 2 348–2 828 bytes and a
 legacy Solana transaction carries 1 232, so the signature is staged in chunks and verified in one `execute`.
@@ -113,6 +118,7 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 | `close_sig_buffer()` | payer | refunds rent, no effect on the vault |
 | `execute()` | anyone | verifies and performs; closes the buffer to `payer` |
 | `execute_direct(action, signature)` | payer | the same checks and effects as `execute` with the action and the signature taken from the instruction data; one transaction v1, no buffer |
+| `sweep_closed()` | anyone (payer) | after a `Close`: moves the whole balance of one token account the closed vault still owns to the heir's associated token account (created in the same instruction if missing, rent from `payer`) and closes the account, its rent to the heir; the heir is read from the `Tombstone`, so no caller can choose a destination |
 
 `execute` takes the accounts `vault`, `sig_buffer`, `payer` (unsigned, must equal the buffer's payer) and, as
 remaining accounts: `TransferSol` → `[to]`; `TransferToken` → `[vault token account, destination token
@@ -120,6 +126,19 @@ account, mint, token program]`; `Rotate` → none; `Close` → `[to]` followed b
 `[token account, token program]` pairs, each an empty token account owned by the vault that is closed to `to`.
 Every instruction that reads the vault (`open_sig_buffer`, `execute`, `execute_direct`) fails with
 `VaultClosed` on a tombstone.
+
+`sweep_closed` takes `payer` (signer, pays the heir's ATA rent if it has to be created), `tombstone` (the
+vault PDA, `["vault", vault_id]`, with the `Tombstone` discriminator; a live vault fails `VaultNotClosed`),
+`heir` (writable; must equal the tombstone's `heir`, else `WrongHeir`), `heir_token_account` (writable;
+must be the heir's associated token account for the mint under the token program, else
+`NotHeirTokenAccount`; created idempotently through the Associated Token program), `vault_token_account`
+(writable; owned by the token program and by the vault PDA, else `NotVaultTokenAccount`, for the mint,
+else `WrongMint`), `mint`, `token_program` (Token or Token-2022, must own the mint and the account),
+`system_program`, `associated_token_program`. It signs a `transfer_checked` of the full balance and a
+`close_account` with the PDA seeds; nothing is signed by an LMS key, because a tombstone has no key and
+the destination was fixed by the `Close` signature that made it. The SDK's `sweepClosed(rpc, payer,
+vault, mint)` lists the closed vault's token accounts for the mint (`getTokenAccountsByOwner`) and sends
+one `sweep_closed` per account.
 
 `execute_direct` takes the accounts `vault`, `payer` (signer, writable) and `system_program`, then the same
 remaining accounts as `execute`. `action` must be 1..256 bytes. Steps 2–6 below are one shared code path for
@@ -173,9 +192,10 @@ vault PDA; remaining accounts: vault token account, destination token account, m
 and Token-2022).
 
 **Close.** Every vault token account passed in must be empty (`TokenAccountNotEmpty`) and is closed to
-`to`; token accounts not passed in stay owned by the PDA, so move them out first. Then the vault moves
-every lamport above a tombstone's rent-exempt minimum to `to`, shrinks its data to 49 bytes and rewrites
-it as a `Tombstone { version: 0xFE, vault_id, closed_slot }`. The address is never free again:
+`to`; token accounts not passed in stay owned by the PDA and are recovered afterwards with
+`sweep_closed`, which can only send them to `to`. Then the vault moves
+every lamport above a tombstone's rent-exempt minimum to `to`, shrinks its data to 81 bytes and rewrites
+it as a `Tombstone { version: 0xFE, vault_id, closed_slot, heir: to }`. The address is never free again:
 `create_vault` on it fails `VaultClosed`, as does every later `open_sig_buffer`, `execute` or
 `execute_direct` against it, including one carrying a signature made before the close (see the
 threat table). Nothing else in the vault's history is preserved; the tombstone's own rent is the only cost.
@@ -192,8 +212,11 @@ and create a new one with a fresh key (the closed address is a tombstone). The d
 `SPEC-DERIVATION.md` never produces a key twice.
 
 **Exhaustion rule.** When one free leaf remains before an `execute` (`2^h - spent <= 1`), that leaf may
-only be spent on `Rotate`. A vault can therefore always move to a fresh key; it can never be stranded with funds and no
-usable leaf.
+only be spent on `Rotate` or `Close` (`LastLeafReservedForRotate` for a transfer). A vault can therefore
+always move to a fresh key, and when it cannot, because its key history is full and `Rotate` fails
+`HistoryFull`, it can still leave: `Close` on the last leaf sends the lamports to `to` and the tombstone
+remembers `to` as heir for any tokens. Rotate-only would have been a deadlock at that corner: 128
+rotations, one leaf, and no instruction left that could move the funds.
 
 ### Multi-device
 
@@ -338,7 +361,9 @@ complements the per-message binding of program, account and generation, it does 
 | attacker breaks the payer's classical key | gets the rent back; nothing else |
 | program upgrade by a compromised authority | authority burned; reproducible build |
 | stolen 24 words | full control: a vault is quantum-safe, not owner-safe. This is what the Pincer1 robot adds on top |
-| the tree runs out | the last free leaf is reserved for `Rotate` |
+| the tree runs out | the last free leaf is reserved for `Rotate` or `Close`; a transfer cannot take it |
+| the tree runs out while the key history is full (`Rotate` fails `HistoryFull`) | `Close` may spend the last leaf, so the funds leave to `to`; with Rotate-only this corner was a deadlock |
+| `Close` signed without every token account in hand (an airdrop, an account the owner forgot) | the tombstone records `to` as `heir`; the permissionless `sweep_closed` moves any token account the PDA still owns to the heir's associated token account and closes it, and refuses every other destination (`WrongHeir`, `NotHeirTokenAccount`); a live vault cannot be swept (`VaultNotClosed`) |
 | rotate to a key the 24 words cannot reproduce (a wrong or injected target) | the chain cannot tell; the SDK's `VaultSigner` refuses a `Rotate` target that is not index k+1 of its `master` seed (`nextKeyMaterial`) unless the caller opts in with `allowForeignKey: true` |
 | key history runs out | after 128 rotations (32 for a commitment) the account refuses to rotate; the vault can still spend and `Close` |
 
@@ -350,14 +375,14 @@ complements the per-message binding of program, account and generation, it does 
 | LMS signature, height h | 4 + 2 180 + 4 + 32·h → H5 2 348, H10 2 508, H15 2 668, H20 2 828 |
 | public key | 56 bytes |
 | `Vault` account | H5 126, H10 250, H15 4 218 bytes, plus 16 per rotation (at most 128) |
-| `Tombstone` account | 49 bytes, left at the address by `Close`, holding its rent-exempt minimum (1 231 920 lamports) |
+| `Tombstone` account | 81 bytes, left at the address by `Close`, holding its rent-exempt minimum (1 454 640 lamports) |
 | `Commitment` account | 127 bytes, plus 16 per rotation (at most 32) |
 | `Action` | TransferSol 57, TransferToken 89, Rotate 73, Close 49 bytes (16 of each are the validity window) |
 | verify, hash calls | ≤ 67×15 chain steps + 1 (Q) + 1 (K) + h (path) ≈ 1 010–1 030 |
 | `execute` compute | ~115-145k CU measured for H10, worst case ~210k; client requests 400k |
 | staging | `open_sig_buffer` with a 708-byte first chunk plus `write_sig` chunks of 900 bytes: H5 and H10 take 3 transactions in total, H15 and H20 take 4 |
 | `execute_direct` transaction v1 | H10: TransferSol 2 871 bytes, TransferToken 3 002, Rotate 2 854, Close 2 897; H15 adds 160; the largest (H15 TransferToken) stays under 3 200 of the 4 096 allowed |
-| program binaries | `lamport_vault.so` 308 928 bytes (devnet allocation 310 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
+| program binaries | `lamport_vault.so` 330 880 bytes (devnet allocation 350 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
 
 ### Direct (transaction v1) against staged, measured on devnet
 
@@ -412,8 +437,10 @@ same message either way.
 
 Vault and Commitment accounts carry a `version` byte (currently 2); a Tombstone carries `0xFE`. Decoders
 refuse other versions. There is no in-place migration: a vault created under an earlier layout is closed
-and a new one created with a fresh key (devnet vaults from the first deployment were). Mainnet has never
-had a deployment, so no live accounts are affected.
+and a new one created with a fresh key (devnet vaults from the first deployment were). Tombstones written
+before `heir` was added (devnet only, 49 bytes) keep the version byte but not the layout: `sweep_closed`
+and the SDK's `decodeTombstone` refuse them, and their token accounts, if any, are not recoverable.
+Mainnet has never had a deployment, so no live accounts are affected.
 
 ## 8. Test vectors
 

@@ -7,6 +7,8 @@
  *   write_sig(offset, chunk)                          payer(s) sig_buffer(w)
  *   close_sig_buffer()                                payer(ws) sig_buffer(w)
  *   execute()                                         vault(w) sig_buffer(w) payer(w) + per-action remaining accounts
+ *   sweep_closed()                                    payer(ws) tombstone heir(w) heir_token_account(w) vault_token_account(w)
+ *                                                     mint token_program system_program associated_token_program
  */
 import {
   ComputeBudgetProgram,
@@ -21,7 +23,7 @@ import { type Action, encodeAction } from "./action.ts";
 import { ByteWriter } from "./borsh.ts";
 import { chunkSignature, MAX_CHUNK_BYTES, type SigChunk } from "./chunk.ts";
 import { IX } from "./discriminator.ts";
-import { associatedTokenAddress, findSigBufferPda, findVaultPda, TOKEN_PROGRAM_ID, vaultId } from "./pda.ts";
+import { ASSOCIATED_TOKEN_PROGRAM_ID, associatedTokenAddress, findSigBufferPda, findVaultPda, TOKEN_PROGRAM_ID, vaultId } from "./pda.ts";
 
 /** Compute budget requested for `execute` (docs/DESIGN.md Section 6). */
 export const EXECUTE_COMPUTE_UNITS = 400_000;
@@ -256,4 +258,48 @@ export function buildStagedExecution(p: StagedExecutionParams): StagedExecution 
     p.computeUnits ?? EXECUTE_COMPUTE_UNITS,
   );
   return { sigBuffer, actionBytes, firstChunk, open, writes, chunks, execute, transactions: [[open], ...writes.map((ix) => [ix]), execute] };
+}
+
+export interface SweepClosedParams {
+  programId: PublicKey;
+  /** Pays for the heir's associated token account if it has to be created; any key. */
+  payer: PublicKey;
+  /** The closed vault's address (its `Tombstone`). */
+  vault: PublicKey;
+  /** The tombstone's `heir`; the program refuses any other account (`WrongHeir`). */
+  heir: PublicKey;
+  mint: PublicKey;
+  /** A token account for `mint` still owned by the closed vault. */
+  vaultTokenAccount: PublicKey;
+  /** Token or Token-2022: the program that owns `mint`. Default: Token. */
+  tokenProgram?: PublicKey;
+}
+
+/**
+ * `sweep_closed`: moves the whole balance of `vaultTokenAccount` to the heir's associated token
+ * account for the mint (created in the same instruction when missing, rent from `payer`) and closes
+ * the vault's token account, its rent to the heir. Permissionless; the destination is fixed by the
+ * tombstone. Fails `VaultNotClosed` on a live vault.
+ */
+export function sweepClosedInstruction(p: SweepClosedParams): { instruction: TransactionInstruction; heirTokenAccount: PublicKey } {
+  const tokenProgram = p.tokenProgram ?? TOKEN_PROGRAM_ID;
+  const heirTokenAccount = associatedTokenAddress(p.heir, p.mint, tokenProgram);
+  return {
+    heirTokenAccount,
+    instruction: new TransactionInstruction({
+      programId: p.programId,
+      keys: [
+        ws(p.payer),
+        r(p.vault),
+        w(p.heir),
+        w(heirTokenAccount),
+        w(p.vaultTokenAccount),
+        r(p.mint),
+        r(tokenProgram),
+        r(SystemProgram.programId),
+        r(ASSOCIATED_TOKEN_PROGRAM_ID),
+      ],
+      data: Buffer.from(IX.sweepClosed),
+    }),
+  };
 }

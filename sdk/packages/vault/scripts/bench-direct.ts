@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   console.log("generating H10 keys A and B (tree construction)...");
   const keyA = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H10, lmotsType: 3, seed: Keypair.generate().secretKey.subarray(0, 32), I: Keypair.generate().secretKey.subarray(0, 16) });
   const keyB = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H10, lmotsType: 3, seed: Keypair.generate().secretKey.subarray(0, 32), I: Keypair.generate().secretKey.subarray(0, 16) });
-  const signerA = new VaultSigner({ rpc: connection, key: keyA, payer, commitment: COMMITMENT });
+  const signerA = new VaultSigner({ rpc: connection, key: keyA, payer, journal: "ephemeral", commitment: COMMITMENT });
   const { vault, signature: createSig } = await signerA.createVault();
   console.log(`vault ${vault.toBase58()} created in ${createSig}`);
 
@@ -156,11 +156,11 @@ async function main(): Promise<void> {
   results.push(await measureDirect(signerA, "Rotate", await signerA.sign({ kind: "Rotate", newLmsPubkey: keyB.publicKey }, { allowForeignKey: true })));
   console.log(row(results.at(-1)!));
   const vaultAfter = await connection.getBalance(vault, COMMITMENT);
-  const v = await new VaultSigner({ rpc: connection, key: keyB, payer, vault, commitment: COMMITMENT }).fetchVault();
+  const v = await new VaultSigner({ rpc: connection, key: keyB, payer, journal: "ephemeral", vault, commitment: COMMITMENT }).fetchVault();
   console.log(`after Rotate: generation ${v.generation}, spent ${v.spent}, history ${v.usedKeys.length}, vault lamports +${vaultAfter - vaultBefore} (rent for 16 bytes)`);
 
   // 5. Close, direct v1, with the now-empty token account; everything back to the payer.
-  const signerB = new VaultSigner({ rpc: connection, key: keyB, payer, vault, commitment: COMMITMENT });
+  const signerB = new VaultSigner({ rpc: connection, key: keyB, payer, journal: "ephemeral", vault, commitment: COMMITMENT });
   results.push(
     await measureDirect(signerB, "Close", await signerB.sign({ kind: "Close", to: payer.publicKey }), { closeTokenAccounts: [{ account: vaultAta.address }] }),
   );

@@ -13,7 +13,7 @@ import {
 } from "@solana/kit";
 import { Keypair, PublicKey, SystemProgram, Transaction, type AccountInfo } from "@solana/web3.js";
 import { fromHex, LMS_SHA256_M32_H10, LMS_SHA256_M32_H15, LMS_SHA256_M32_H5, LmsPrivateKey, lmsVerify, toHex } from "@lamport-robotics/lms";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { encodeVault, type VaultAccount } from "../src/accounts.ts";
 import { decodeAction, encodeAction } from "../src/action.ts";
 import { ByteReader } from "../src/borsh.ts";
@@ -205,6 +205,10 @@ function directInstruction(bytes: Uint8Array): { action: ReturnType<typeof decod
   return { action, signature, accounts: ix.accounts!.map((a) => a.address as string) };
 }
 
+beforeAll(() => {
+  vi.spyOn(console, "warn").mockImplementation(() => undefined); // `journal: "ephemeral"` warns once per signer
+});
+
 describe("VaultSigner modes", () => {
   const vault = findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, key.publicKey).address;
   const to = PK_33;
@@ -212,7 +216,7 @@ describe("VaultSigner modes", () => {
   it("direct-v1: one v1 transaction whose LMS signature verifies over the bound message", async () => {
     const rpc = new MockRpc();
     rpc.accounts.set(vault.toBase58(), vaultAccount([0, 1]));
-    const signer = new VaultSigner({ rpc, key, payer, mode: "direct-v1", v1Config: { priorityFeeLamports: 1_000n } });
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "direct-v1", v1Config: { priorityFeeLamports: 1_000n } });
     const seen: number[] = [];
     const res = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { onTransaction: (i) => seen.push(i) });
     expect(res.mode).toBe("direct-v1");
@@ -238,7 +242,7 @@ describe("VaultSigner modes", () => {
     const rpc = new MockRpc();
     rpc.acceptV1 = false;
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer, mode: "auto" });
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto" });
     const fallbacks: unknown[] = [];
     const res = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { nonce: 5n, onFallback: (e) => fallbacks.push(e) });
     expect(res.mode).toBe("staged");
@@ -258,7 +262,7 @@ describe("VaultSigner modes", () => {
     const rpc = new MockRpc();
     rpc.v1SendError = "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x177c";
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer, mode: "auto" });
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto" });
     await expect(signer.execute({ kind: "TransferSol", to, lamports: 7n })).rejects.toThrow(/0x177c/);
     expect(rpc.sent).toHaveLength(0);
   });
@@ -267,11 +271,11 @@ describe("VaultSigner modes", () => {
     const rpc = new MockRpc();
     rpc.acceptV1 = false;
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const strict = new VaultSigner({ rpc, key, payer, mode: "direct-v1" });
+    const strict = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "direct-v1" });
     await expect(strict.execute({ kind: "TransferSol", to, lamports: 7n })).rejects.toBeInstanceOf(DirectV1Error);
     expect(rpc.sent).toHaveLength(0);
 
-    const refusing = new VaultSigner({ rpc, key, payer, mode: "auto", v1Signer: async () => { throw new Error("wallet: unsupported transaction version"); } });
+    const refusing = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto", v1Signer: async () => { throw new Error("wallet: unsupported transaction version"); } });
     const res = await refusing.execute({ kind: "TransferSol", to, lamports: 7n });
     expect(res.mode).toBe("staged");
     expect(rpc.sent).toHaveLength(4);
@@ -280,7 +284,7 @@ describe("VaultSigner modes", () => {
   it("default mode is staged; a per-call mode overrides the signer's", async () => {
     const rpc = new MockRpc();
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
     const staged = await signer.execute({ kind: "TransferSol", to, lamports: 7n });
     expect(staged.mode).toBe("staged");
     const direct = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { mode: "direct-v1" });

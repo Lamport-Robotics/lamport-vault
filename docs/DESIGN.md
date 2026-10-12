@@ -180,11 +180,14 @@ The chain cannot tell a signer that its own memory went backwards. If a signer's
 old backup, or a copy of the key on another device signed and executed leaves after that backup, the
 restored signer believes leaves are free that it (or its twin) already signed; signatures for them may
 still be unsubmitted, and a second signature by the same leaf is the forgery oracle above. The SDK's
-`VaultSigner` therefore keeps a **leaf journal** (`LeafJournal`: `load()` / `save()`, with `FileLeafJournal`
-for Node, written temp-file-then-rename with fsync, and `MemoryLeafJournal` for one process; a browser
-IndexedDB journal follows the same interface) holding, per vault and lane, the key `generation`, the
-number of `spent` leaves in the lane at the last sync and the leaves it has `reserved` (written before the
-signature exists). Before every signature it compares the journal with the account:
+`VaultSigner` therefore requires a **leaf journal** (`LeafJournal`: `load()` / `save()`; `FileLeafJournal`
+for Node, written temp-file-then-rename with fsync; `BrowserLeafJournal` on IndexedDB, one database per
+origin and one record per `vault:generation`, resolved on transaction commit) holding, per vault and lane,
+the key `generation`, the number of `spent` leaves in the lane at the last sync and the leaves it has
+`reserved` (written before the signature exists). There is no silent default: a signer that is to keep
+this record in memory only must be built with `journal: "ephemeral"`, says so once on `console.warn` when
+it first signs, and marks every result `ephemeral: true`. Before every signature it compares the journal
+with the account:
 
 - the chain is at a later `generation` than the journal, or
 - the lane has more spent leaves than `spent` plus the journal's own reserved leaves that are now spent
@@ -197,7 +200,12 @@ under the old generation, known to the journal or not, is dead afterwards. `ackn
 the check and is unsafe: it is only correct when the operator knows that no signature made after the
 journal's last save is still unsubmitted. A journal that was never written is initialised from the chain;
 the rule then protects every later restore. Two signers in one process over the same journal (or two
-`FileLeafJournal` objects on one path) are serialised, so they cannot reserve the same leaf.
+`FileLeafJournal` objects on one path) are serialised, so they cannot reserve the same leaf. Across
+processes a `FileLeafJournal` takes `<path>.lock` (created `O_EXCL`, holding the owner's pid and the
+time) around every load / save pair: a lock whose owner is alive makes the other signer fail with
+`JournalLockedError` instead of reserving a leaf; one left by a dead process is broken once it is 30 s
+old. A `BrowserLeafJournal` does the same across tabs with a Web Lock named after its record, where the
+browser has the API.
 
 ### What the program does not do
 

@@ -3,14 +3,15 @@
  * behind the chain makes the signer refuse everything but Rotate, a Rotate that lands resets it,
  * and two signers over one journal file never reserve the same leaf.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
 import { fromHex, LMS_SHA256_M32_H5, LmsPrivateKey, lmsVerify } from "@lamport-robotics/lms";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { encodeVault, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
-import { FileLeafJournal, type LeafJournal, type LeafJournalState, MemoryLeafJournal, parseJournalFile, StaleSignerError } from "../src/journal.ts";
+import { FileLeafJournal, JournalLockedError, type LeafJournal, type LeafJournalState, MemoryLeafJournal, parseJournalFile, STALE_LOCK_MS, StaleSignerError } from "../src/journal.ts";
 import { vaultId } from "../src/pda.ts";
 import { VaultSigner, withJournalLock } from "../src/signer.ts";
 import { MockChain } from "./mock.ts";
@@ -25,12 +26,29 @@ function freshVault(k = key): Uint8Array {
 const transfer = { kind: "TransferSol" as const, to: Keypair.generate().publicKey, lamports: 1n };
 
 let dir: string;
+let warn: ReturnType<typeof vi.spyOn>;
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "lamport-journal-"));
+  warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
+
+/** The pid of a process that has already exited. */
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  if (child.status !== 0 || !child.pid) throw new Error("could not spawn a child");
+  return child.pid;
+}
+
+/** Writes `<path>.lock` as another process would have, with the given age. */
+function plantLock(path: string, holder: { pid?: number; time?: number } | string, ageMs = 0): void {
+  const lock = `${path}.lock`;
+  writeFileSync(lock, typeof holder === "string" ? holder : JSON.stringify(holder) + "\n");
+  const t = (Date.now() - ageMs) / 1000;
+  utimesSync(lock, t, t);
+}
 
 describe("FileLeafJournal", () => {
   it("starts empty, persists across objects, and leaves no temporary files behind", async () => {
@@ -61,6 +79,145 @@ describe("FileLeafJournal", () => {
     expect(() => parseJournalFile(JSON.stringify({ v: 1, generation: -1, spent: 0, reserved: [] }))).toThrow(/generation/);
     expect(() => parseJournalFile(JSON.stringify({ v: 1, generation: 0, spent: 0, reserved: [1.5] }))).toThrow(/reserved/);
     await expect(new FileLeafJournal(path).save({ generation: 0, spent: 0, reserved: [-1] })).rejects.toThrow(/reserved/);
+  });
+
+  it("the lock file names this process and goes away on release", async () => {
+    const path = join(dir, "lock.json");
+    const j = new FileLeafJournal(path);
+    expect(j.lockPath).toBe(`${path}.lock`);
+    await j.acquireLock();
+    const onDisk = JSON.parse(readFileSync(j.lockPath, "utf8"));
+    expect(onDisk.pid).toBe(process.pid);
+    expect(Math.abs(Date.now() - onDisk.time)).toBeLessThan(5_000);
+    await expect(j.acquireLock()).rejects.toThrow(/already held by this object/);
+    // another object (another process, as far as the file is concerned) sees a live holder
+    let err: unknown;
+    await new FileLeafJournal(path).acquireLock().catch((e: unknown) => (err = e));
+    expect(err).toBeInstanceOf(JournalLockedError);
+    expect((err as JournalLockedError).holder.pid).toBe(process.pid);
+    expect((err as JournalLockedError).lock).toBe(j.lockPath);
+    expect(String(err)).toMatch(new RegExp(`process ${process.pid}`));
+    await j.releaseLock();
+    expect(existsSync(j.lockPath)).toBe(false);
+    await j.releaseLock(); // idempotent
+    const other = new FileLeafJournal(path);
+    await other.acquireLock();
+    await other.releaseLock();
+    expect(existsSync(j.lockPath)).toBe(false);
+  });
+
+  it("a lock from a dead process is broken once it is 30 s old, and respected before that", async () => {
+    const path = join(dir, "stale.json");
+    const dead = deadPid();
+    // Old enough: broken and taken.
+    plantLock(path, { pid: dead, time: Date.now() - STALE_LOCK_MS - 1_000 }, STALE_LOCK_MS + 1_000);
+    const j = new FileLeafJournal(path);
+    await j.acquireLock();
+    expect(JSON.parse(readFileSync(j.lockPath, "utf8")).pid).toBe(process.pid);
+    await j.releaseLock();
+    // Dead, but young: the file may still be being written; refused.
+    plantLock(path, { pid: dead, time: Date.now() });
+    await expect(j.acquireLock()).rejects.toThrow(JournalLockedError);
+    // Unparsable content: the file's mtime decides.
+    plantLock(path, "");
+    await expect(j.acquireLock()).rejects.toThrow(JournalLockedError);
+    plantLock(path, "", STALE_LOCK_MS + 1_000);
+    await j.acquireLock();
+    await j.releaseLock();
+    expect(existsSync(j.lockPath)).toBe(false);
+    // Release never removes a lock that is not ours.
+    plantLock(path, { pid: dead, time: Date.now() });
+    await j.releaseLock();
+    expect(existsSync(j.lockPath)).toBe(true);
+    rmSync(j.lockPath);
+  });
+});
+
+describe("FileLeafJournal across processes", () => {
+  it("two journals over one path cannot both reserve q=0 while the other holds the lock", async () => {
+    const rpc = new MockChain();
+    const payer = Keypair.generate();
+    const path = join(dir, "cross.json");
+    const theirs = new FileLeafJournal(path);
+    const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(path) });
+    rpc.accounts.set(signer.vault.toBase58(), freshVault());
+    // "Another process" is inside its critical section (its lock file is on disk, its pid alive).
+    await theirs.acquireLock();
+    let err: unknown;
+    await signer.sign(transfer).catch((e: unknown) => (err = e));
+    expect(err).toBeInstanceOf(JournalLockedError);
+    await expect(signer.execute(transfer)).rejects.toThrow(/locked by process/);
+    expect(existsSync(path)).toBe(false); // it did not even initialise the journal
+    expect(rpc.sent.length).toBe(0);
+    // It finishes: it reserved q=0 itself.
+    await theirs.save({ generation: 0, spent: 0, reserved: [0] });
+    await theirs.releaseLock();
+    const a = await signer.sign(transfer);
+    expect(a.q).toBe(1);
+    expect(a.ephemeral).toBe(false);
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(await theirs.load()).toEqual({ generation: 0, spent: 0, reserved: [0, 1] });
+    // The lock is per critical section: the signer's own lock is gone between calls, so a third party can take it.
+    await theirs.acquireLock();
+    await expect(signer.sign(transfer)).rejects.toThrow(JournalLockedError);
+    await theirs.releaseLock();
+    expect((await signer.sign(transfer)).q).toBe(2);
+  });
+
+  it("a stale lock from a crashed process is broken and signing goes on", async () => {
+    const rpc = new MockChain();
+    const payer = Keypair.generate();
+    const path = join(dir, "crashed.json");
+    writeFileSync(path, JSON.stringify({ v: 1, generation: 0, spent: 0, reserved: [0] }));
+    const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(path) });
+    rpc.accounts.set(signer.vault.toBase58(), freshVault());
+    plantLock(path, { pid: deadPid(), time: Date.now() - STALE_LOCK_MS - 5_000 }, STALE_LOCK_MS + 5_000);
+    expect((await signer.sign(transfer)).q).toBe(1);
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(await new FileLeafJournal(path).load()).toEqual({ generation: 0, spent: 0, reserved: [0, 1] });
+    // a failure inside the critical section still releases the lock
+    await expect(signer.sign(transfer, { q: 0 })).rejects.toThrow(/journal/);
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("VaultSigner journal option", () => {
+  it("is required: no silent memory journal", () => {
+    const rpc = new MockChain();
+    const payer = Keypair.generate();
+    expect(() => new VaultSigner({ rpc, key, payer } as never)).toThrow(/journal is required/);
+    expect(() => new VaultSigner({ rpc, key, payer, journal: undefined as never })).toThrow(/"ephemeral"/);
+  });
+
+  it('"ephemeral" opts in to a memory journal, warns once on first signature and flags every result', async () => {
+    const rpc = new MockChain();
+    const payer = Keypair.generate();
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    expect(signer.ephemeral).toBe(true);
+    expect(signer.journal).toBeInstanceOf(MemoryLeafJournal);
+    rpc.accounts.set(signer.vault.toBase58(), freshVault());
+    warn.mockClear();
+    expect(await signer.nextQ()).toBe(0);
+    expect(warn).not.toHaveBeenCalled(); // reading is not signing
+    const a = await signer.sign(transfer);
+    expect(a.ephemeral).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/ephemeral/);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(signer.vault.toBase58());
+    const r = await signer.execute(transfer);
+    expect(r.ephemeral).toBe(true);
+    expect(r.q).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(1); // once per signer, not per signature
+    // Another ephemeral signer warns for itself; one with a real journal never does.
+    const again = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    await again.sign(transfer);
+    expect(warn).toHaveBeenCalledTimes(2);
+    const durable = new VaultSigner({ rpc, key, payer, journal: new MemoryLeafJournal() });
+    expect(durable.ephemeral).toBe(false);
+    expect((await durable.sign(transfer)).ephemeral).toBe(false);
+    expect((await durable.execute(transfer)).ephemeral).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -182,8 +339,8 @@ describe("VaultSigner with a journal", () => {
   it("another signer moving on in the same lane makes this one stale; other lanes do not", async () => {
     const rpc = new MockChain();
     const payer = Keypair.generate();
-    const mine = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2 });
-    const other = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2 });
+    const mine = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2, journal: "ephemeral" });
+    const other = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2, journal: "ephemeral" });
     rpc.accounts.set(mine.vault.toBase58(), freshVault());
     expect((await mine.sign(transfer)).q).toBe(0);
     expect((await other.sign(transfer)).q).toBe(1);

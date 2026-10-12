@@ -96,12 +96,14 @@ in `programs/`); every builder and client also accepts an explicit `programId`.
 
 ```ts
 import { Connection, Keypair } from "@solana/web3.js";
-import { VaultSigner, RegistryClient } from "@lamport-robotics/vault";
+import { FileLeafJournal, VaultSigner, RegistryClient } from "@lamport-robotics/vault";
 
 const rpc = new Connection("https://api.devnet.solana.com", "confirmed");
 const payer = Keypair.fromSecretKey(/* classical key: pays rent and fees, nothing more */);
 
-const signer = new VaultSigner({ rpc, key, payer });  // key: LmsPrivateKey from the lms package
+// key: LmsPrivateKey from the lms package. journal: where the signer records a leaf BEFORE signing it
+// (required; FileLeafJournal in Node, BrowserLeafJournal on IndexedDB, or "ephemeral" for memory only).
+const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal("vault.journal.json") });
 await signer.createVault();                           // one transaction; vault address = PDA of sha256(key.publicKey)
 
 // Deposit: a plain SystemProgram.transfer to signer.vault, from anywhere.
@@ -124,16 +126,25 @@ signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` on the l
 exhaustion rule), a `Rotate` to a key the vault had before or with other typecodes, and it never reuses a
 leaf within one object even before the chain confirms.
 
+The journal is what stops a leaf from ever being signed twice (docs/DESIGN.md "Signer rollback"): the
+leaf is written to it before the signature exists, and before every signature it is compared with the
+chain; a journal that is behind (restored from a backup, or another copy of the key moved on) makes the
+signer refuse everything but `Rotate` (`StaleSignerError`). `FileLeafJournal` also holds a `<path>.lock`
+across processes (`JournalLockedError` when another live process has it); `BrowserLeafJournal({ vault,
+generation })` keeps one IndexedDB record per vault and generation and a Web Lock across tabs.
+`journal: "ephemeral"` is for tests and one-shot scripts: a memory journal that dies with the object, a
+one-line `console.warn` on the first signature, and `ephemeral: true` on every result.
+
 Leaves are a bitmap on chain, so several devices can share one key without talking to each other:
 
 ```ts
-// device k of n only ever uses leaves q ≡ k (mod n)
-const phone  = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2 });
-const laptop = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2 });
+// device k of n only ever uses leaves q ≡ k (mod n); each device keeps its own journal
+const phone  = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2, journal: new BrowserLeafJournal({ vault, generation }) });
+const laptop = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2, journal: new FileLeafJournal("laptop.journal.json") });
 
-// reserve(q) runs BEFORE a leaf is signed: persist it, and throw if it was ever reserved before.
-// A signer that crashes between signing and submitting then cannot sign that leaf again after restart.
-const robot = new VaultSigner({ rpc, key, payer, reserve: async (q) => store.markUsedOrThrow(q) });
+// reserve(q) runs BEFORE a leaf is signed, on top of the journal: an extra hook for a secure element
+// or a database; throw to veto the leaf.
+const robot = new VaultSigner({ rpc, key, payer, journal, reserve: async (q) => store.markUsedOrThrow(q) });
 ```
 
 `isLeafUsed(vault, q)`, `firstFreeLeaf(vault, lane, lanes)`, `freeLeaves(vault)` and `hasUsedKey(vault, pubkey)`

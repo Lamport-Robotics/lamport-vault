@@ -145,10 +145,13 @@ export interface VaultSignerOptions {
    * restart; and before every signature the journal is compared with the chain: a journal that
    * is behind (restored from an old backup, or another signer with this key moved on in this
    * lane) makes the signer stale, and a stale signer refuses everything but Rotate
-   * ({@link StaleSignerError}). Default: a `MemoryLeafJournal`, which lasts for this object only.
-   * Use a `FileLeafJournal` for anything that outlives a process.
+   * ({@link StaleSignerError}). Required: a `FileLeafJournal` in Node, a `BrowserLeafJournal`
+   * in a browser, or `"ephemeral"` to say in so many words that this signer keeps its record in
+   * memory only (a `MemoryLeafJournal` that dies with the object; a crash after signing loses
+   * the reservation). An ephemeral signer says so once on `console.warn` when it first signs
+   * and in every result's `ephemeral` flag.
    */
-  journal?: LeafJournal;
+  journal: LeafJournal | "ephemeral";
   /**
    * Called with the leaf about to be signed, after the journal has recorded it and BEFORE the
    * signature exists. An extra hook for a secure element or a database; throw to veto. Optional,
@@ -192,6 +195,8 @@ export interface SignedAction {
   actionBytes: Uint8Array;
   message: Uint8Array;
   lmsSignature: Uint8Array;
+  /** True when the signer was built with `journal: "ephemeral"`: the leaf is recorded in memory only. */
+  ephemeral: boolean;
 }
 
 export interface StagedExecuteResult extends SignedAction {
@@ -244,7 +249,8 @@ export interface JournalSync {
 }
 
 // One critical section per journal identity, so two signers over one journal (same object, or two
-// FileLeafJournal objects on one path) never interleave a load / save pair.
+// FileLeafJournal objects on one path) never interleave a load / save pair. Inside it the journal's
+// own cross-process lock (a `.lock` file, a Web Lock) keeps other processes and tabs out.
 const journalLocks = new Map<string, Promise<unknown>>();
 const objectLockKeys = new WeakMap<LeafJournal, string>();
 let anonymousJournals = 0;
@@ -259,11 +265,24 @@ function lockKeyOf(journal: LeafJournal): string {
   return key;
 }
 
-/** Runs `fn` with exclusive access to `journal` (per process). */
+/**
+ * Runs `fn` with exclusive access to `journal`: serialised per process by the journal's identity,
+ * and, when the journal has `acquireLock`, exclusive across processes or tabs too (a journal held
+ * elsewhere rejects with {@link JournalLockedError} or waits, as the implementation chooses).
+ */
 export async function withJournalLock<T>(journal: LeafJournal, fn: () => Promise<T>): Promise<T> {
   const key = lockKeyOf(journal);
   const previous = journalLocks.get(key) ?? Promise.resolve();
-  const run = previous.then(fn, fn);
+  const locked = async (): Promise<T> => {
+    if (!journal.acquireLock) return fn();
+    await journal.acquireLock();
+    try {
+      return await fn();
+    } finally {
+      await journal.releaseLock?.();
+    }
+  };
+  const run = previous.then(locked, locked);
   const settled = run.then(
     () => undefined,
     () => undefined,
@@ -285,9 +304,12 @@ export class VaultSigner {
   readonly lane: number;
   readonly lanes: number;
   readonly journal: LeafJournal;
+  /** True when built with `journal: "ephemeral"`: reservations live in this object only. */
+  readonly ephemeral: boolean;
   private readonly opts: VaultSignerOptions;
   private readonly scope: DerivationScope | undefined;
   private staleAcknowledged = false;
+  private warnedEphemeral = false;
 
   constructor(opts: VaultSignerOptions) {
     this.opts = opts;
@@ -298,7 +320,11 @@ export class VaultSigner {
     this.vault = opts.vault ?? findVaultPdaForKey(this.programId, opts.key.publicKey).address;
     this.lanes = opts.lanes ?? 1;
     this.lane = opts.lane ?? 0;
-    this.journal = opts.journal ?? new MemoryLeafJournal();
+    if (!opts.journal) {
+      throw new Error('journal is required: pass a FileLeafJournal (Node) or BrowserLeafJournal (web), or journal: "ephemeral" to keep the leaf record in memory only');
+    }
+    this.ephemeral = opts.journal === "ephemeral";
+    this.journal = opts.journal === "ephemeral" ? new MemoryLeafJournal() : opts.journal;
     if (!Number.isInteger(this.lanes) || this.lanes < 1) throw new RangeError(`lanes must be >= 1, got ${this.lanes}`);
     if (!Number.isInteger(this.lane) || this.lane < 0 || this.lane >= this.lanes) throw new RangeError(`lane must be in 0..${this.lanes - 1}, got ${this.lane}`);
     if (opts.master) {
@@ -448,8 +474,12 @@ export class VaultSigner {
     await this.opts.reserve?.(q);
     state.reserved.push(q);
     await this.journal.save(state);
+    if (this.ephemeral && !this.warnedEphemeral) {
+      this.warnedEphemeral = true;
+      console.warn(`VaultSigner for vault ${this.vault.toBase58()} is ephemeral: leaf reservations live in memory only, a crash after signing can lead to a second signature on a leaf; pass a FileLeafJournal or BrowserLeafJournal`);
+    }
     const lmsSignature = this.key.sign(q, message, opts.C ? { C: opts.C } : {});
-    return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature };
+    return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature, ephemeral: this.ephemeral };
   }
 
   /**

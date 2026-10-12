@@ -723,7 +723,7 @@ describe("lamport-vault", () => {
     // no memory of the leaves another signer spent; it must take the bitmap from the vault.
     const { vault: sdk, lms } = loadSdk();
     const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
-    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed" });
+    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed" });
     const live = signer();
     const created = await live.createVault();
     const vaultS = new PublicKey(created.vault.toBase58());

@@ -22,7 +22,7 @@ pub mod state;
 
 pub use action::Action;
 pub use error::VaultError;
-pub use state::{SigBuffer, Vault, MAX_ACTION_LEN};
+pub use state::{SigBuffer, Vault, MAX_ACTION_LEN, MAX_USED_KEYS};
 
 declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
 
@@ -42,9 +42,13 @@ pub fn vault_id_for(lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> [u8; 32] {
     solana_sha256_hasher::hashv(&[lms_pubkey]).to_bytes()
 }
 
-/// `message = sha256("lamport-vault/v1" || vault_pubkey || action_bytes)`.
-pub fn signed_message(vault: &Pubkey, action_bytes: &[u8]) -> [u8; 32] {
-    solana_sha256_hasher::hashv(&[MESSAGE_DOMAIN, vault.as_ref(), action_bytes]).to_bytes()
+/// `message = sha256("lamport-vault/v1" || vault_pubkey || u32le(rotations) || action_bytes)`.
+///
+/// `rotations` is the vault's key generation at signing time, so a signature
+/// made under one key is meaningless under any later key, even if a later key
+/// had the same leaf index free.
+pub fn signed_message(vault: &Pubkey, rotations: u32, action_bytes: &[u8]) -> [u8; 32] {
+    solana_sha256_hasher::hashv(&[MESSAGE_DOMAIN, vault.as_ref(), &rotations.to_le_bytes(), action_bytes]).to_bytes()
 }
 
 /// Parses and validates a 56-byte LMS public key for use in a vault.
@@ -78,6 +82,7 @@ pub mod lamport_vault {
         vault.next_q = 0;
         vault.rotations = 0;
         vault.created_slot = Clock::get()?.slot;
+        vault.used_keys = vec![Vault::key_hash(&lms_pubkey)];
         Ok(())
     }
 
@@ -125,8 +130,11 @@ pub mod lamport_vault {
     }
 
     /// Verifies the staged signature and performs the action. Anyone may call
-    /// it: the signature binds the vault and the exact action, and the leaf
-    /// counter makes it single-use. The buffer's rent returns to its payer.
+    /// it: the signature binds the vault, the key generation and the exact
+    /// action, and the leaf counter makes it single-use. The buffer's rent
+    /// returns to its payer; on `Rotate` the rent for the vault's extra
+    /// `used_keys` entry (32 bytes) is taken out of the buffer first, so the
+    /// buffer's payer pays it.
     ///
     /// Remaining accounts, by action:
     /// * `TransferSol`: `[to (writable)]`
@@ -142,8 +150,8 @@ pub mod lamport_vault {
         let vault_key = ctx.accounts.vault.key();
         let vault = &mut ctx.accounts.vault;
 
-        // 2. message
-        let message = signed_message(&vault_key, &buf.action);
+        // 2. message, bound to the current key generation.
+        let message = signed_message(&vault_key, vault.rotations, &buf.action);
 
         // 3. parse: typecodes equal to the vault's, q < 2^h, exact length; then q >= next_q.
         let pk = parse_vault_key(&vault.lms_pubkey)?;
@@ -223,7 +231,27 @@ pub mod lamport_vault {
             }
             Action::Rotate { new_lms_pubkey, .. } => {
                 parse_vault_key(&new_lms_pubkey)?;
-                require!(new_lms_pubkey != vault.lms_pubkey, VaultError::SameKeyRotation);
+                // A key that was ever installed has spent leaves; with next_q
+                // back at 0 they would be reusable. Refuse it for good.
+                require!(!vault.has_used(&new_lms_pubkey), VaultError::KeyReused);
+                require!(vault.used_keys.len() < MAX_USED_KEYS, VaultError::TooManyRotations);
+
+                // Grow the account by one entry. The rent delta comes out of
+                // the staging buffer, which is closed to its payer at exit.
+                let vault_ai = vault.to_account_info();
+                let new_len = Vault::space(vault.used_keys.len() + 1);
+                let rent = Rent::get()?;
+                let delta = rent
+                    .minimum_balance(new_len)
+                    .saturating_sub(rent.minimum_balance(vault_ai.data_len()));
+                if delta > 0 {
+                    let buf_ai = ctx.accounts.sig_buffer.to_account_info();
+                    buf_ai.sub_lamports(delta)?;
+                    vault_ai.add_lamports(delta)?;
+                }
+                vault_ai.resize(new_len)?;
+
+                vault.used_keys.push(Vault::key_hash(&new_lms_pubkey));
                 vault.lms_pubkey = new_lms_pubkey;
                 vault.next_q = 0;
                 vault.rotations = vault.rotations.checked_add(1).ok_or(VaultError::Overflow)?;
@@ -328,4 +356,60 @@ pub struct Execute<'info> {
     /// CHECK: receives the buffer's rent; identity enforced by `has_one = payer`.
     #[account(mut)]
     pub payer: UncheckedAccount<'info>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_is_domain_vault_rotations_le_action() {
+        let vault = Pubkey::new_unique();
+        let action = [0x03u8; 41];
+        let mut concat = Vec::new();
+        concat.extend_from_slice(b"lamport-vault/v1");
+        concat.extend_from_slice(vault.as_ref());
+        concat.extend_from_slice(&[0x02, 0x01, 0x00, 0x00]); // u32le(0x0102)
+        concat.extend_from_slice(&action);
+        assert_eq!(
+            signed_message(&vault, 0x0102, &action),
+            solana_sha256_hasher::hash(&concat).to_bytes()
+        );
+    }
+
+    #[test]
+    fn message_changes_with_every_input() {
+        let vault = Pubkey::new_unique();
+        let action = Action::Close { to: Pubkey::new_unique(), expiry_slot: 1 }.encode();
+        let base = signed_message(&vault, 0, &action);
+        assert_ne!(base, signed_message(&vault, 1, &action), "generation must bind");
+        assert_ne!(base, signed_message(&Pubkey::new_unique(), 0, &action), "vault must bind");
+        let other = Action::Close { to: Pubkey::new_unique(), expiry_slot: 1 }.encode();
+        assert_ne!(base, signed_message(&vault, 0, &other), "action must bind");
+        assert_eq!(base, signed_message(&vault, 0, &action), "deterministic");
+    }
+
+    #[test]
+    fn used_keys_and_space() {
+        let key = [7u8; 56];
+        let mut v = Vault {
+            version: Vault::VERSION,
+            bump: 0,
+            vault_id: vault_id_for(&key),
+            lms_pubkey: key,
+            next_q: 0,
+            rotations: 0,
+            created_slot: 0,
+            used_keys: vec![Vault::key_hash(&key)],
+        };
+        assert_eq!(v.used_keys[0], v.vault_id, "the initial entry is the vault id");
+        assert!(v.has_used(&key));
+        let next = [8u8; 56];
+        assert!(!v.has_used(&next));
+        v.used_keys.push(Vault::key_hash(&next));
+        assert!(v.has_used(&next));
+        assert_eq!(Vault::SPACE, 8 + 1 + 1 + 32 + 56 + 4 + 4 + 8 + 4 + 32);
+        assert_eq!(Vault::space(MAX_USED_KEYS), Vault::FIXED + 32 * 256);
+        assert!(Vault::space(MAX_USED_KEYS) <= 10 * 1024, "one realloc step and the whole account stay small");
+    }
 }

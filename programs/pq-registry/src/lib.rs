@@ -8,10 +8,10 @@
 //!   overwrite an earlier commitment.
 //! * `rotate_pq` replaces the committed key and needs an LMS signature from
 //!   the key currently committed, staged through a buffer exactly like the
-//!   vault does. After a rotation `next_q` resets to 0 for the new key.
-//!   Rotating to a key that was committed before is the owner's own replay
-//!   risk (an old rotation signature would be valid again); the derivation in
-//!   `docs/SPEC-DERIVATION.md` never produces the same key twice.
+//!   vault does. After a rotation `next_q` resets to 0 for the new key and
+//!   `generation` goes up by one. The signed message carries the generation,
+//!   and `used_keys` remembers the hash of every key ever committed so a key
+//!   whose leaves were spent can never be committed again (`KeyReused`).
 //!
 //! No admin, no authority: after `commit` only the post-quantum key can change
 //! the record, and nobody can delete it.
@@ -31,12 +31,16 @@ pub const PQ_SIG_SEED: &[u8] = b"pqsig";
 pub const MESSAGE_DOMAIN: &[u8] = b"pq-registry/v1";
 /// `scheme` value for an LMS-SHA256 key (56-byte public key).
 pub const SCHEME_LMS_SHA256: u8 = 1;
+/// Upper bound on `Commitment::used_keys`: the committed key plus 255 rotations.
+pub const MAX_USED_KEYS: usize = 256;
 
 const _: () = assert!(LMS_PUBLIC_KEY_LEN == 56);
 
-/// `message = sha256("pq-registry/v1" || owner || new_pq_pubkey)`.
-pub fn signed_message(owner: &Pubkey, new_pq_pubkey: &[u8; 56]) -> [u8; 32] {
-    solana_sha256_hasher::hashv(&[MESSAGE_DOMAIN, owner.as_ref(), new_pq_pubkey]).to_bytes()
+/// `message = sha256("pq-registry/v1" || owner || u32le(generation) || new_pq_pubkey)`.
+///
+/// `generation` is the commitment's key generation at signing time.
+pub fn signed_message(owner: &Pubkey, generation: u32, new_pq_pubkey: &[u8; 56]) -> [u8; 32] {
+    solana_sha256_hasher::hashv(&[MESSAGE_DOMAIN, owner.as_ref(), &generation.to_le_bytes(), new_pq_pubkey]).to_bytes()
 }
 
 fn parse_key(bytes: &[u8; 56]) -> Result<LmsPublicKey> {
@@ -62,8 +66,10 @@ pub mod pq_registry {
         c.scheme = SCHEME_LMS_SHA256;
         c.pq_pubkey = pq_pubkey;
         c.next_q = 0;
+        c.generation = 0;
         c.created_slot = slot;
         c.updated_slot = slot;
+        c.used_keys = vec![Commitment::key_hash(&pq_pubkey)];
         Ok(())
     }
 
@@ -100,11 +106,13 @@ pub mod pq_registry {
     }
 
     /// Verifies the staged signature with the committed key and replaces it.
+    /// The rent for the commitment's extra `used_keys` entry (32 bytes) is
+    /// taken out of the buffer before the buffer is closed to its payer.
     pub fn rotate_pq(ctx: Context<RotatePq>) -> Result<()> {
         let b = &ctx.accounts.pq_sig_buffer;
         require!(b.filled == b.sig_len, RegistryError::SignatureIncomplete);
         let c = &mut ctx.accounts.commitment;
-        let message = signed_message(&c.owner, &b.new_pq_pubkey);
+        let message = signed_message(&c.owner, c.generation, &b.new_pq_pubkey);
         let pk = parse_key(&c.pq_pubkey)?;
         let sig = parse_lms_signature(&b.sig, &pk).map_err(|e| {
             msg!("lms parse: {}", e.name());
@@ -122,9 +130,26 @@ pub mod pq_registry {
 
         let new_key = b.new_pq_pubkey;
         parse_key(&new_key)?;
-        require!(new_key != c.pq_pubkey, RegistryError::SameKeyRotation);
+        require!(!c.has_used(&new_key), RegistryError::KeyReused);
+        require!(c.used_keys.len() < MAX_USED_KEYS, RegistryError::TooManyRotations);
+
+        let c_ai = c.to_account_info();
+        let new_len = Commitment::space(c.used_keys.len() + 1);
+        let rent = Rent::get()?;
+        let delta = rent
+            .minimum_balance(new_len)
+            .saturating_sub(rent.minimum_balance(c_ai.data_len()));
+        if delta > 0 {
+            let b_ai = ctx.accounts.pq_sig_buffer.to_account_info();
+            b_ai.sub_lamports(delta)?;
+            c_ai.add_lamports(delta)?;
+        }
+        c_ai.resize(new_len)?;
+
+        c.used_keys.push(Commitment::key_hash(&new_key));
         c.pq_pubkey = new_key;
         c.next_q = 0;
+        c.generation = c.generation.checked_add(1).ok_or(RegistryError::Overflow)?;
         c.updated_slot = Clock::get()?.slot;
         Ok(())
     }
@@ -134,7 +159,7 @@ pub mod pq_registry {
 #[account]
 #[derive(Debug)]
 pub struct Commitment {
-    /// Layout version, 1.
+    /// Layout version, 2.
     pub version: u8,
     /// PDA bump.
     pub bump: u8,
@@ -146,17 +171,38 @@ pub struct Commitment {
     pub pq_pubkey: [u8; 56],
     /// Next usable leaf of the committed key.
     pub next_q: u32,
+    /// Key generation: how many times `rotate_pq` ran. Part of the signed message.
+    pub generation: u32,
     /// Slot of `commit`.
     pub created_slot: u64,
     /// Slot of the last `commit` or `rotate_pq`.
     pub updated_slot: u64,
+    /// `sha256` of every key ever committed, oldest first. `rotate_pq` refuses
+    /// any key listed here.
+    pub used_keys: Vec<[u8; 32]>,
 }
 
 impl Commitment {
     /// Current layout version.
-    pub const VERSION: u8 = 1;
-    /// Account size including the discriminator.
-    pub const SPACE: usize = 8 + 1 + 1 + 32 + 1 + 56 + 4 + 8 + 8;
+    pub const VERSION: u8 = 2;
+    /// Bytes before the `used_keys` entries (discriminator, fixed fields, `Vec` length).
+    pub const FIXED: usize = 8 + 1 + 1 + 32 + 1 + 56 + 4 + 4 + 8 + 8 + 4;
+    /// Account size, including the discriminator, with `n_keys` entries in `used_keys`.
+    pub const fn space(n_keys: usize) -> usize {
+        Self::FIXED + 32 * n_keys
+    }
+    /// Size of a fresh commitment (one used key).
+    pub const SPACE: usize = Self::space(1);
+
+    /// The `used_keys` entry for a public key.
+    pub fn key_hash(pq_pubkey: &[u8; 56]) -> [u8; 32] {
+        solana_sha256_hasher::hashv(&[pq_pubkey]).to_bytes()
+    }
+
+    /// True if `pq_pubkey` was ever committed for this owner (including now).
+    pub fn has_used(&self, pq_pubkey: &[u8; 56]) -> bool {
+        self.used_keys.contains(&Self::key_hash(pq_pubkey))
+    }
 }
 
 /// Staging buffer for one rotation. PDA `["pqsig", owner, payer, nonce_le]`.
@@ -295,10 +341,55 @@ pub enum RegistryError {
     LeafAlreadyUsed,
     #[msg("LMS signature does not verify")]
     InvalidSignature,
-    #[msg("rotation to the key already committed")]
-    SameKeyRotation,
+    #[msg("rotation to a key that was committed before (including the current one)")]
+    KeyReused,
     #[msg("buffer belongs to another owner")]
     OwnerMismatch,
     #[msg("signer is not the buffer's payer")]
     WrongPayer,
+    #[msg("commitment has used 256 keys")]
+    TooManyRotations,
+    #[msg("arithmetic overflow")]
+    Overflow,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_is_domain_owner_generation_le_key() {
+        let owner = Pubkey::new_unique();
+        let key = [0x55u8; 56];
+        let mut concat = Vec::new();
+        concat.extend_from_slice(b"pq-registry/v1");
+        concat.extend_from_slice(owner.as_ref());
+        concat.extend_from_slice(&[0x02, 0x01, 0x00, 0x00]); // u32le(0x0102)
+        concat.extend_from_slice(&key);
+        assert_eq!(signed_message(&owner, 0x0102, &key), solana_sha256_hasher::hash(&concat).to_bytes());
+        assert_ne!(signed_message(&owner, 0, &key), signed_message(&owner, 1, &key));
+        assert_ne!(signed_message(&owner, 0, &key), signed_message(&Pubkey::new_unique(), 0, &key));
+        assert_ne!(signed_message(&owner, 0, &key), signed_message(&owner, 0, &[0x56u8; 56]));
+    }
+
+    #[test]
+    fn used_keys_and_space() {
+        let key = [1u8; 56];
+        let c = Commitment {
+            version: Commitment::VERSION,
+            bump: 0,
+            owner: Pubkey::new_unique(),
+            scheme: SCHEME_LMS_SHA256,
+            pq_pubkey: key,
+            next_q: 0,
+            generation: 0,
+            created_slot: 0,
+            updated_slot: 0,
+            used_keys: vec![Commitment::key_hash(&key)],
+        };
+        assert!(c.has_used(&key));
+        assert!(!c.has_used(&[2u8; 56]));
+        assert_eq!(Commitment::SPACE, 8 + 1 + 1 + 32 + 1 + 56 + 4 + 4 + 8 + 8 + 4 + 32);
+        assert!(Commitment::space(MAX_USED_KEYS) <= 10 * 1024);
+    }
 }

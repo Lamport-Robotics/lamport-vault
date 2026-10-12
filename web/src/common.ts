@@ -34,7 +34,11 @@ export interface SignRequest {
   lmsPubkey: string;   // base64, 56 bytes
   nextQ: number;
   expirySlot: string;  // decimal
-  action: { kind: "TransferSol"; to: string; lamports: string } | { kind: "Rotate"; newLmsPubkey: string } | { kind: "Close"; to: string };
+  action:
+    | { kind: "TransferSol"; to: string; lamports: string }
+    | { kind: "TransferToken"; mint: string; to: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number }
+    | { kind: "Rotate"; newLmsPubkey: string }
+    | { kind: "Close"; to: string };
 }
 export interface SignedBlob {
   v: 1;

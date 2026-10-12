@@ -8,13 +8,17 @@ use crate::error::VaultError;
 /// Upper bound on a Borsh-encoded [`crate::Action`].
 pub const MAX_ACTION_LEN: usize = 256;
 
+/// Upper bound on `Vault::used_keys`: the initial key plus 255 rotations. A
+/// vault that has used 256 keys must `Close` and be recreated.
+pub const MAX_USED_KEYS: usize = 256;
+
 /// The vault. PDA `["vault", vault_id]`, `vault_id = sha256(initial lms_pubkey)`.
 ///
 /// The address never changes: deposits keep working across key rotations.
 #[account]
 #[derive(Debug)]
 pub struct Vault {
-    /// Layout version, 1.
+    /// Layout version, 2.
     pub version: u8,
     /// PDA bump.
     pub bump: u8,
@@ -28,13 +32,34 @@ pub struct Vault {
     pub rotations: u32,
     /// Slot of creation.
     pub created_slot: u64,
+    /// `sha256` of every LMS public key this vault has ever had, oldest first
+    /// (`used_keys[0] == vault_id`). `Rotate` refuses any key listed here, so a
+    /// key whose leaves were spent can never come back with `next_q = 0`.
+    pub used_keys: Vec<[u8; 32]>,
 }
 
 impl Vault {
     /// Current layout version.
-    pub const VERSION: u8 = 1;
-    /// Account size including the 8-byte discriminator.
-    pub const SPACE: usize = 8 + 1 + 1 + 32 + LMS_PUBLIC_KEY_LEN + 4 + 4 + 8;
+    pub const VERSION: u8 = 2;
+    /// Bytes before the `used_keys` entries: discriminator, fixed fields and the
+    /// `Vec` length prefix.
+    pub const FIXED: usize = 8 + 1 + 1 + 32 + LMS_PUBLIC_KEY_LEN + 4 + 4 + 8 + 4;
+    /// Account size, including the discriminator, with `n_keys` entries in `used_keys`.
+    pub const fn space(n_keys: usize) -> usize {
+        Self::FIXED + 32 * n_keys
+    }
+    /// Size of a fresh vault (one used key: the initial one).
+    pub const SPACE: usize = Self::space(1);
+
+    /// The `used_keys` entry for an LMS public key.
+    pub fn key_hash(lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> [u8; 32] {
+        solana_sha256_hasher::hashv(&[lms_pubkey]).to_bytes()
+    }
+
+    /// True if `lms_pubkey` has ever been this vault's key (including now).
+    pub fn has_used(&self, lms_pubkey: &[u8; LMS_PUBLIC_KEY_LEN]) -> bool {
+        self.used_keys.contains(&Self::key_hash(lms_pubkey))
+    }
 }
 
 /// Staging area for one signature. PDA `["sig", vault, payer, nonce_le_u64]`.

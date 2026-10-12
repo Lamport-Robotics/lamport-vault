@@ -17,7 +17,7 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
-import { type CommitmentAccount, decodeCommitment, decodeVault, type VaultAccount } from "./accounts.ts";
+import { type CommitmentAccount, decodeCommitment, decodeVault, hasUsedKey, type VaultAccount } from "./accounts.ts";
 import { type Action, encodeAction } from "./action.ts";
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
@@ -103,6 +103,8 @@ export interface VaultSignerOptions {
 export interface SignedAction {
   q: number;
   vault: PublicKey;
+  /** the vault's key generation the message was bound to */
+  rotations: number;
   action: Action;
   actionBytes: Uint8Array;
   message: Uint8Array;
@@ -159,8 +161,9 @@ export class VaultSigner {
   }
 
   /**
-   * Sign `request` with leaf `q` (default: next usable) and bind it to this vault. Pure: nothing
-   * is sent. The returned signature verifies under `key.publicKey` over `message`.
+   * Sign `request` with leaf `q` (default: next usable) and bind it to this vault and its current
+   * key generation (`rotations`, read from the account). Pure: nothing is sent. The returned
+   * signature verifies under `key.publicKey` over `message`.
    */
   async sign(request: ActionRequest, opts: { q?: number; C?: Uint8Array } = {}): Promise<SignedAction> {
     const vault = await this.fetchVault();
@@ -171,12 +174,15 @@ export class VaultSigner {
     if (q === 2 ** h - 1 && request.kind !== "Rotate") {
       throw new Error("the last leaf may only be spent on Rotate (exhaustion rule); rotate to a fresh key first");
     }
+    if (request.kind === "Rotate" && hasUsedKey(vault.usedKeys, request.newLmsPubkey)) {
+      throw new Error("Rotate to a key this vault has used before (the chain would refuse it with KeyReused)");
+    }
     const action = await this.withExpiry(request);
     const actionBytes = encodeAction(action);
-    const message = vaultMessage(this.vault, actionBytes);
+    const message = vaultMessage(this.vault, vault.rotations, actionBytes);
     const lmsSignature = this.key.sign(q, message, opts.C ? { C: opts.C } : {});
     this.localNextQ = Math.max(this.localNextQ, q + 1);
-    return { q, vault: this.vault, action, actionBytes, message, lmsSignature };
+    return { q, vault: this.vault, rotations: vault.rotations, action, actionBytes, message, lmsSignature };
   }
 
   /** Sign, stage and execute. Returns the signatures of every transaction, in order. */
@@ -223,6 +229,8 @@ export interface RegistryClientOptions {
 
 export interface RotatePqResult {
   q: number;
+  /** the commitment's generation the message was bound to */
+  generation: number;
   nonce: bigint;
   message: Uint8Array;
   lmsSignature: Uint8Array;
@@ -259,8 +267,9 @@ export class RegistryClient {
   }
 
   /**
-   * `rotate_pq`: sign sha256("pq-registry/v1" || owner || new_pq_pubkey) with the committed LMS
-   * key at leaf q >= next_q, stage it, rotate. Anyone can pay; the owner's classical key is not needed.
+   * `rotate_pq`: sign sha256("pq-registry/v1" || owner || u32le(generation) || new_pq_pubkey) with
+   * the committed LMS key at leaf q >= next_q, stage it, rotate. Anyone can pay; the owner's
+   * classical key is not needed. A key that was committed before is refused up front.
    */
   async rotatePq(
     owner: PublicKey,
@@ -275,7 +284,10 @@ export class RegistryClient {
     }
     const q = opts.q ?? current.nextQ;
     if (q < current.nextQ) throw new Error(`q=${q} is below the commitment's next_q=${current.nextQ}`);
-    const message = registryMessage(owner, newPqPubkey);
+    if (hasUsedKey(current.usedKeys, newPqPubkey)) {
+      throw new Error("rotation to a key that was committed before (the chain would refuse it with KeyReused)");
+    }
+    const message = registryMessage(owner, current.generation, newPqPubkey);
     const lmsSignature = committedKey.sign(q, message);
     const nonce = opts.nonce ?? randomNonce();
     const staged = buildStagedRotatePq({
@@ -289,6 +301,6 @@ export class RegistryClient {
       computeUnits: this.opts.computeUnits ?? EXECUTE_COMPUTE_UNITS,
     });
     const signatures = await sendSequence(this.opts.rpc, this.opts.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
-    return { q, nonce, message, lmsSignature, signatures, buffer: staged.buffer };
+    return { q, generation: current.generation, nonce, message, lmsSignature, signatures, buffer: staged.buffer };
   }
 }

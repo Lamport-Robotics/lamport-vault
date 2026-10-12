@@ -1,10 +1,13 @@
 import "./polyfill.ts";
 import "./style.css";
-import { PublicKey, SystemProgram } from "@solana/web3.js";
+import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, buildStagedExecution, createVaultInstruction, decodeVault, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
 import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, b64, copy, el, isPubkey, rpc, short, sol, unb64, type SignRequest, type SignedBlob } from "./common.ts";
-import { connectStandard, listWallets, localWallet, onWalletsChange, type Wallet } from "./wallet.ts";
+import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
+import * as qr from "./qr.ts";
+import { holdings, destinationTokenAccount, toBase, type Holding } from "./tokens.ts";
+import { TOKEN_PROGRAM_ID, associatedTokenAddress } from "@lamport-robotics/vault";
 import { tape } from "./tape.ts";
 
 // ── state ──
@@ -12,6 +15,7 @@ let wallet: Wallet | null = null;
 let vaultAddr: PublicKey | null = null;
 let vault: VaultAccount | null = null;
 let vaultLamports = 0;
+let vaultTokens: Holding[] = [];
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
 let lastRun: { vault: string; q: number; kind: string; sigs: string[] } | null = null;
 
@@ -31,7 +35,7 @@ function paintWallet() {
   if (wallet) {
     box.append(el("span", { class: "mono", style: "font-size:12px;color:var(--mute)" }, short(wallet.pubkey.toBase58())),
       el("button", { class: "small ghost", id: "disc" }, "disconnect"));
-    $("#disc").addEventListener("click", async () => { await wallet?.disconnect(); wallet = null; paintWallet(); render(); });
+    $("#disc").addEventListener("click", async () => { await wallet?.disconnect(); wallet = null; remember(null); paintWallet(); render(); });
     return;
   }
   const ws = listWallets();
@@ -44,13 +48,23 @@ function paintWallet() {
     try {
       const v = (sel as HTMLSelectElement).value;
       wallet = v === "__local" ? localWallet() : await connectStandard(ws.find((w) => w.name === v)!);
-      paintWallet(); render();
+      remember(v); paintWallet(); render();
     } catch (e) { alert(String((e as Error).message ?? e)); }
   });
   box.append(sel, btn);
 }
 onWalletsChange(paintWallet);
 paintWallet();
+// come back to the wallet used last time, without a prompt
+void (async () => {
+  const name = remembered(); if (!name || wallet) return;
+  try {
+    if (name === "__local") { if (sessionStorage.getItem("lamport-vault-local-payer")) wallet = localWallet(); }
+    else { const w = listWallets().find((x) => x.name === name); if (w) wallet = await connectStandard(w, true); }
+    if (wallet) { paintWallet(); render(); }
+  } catch { /* the wallet wants a click this time */ }
+})();
+onWalletsChange(() => { const name = remembered(); if (name && !wallet) { const w = listWallets().find((x) => x.name === name); if (w) connectStandard(w, true).then((c) => { wallet = c; paintWallet(); render(); }).catch(() => {}); } });
 
 // ── routing: #<vault address> ──
 addEventListener("hashchange", () => void load());
@@ -62,7 +76,10 @@ async function load() {
   vault = null; vaultLamports = 0;
   if (vaultAddr) {
     const info = await rpc.getAccountInfo(vaultAddr, "confirmed").catch(() => null);
-    if (info && info.owner.equals(LAMPORT_VAULT_PROGRAM_ID)) { vault = decodeVault(info.data); vaultLamports = info.lamports; }
+    if (info && info.owner.equals(LAMPORT_VAULT_PROGRAM_ID)) {
+      vault = decodeVault(info.data); vaultLamports = info.lamports;
+      try { vaultTokens = await holdings(vaultAddr); } catch (e) { console.error("holdings", e); vaultTokens = []; }
+    }
   }
   render();
 }
@@ -139,6 +156,7 @@ function vaultView() {
     el("div", { class: "label" }, el("span", {}, "vault"), el("a", { href: EXPLORER_ADDR(addr), target: "_blank", rel: "noopener" }, "explorer")),
     el("div", { class: "copy" }, el("span", { class: "addr" }, addr), el("button", { class: "small ghost", id: "cp" }, "copy")),
     el("div", { class: "big", style: "margin-top:16px" }, sol(vaultLamports), el("small", {}, "SOL")),
+    vaultTokens.length ? el("div", { class: "kv", style: "margin-top:10px" }, ...vaultTokens.flatMap((t) => [el("dt", {}, short(t.mint.toBase58(), 4)), el("dd", {}, `${t.ui}`)])) : null,
     tape(leaves, v.nextQ),
     el("dl", { class: "kv", style: "margin-top:16px" },
       el("dt", {}, "key"), el("dd", {}, `LMS H${h} / W4 · rotated ${v.rotations}×`),
@@ -190,16 +208,26 @@ function withdrawSection() {
 }
 
 function actionForm(): { node: HTMLElement; read: () => SignRequest["action"] } {
-  const kind = el("select", { id: "kind" }, el("option", { value: "TransferSol" }, "send SOL"), el("option", { value: "Rotate" }, "rotate to a new key"), el("option", { value: "Close" }, "close the vault"));
+  const kind = el("select", { id: "kind" }, el("option", { value: "TransferSol" }, "send SOL"), ...(vaultTokens.length ? [el("option", { value: "TransferToken" }, "send a token")] : []), el("option", { value: "Rotate" }, "rotate to a new key"), el("option", { value: "Close" }, "close the vault"));
+  const mint = el("select", { id: "mint" }, ...vaultTokens.map((t) => el("option", { value: t.mint.toBase58() }, `${short(t.mint.toBase58(), 4)} · ${t.ui}`)));
   const to = el("input", { class: "mono", id: "to", placeholder: "destination address", autocomplete: "off", spellcheck: "false" });
   const amt = el("input", { class: "mono", id: "wamt", placeholder: "amount in SOL", inputmode: "decimal" });
   const rot = el("input", { class: "mono", id: "rot", placeholder: "new lms pubkey (base64, 56 bytes)", autocomplete: "off", spellcheck: "false" });
-  const node = el("div", { class: "grid2" }, el("div", {}, el("label", {}, "action"), kind), el("div", { id: "f-to" }, el("label", {}, "to"), to), el("div", { id: "f-amt" }, el("label", {}, "amount"), amt), el("div", { id: "f-rot", class: "hidden" }, el("label", {}, "new key"), rot));
-  const sync = () => { const k = (kind as HTMLSelectElement).value; $("#f-to", node).classList.toggle("hidden", k === "Rotate"); $("#f-amt", node).classList.toggle("hidden", k !== "TransferSol"); $("#f-rot", node).classList.toggle("hidden", k !== "Rotate"); };
+  const node = el("div", { class: "grid2" }, el("div", {}, el("label", {}, "action"), kind), el("div", { id: "f-to" }, el("label", {}, "to"), to), el("div", { id: "f-amt" }, el("label", {}, "amount"), amt), el("div", { id: "f-rot", class: "hidden" }, el("label", {}, "new key"), rot), el("div", { id: "f-mint", class: "hidden" }, el("label", {}, "token"), mint));
+  const sync = () => { const k = (kind as HTMLSelectElement).value; $("#f-to", node).classList.toggle("hidden", k === "Rotate"); $("#f-amt", node).classList.toggle("hidden", k !== "TransferSol" && k !== "TransferToken"); $("#f-rot", node).classList.toggle("hidden", k !== "Rotate"); $("#f-mint", node).classList.toggle("hidden", k !== "TransferToken"); amt.placeholder = k === "TransferToken" ? "amount" : "amount in SOL"; };
   kind.addEventListener("change", sync);
   const read = (): SignRequest["action"] => {
     const k = (kind as HTMLSelectElement).value;
     if (k === "TransferSol") { if (!isPubkey(to.value)) throw new Error("destination?"); const n = Number(amt.value); if (!(n > 0)) throw new Error("amount?"); return { kind: "TransferSol", to: to.value.trim(), lamports: String(Math.round(n * 1e9)) }; }
+    if (k === "TransferToken") {
+      const h = vaultTokens.find((t) => t.mint.toBase58() === (mint as HTMLSelectElement).value); if (!h) throw new Error("token?");
+      if (!isPubkey(to.value)) throw new Error("destination?");
+      const amount = toBase(amt.value, h.decimals); if (amount <= 0n || amount > h.amount) throw new Error("amount?");
+      // the action names the receiver's token account; it is created before execute if it does not exist
+      lastTokenOwner = new PublicKey(to.value.trim());
+      const ata = associatedTokenAddress(lastTokenOwner, h.mint, h.tokenProgram);
+      return { kind: "TransferToken", mint: h.mint.toBase58(), to: ata.toBase58(), amount: amount.toString(), tokenProgram: h.tokenProgram.toBase58(), decimals: h.decimals };
+    }
     if (k === "Rotate") { const b = unb64(rot.value); parseLmsPublicKey(b); return { kind: "Rotate", newLmsPubkey: b64(b) }; }
     if (!isPubkey(to.value)) throw new Error("destination?"); return { kind: "Close", to: to.value.trim() };
   };
@@ -208,6 +236,7 @@ function actionForm(): { node: HTMLElement; read: () => SignRequest["action"] } 
 
 function toAction(a: SignRequest["action"], expirySlot: bigint): Action {
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), expirySlot };
+  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), expirySlot };
   if (a.kind === "Rotate") return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), expirySlot };
   return { kind: "Close", to: new PublicKey(a.to), expirySlot };
 }
@@ -220,9 +249,11 @@ function coldFlow() {
     el("div", { id: "reqout", class: "hidden" },
       el("label", {}, "request — paste into the cold signer"),
       el("textarea", { class: "mono", id: "reqtxt", rows: "4", readonly: "" }),
-      el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "small", id: "cpreq" }, "copy"), el("a", { class: "small", href: "/signer.html", download: "lamport-vault-signer.html", style: "align-self:center;font-size:13px" }, "download the signer")),
+      el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "small", id: "cpreq" }, "copy"), el("button", { class: "small", id: "qrreq" }, "show as QR"), el("a", { class: "small", href: "/signer.html", download: "lamport-vault-signer.html", style: "align-self:center;font-size:13px" }, "download the signer")),
+      el("div", { id: "qrbox", style: "margin-top:10px" }),
       el("p", { class: "note" }, "Open the signer on an offline machine, paste the request, type the words. It gives you a signature; bring it back below. The request is valid for about an hour.")),
-    el("label", {}, "signature from the cold signer"),
+    el("div", { class: "row", style: "align-items:center;margin-top:14px" }, el("label", { style: "margin:0" }, "signature from the cold signer"), el("button", { class: "small ghost", id: "scansig" }, "scan QR")),
+    el("div", { id: "scanbox" }),
     el("textarea", { class: "mono", id: "sigtxt", rows: "4", placeholder: '{"v":1,"vault":"…","q":…,"signature":"…"}' }),
     el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "primary", id: "run" }, "Stage and execute")),
     el("ul", { class: "steps hidden", id: "steps" }),
@@ -236,6 +267,14 @@ function coldFlow() {
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
   $("#cpreq", s).addEventListener("click", (e) => copy(($("#reqtxt", s) as HTMLTextAreaElement).value, e.currentTarget as HTMLButtonElement));
+  let stopQr: (() => void) | null = null;
+  $("#qrreq", s).addEventListener("click", async () => { if (stopQr) { stopQr(); stopQr = null; return; } stopQr = await qr.show($("#qrbox", s), ($("#reqtxt", s) as HTMLTextAreaElement).value); });
+  let scanning: { stop: () => void } | null = null;
+  $("#scansig", s).addEventListener("click", () => {
+    if (scanning) { scanning.stop(); scanning = null; return; }
+    const sc = qr.scan($("#scanbox", s)); scanning = sc;
+    sc.done.then((text) => { ($("#sigtxt", s) as HTMLTextAreaElement).value = text; scanning = null; }).catch(() => { scanning = null; });
+  });
   $("#run", s).addEventListener("click", async () => {
     const err = $("#werr", s); err.classList.add("hidden");
     try {
@@ -285,16 +324,31 @@ function hotFlow() {
 async function stageAndExecute(action: Action, signature: Uint8Array, q: number, steps: HTMLElement, btn: HTMLButtonElement) {
   if (!wallet) throw new Error("connect a wallet to pay the fees");
   if (q < vault!.nextQ) throw new Error(`leaf ${q} is already spent (next is ${vault!.nextQ}); sign again with the current q`);
-  const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature });
-  const names = ["open buffer", ...staged.writes.map((_, i) => `write chunk ${i + 1}`), "execute"];
+  // token transfers: the receiver's token account must exist; the payer creates it first if needed
+  let tokenProgram = TOKEN_PROGRAM_ID;
+  const pre: { name: string; ixs: TransactionInstruction[] }[] = [];
+  if (action.kind === "TransferToken") {
+    const h = vaultTokens.find((t) => t.mint.equals(action.mint)); if (!h) throw new Error("the vault does not hold that token");
+    tokenProgram = h.tokenProgram;
+    const info = await rpc.getAccountInfo(action.to, "confirmed");
+    if (!info) {
+      const owner = await ownerOfAta(action.to, h);
+      if (!owner) throw new Error("destination token account does not exist and is not an associated token account I can create");
+      const d = await destinationTokenAccount(wallet.pubkey, owner, h.mint, h.tokenProgram);
+      if (d.create) pre.push({ name: "create destination token account", ixs: [d.create] });
+    }
+  }
+  const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature, tokenProgram });
+  const names = [...pre.map((p) => p.name), "open buffer", ...staged.writes.map((_, i) => `write chunk ${i + 1}`), "execute"];
+  const txs = [...pre.map((p) => p.ixs), ...staged.transactions];
   steps.innerHTML = ""; steps.classList.remove("hidden");
   const items = names.map((n) => { const li = el("li", {}, el("span", {}, n)); steps.append(li); return li; });
   btn.setAttribute("disabled", ""); btn.classList.add("spin");
   const sigs: string[] = [];
   try {
-    for (let i = 0; i < staged.transactions.length; i++) {
+    for (let i = 0; i < txs.length; i++) {
       items[i].classList.add("on");
-      const sig = await wallet.send(staged.transactions[i]);
+      const sig = await wallet.send(txs[i]);
       sigs.push(sig);
       items[i].classList.remove("on"); items[i].classList.add("done");
       items[i].append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 6)));
@@ -303,6 +357,13 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
     lastRun = { vault: vaultAddr!.toBase58(), q, kind: action.kind, sigs };
     await load();
   } finally { btn.removeAttribute("disabled"); btn.classList.remove("spin"); }
+}
+
+/** which owner an associated token account belongs to, if `ata` is one: ask the form's destination first, else give up */
+let lastTokenOwner: PublicKey | null = null;
+async function ownerOfAta(ata: PublicKey, h: Holding): Promise<PublicKey | null> {
+  if (lastTokenOwner && associatedTokenAddress(lastTokenOwner, h.mint, h.tokenProgram).equals(ata)) return lastTokenOwner;
+  return null;
 }
 
 function registrySection() {

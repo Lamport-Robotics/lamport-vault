@@ -34,9 +34,10 @@ async function confirm(sig: string, blockhash: string, lastValidBlockHeight: num
   return sig;
 }
 
-export async function connectStandard(w: StdWallet): Promise<Wallet> {
+export async function connectStandard(w: StdWallet, silent = false): Promise<Wallet> {
   const feat = w.features as Record<string, any>;
-  const res = await feat["standard:connect"].connect();
+  const res = await feat["standard:connect"].connect(silent ? { silent: true } : undefined);
+  if (!res.accounts?.length) throw new Error("not connected");
   const account: WalletAccount | undefined = (res.accounts as WalletAccount[]).find((a) => (a.chains as readonly string[]).includes(CHAIN)) ?? res.accounts[0];
   if (!account) throw new Error("wallet returned no account");
   const pubkey = new PublicKey(account.publicKey);
@@ -87,3 +88,7 @@ function bs58(bytes: Uint8Array): string {
   for (const b of bytes) { if (b === 0) out = "1" + out; else break; }
   return out;
 }
+
+const REMEMBER = "lamport-vault-wallet";
+export function remember(name: string | null) { try { if (name) localStorage.setItem(REMEMBER, name); else localStorage.removeItem(REMEMBER); } catch { /* private mode */ } }
+export function remembered(): string | null { try { return localStorage.getItem(REMEMBER); } catch { return null; } }

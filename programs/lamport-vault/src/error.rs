@@ -39,8 +39,8 @@ pub enum VaultError {
     LastLeafReservedForRotate, // 6015
     #[msg("transfer would take the vault below its rent-exempt minimum")]
     InsufficientFunds, // 6016
-    #[msg("Rotate to the key already in use")]
-    SameKeyRotation, // 6017
+    #[msg("Rotate to a key this vault has used before (including the current one)")]
+    KeyReused, // 6017
     #[msg("a required remaining account is missing")]
     MissingAccount, // 6018
     #[msg("destination account does not match the signed action")]
@@ -61,4 +61,6 @@ pub enum VaultError {
     Overflow, // 6026
     #[msg("vault_id must equal sha256(lms_pubkey)")]
     VaultIdMismatch, // 6027
+    #[msg("vault has used 256 keys; Close it and create a new one")]
+    TooManyRotations, // 6028
 }

@@ -8,6 +8,7 @@ import { PublicKey } from "@solana/web3.js";
 import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial } from "@lamport-robotics/lms";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
+import * as qr from "./qr.ts";
 
 const app = $("#app");
 app.append(
@@ -15,6 +16,8 @@ app.append(
   el("section", {},
     el("div", { class: "label" }, el("span", {}, "01 — request"), el("span", {}, "from the vault page")),
     el("textarea", { class: "mono", id: "req", rows: "6", placeholder: '{"v":1,"vault":"…","action":{…}}' }),
+    el("div", { class: "row", style: "margin-top:8px" }, el("button", { class: "small ghost", id: "scanreq" }, "scan QR instead")),
+    el("div", { id: "scanbox" }),
     el("div", { id: "reqview" }),
   ),
   el("section", {},
@@ -28,7 +31,8 @@ app.append(
   el("section", { id: "out", class: "hidden" },
     el("div", { class: "label" }, el("span", {}, "03 — signature"), el("span", {}, "take this back to the vault page")),
     el("textarea", { class: "mono", id: "sig", rows: "6", readonly: "" }),
-    el("div", { class: "row", style: "margin-top:10px" }, el("button", { id: "copy", class: "small" }, "copy"), el("button", { id: "dl", class: "small" }, "download .json")),
+    el("div", { class: "row", style: "margin-top:10px" }, el("button", { id: "copy", class: "small" }, "copy"), el("button", { id: "dl", class: "small" }, "download .json"), el("button", { id: "qrsig", class: "small" }, "show as QR")),
+    el("div", { id: "qrbox", style: "margin-top:10px" }),
     el("p", { class: "note warn" }, "One leaf is now spent. If this signature is lost, the next one must use a higher q; the vault page reads it from the chain."),
   ),
   el("footer", {}, el("span", {}, "nothing here talks to the network"), el("span", {}, "lamportrobotics.com")),
@@ -47,6 +51,7 @@ $("#req").addEventListener("input", () => {
     req = r;
     const a = r.action;
     const line = a.kind === "TransferSol" ? `send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`
+      : a.kind === "TransferToken" ? `send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount + " base units"} of token ${short(a.mint, 6)} to token account ${a.to}`
       : a.kind === "Rotate" ? `rotate the vault key to ${short(a.newLmsPubkey, 10)}` : `close the vault, everything to ${a.to}`;
     v.append(el("dl", { class: "kv", style: "margin-top:14px" },
       el("dt", {}, "vault"), el("dd", {}, r.vault),
@@ -81,6 +86,14 @@ $("#sign").addEventListener("click", async () => {
   finally { btn.disabled = false; btn.classList.remove("spin"); btn.textContent = "Sign"; }
 });
 $("#copy").addEventListener("click", (e) => copy(($("#sig") as HTMLTextAreaElement).value, e.currentTarget as HTMLButtonElement));
+let stopQr: (() => void) | null = null;
+$("#qrsig").addEventListener("click", async () => { if (stopQr) { stopQr(); stopQr = null; return; } stopQr = await qr.show($("#qrbox"), ($("#sig") as HTMLTextAreaElement).value); });
+let scanning: { stop: () => void } | null = null;
+$("#scanreq").addEventListener("click", () => {
+  if (scanning) { scanning.stop(); scanning = null; return; }
+  const sc = qr.scan($("#scanbox")); scanning = sc;
+  sc.done.then((text) => { ($("#req") as HTMLTextAreaElement).value = text; $("#req").dispatchEvent(new Event("input")); scanning = null; }).catch(() => { scanning = null; });
+});
 $("#dl").addEventListener("click", () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([($("#sig") as HTMLTextAreaElement).value], { type: "application/json" }));
@@ -91,6 +104,7 @@ function toAction(r: SignRequest): Action {
   const expirySlot = BigInt(r.expirySlot);
   const a = r.action;
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), expirySlot };
+  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), expirySlot };
   if (a.kind === "Rotate") { const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, expirySlot }; }
   return { kind: "Close", to: new PublicKey(a.to), expirySlot };
 }

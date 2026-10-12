@@ -8,3 +8,4 @@ test-ledger/
 .env
 .env.*
 !.env.example
+dist-signer/

@@ -1,0 +1,24 @@
+{
+  "name": "lamport-vault-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && vite build -c vite.signer.config.ts && cp dist-signer/signer.html dist/signer.html",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lamport-robotics/lms": "file:../sdk/packages/lms",
+    "@lamport-robotics/vault": "file:../sdk/packages/vault",
+    "@solana/web3.js": "^1.95.8",
+    "@wallet-standard/app": "^1.1.0",
+    "@wallet-standard/base": "^1.1.0",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.0.11",
+    "vite-plugin-singlefile": "^2.1.0"
+  }
+}

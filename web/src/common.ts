@@ -1,0 +1,46 @@
+import { Connection, PublicKey } from "@solana/web3.js";
+
+export const CLUSTER = "devnet" as const;
+export const RPC_URL = "https://api.devnet.solana.com";
+export const EXPLORER = (sig: string) => `https://explorer.solana.com/tx/${sig}?cluster=${CLUSTER}`;
+export const EXPLORER_ADDR = (a: string) => `https://explorer.solana.com/address/${a}?cluster=${CLUSTER}`;
+
+export const rpc = new Connection(RPC_URL, "confirmed");
+
+export const short = (s: string, n = 4) => (s.length > n * 2 + 1 ? `${s.slice(0, n)}…${s.slice(-n)}` : s);
+export const sol = (lamports: number | bigint) => (Number(lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 4 });
+export const b64 = (u: Uint8Array) => btoa(String.fromCharCode(...u));
+export const unb64 = (s: string) => Uint8Array.from(atob(s.trim()), (c) => c.charCodeAt(0));
+
+export function isPubkey(s: string): boolean { try { new PublicKey(s.trim()); return true; } catch { return false; } }
+
+export function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: (Node | string | null | undefined)[]): HTMLElementTagNameMap[K] {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) { if (k === "class") n.className = v; else if (k === "html") n.innerHTML = v; else n.setAttribute(k, v); }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+}
+export const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
+
+export async function copy(text: string, btn?: HTMLButtonElement) {
+  try { await navigator.clipboard.writeText(text); if (btn) { const t = btn.textContent; btn.textContent = "copied"; setTimeout(() => (btn.textContent = t), 900); } } catch { /* clipboard blocked */ }
+}
+
+/** a signing request handed to the cold signer, and what it hands back */
+export interface SignRequest {
+  v: 1;
+  cluster: string;
+  vault: string;
+  lmsPubkey: string;   // base64, 56 bytes
+  nextQ: number;
+  expirySlot: string;  // decimal
+  action: { kind: "TransferSol"; to: string; lamports: string } | { kind: "Rotate"; newLmsPubkey: string } | { kind: "Close"; to: string };
+}
+export interface SignedBlob {
+  v: 1;
+  vault: string;
+  q: number;
+  action: SignRequest["action"];
+  expirySlot: string;
+  signature: string;   // base64
+}

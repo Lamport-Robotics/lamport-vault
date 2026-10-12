@@ -5,7 +5,8 @@
 import "./polyfill.ts";
 import "./style.css";
 import { PublicKey } from "@solana/web3.js";
-import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial } from "@lamport-robotics/lms";
+import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, CLUSTERS } from "@lamport-robotics/lms";
+import { LAMPORT_VAULT_PROGRAM_ID } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
@@ -57,7 +58,7 @@ $("#req").addEventListener("input", () => {
       el("dt", {}, "action"), el("dd", {}, line),
       el("dt", {}, "leaf q"), el("dd", {}, String(r.nextQ)),
       el("dt", {}, "key generation"), el("dd", {}, String(r.generation ?? 0)),
-      el("dt", {}, "valid until slot"), el("dd", {}, r.expirySlot),
+      el("dt", {}, "valid"), el("dd", {}, `slot ${r.issuedSlot} to ${r.expirySlot} (about ${Math.round((Number(r.expirySlot) - Number(r.issuedSlot)) * 0.4 / 60)} min)`),
       el("dt", {}, "cluster"), el("dd", {}, r.cluster)));
   } catch (e) { v.append(el("div", { class: "err" }, String((e as Error).message))); }
 });
@@ -72,12 +73,13 @@ $("#sign").addEventListener("click", async () => {
     btn.disabled = true; btn.classList.add("spin"); btn.textContent = "deriving key";
     const master = mnemonicToMaster(words, ($("#pass") as HTMLInputElement).value);
     const pub = unb64(req.lmsPubkey);
-    const found = await recoverKey(master, pub, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
+    const scope = { genesisHash: (CLUSTERS as Record<string, { genesisHash: string }>)[req.cluster === "mainnet-beta" ? "mainnet" : req.cluster]?.genesisHash ?? CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
     const action = toAction(req);
     const message = vaultMessage(new PublicKey(req.vault), req.generation ?? 0, encodeAction(action));
     const signature = found.key.sign(req.nextQ, message);
-    const blob: SignedBlob = { v: 1, vault: req.vault, q: req.nextQ, generation: req.generation ?? 0, action: req.action, expirySlot: req.expirySlot, signature: b64(signature) };
+    const blob: SignedBlob = { v: 1, vault: req.vault, q: req.nextQ, generation: req.generation ?? 0, action: req.action, issuedSlot: req.issuedSlot, expirySlot: req.expirySlot, signature: b64(signature) };
     ($("#sig") as HTMLTextAreaElement).value = JSON.stringify(blob);
     $("#out").classList.remove("hidden");
     ($("#words") as HTMLTextAreaElement).value = ""; ($("#pass") as HTMLInputElement).value = "";
@@ -102,11 +104,12 @@ $("#dl").addEventListener("click", () => {
 
 function toAction(r: SignRequest): Action {
   const expirySlot = BigInt(r.expirySlot);
+  const issuedSlot = BigInt(r.issuedSlot);
   const a = r.action;
-  if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), expirySlot };
-  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), expirySlot };
-  if (a.kind === "Rotate") { const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, expirySlot }; }
-  return { kind: "Close", to: new PublicKey(a.to), expirySlot };
+  if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
+  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
+  if (a.kind === "Rotate") { const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, issuedSlot, expirySlot }; }
+  return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
 }
 
 // keep the key-derivation code path warm so the first sign is not a cold import

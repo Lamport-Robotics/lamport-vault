@@ -65,4 +65,8 @@ pub enum VaultError {
     HistoryFull, // 6028
     #[msg("Rotate must keep the vault's LMS and LM-OTS typecodes")]
     RotateTypeMismatch, // 6029
+    #[msg("action issued in the future: issued_slot is beyond the current slot")]
+    IssuedInFuture, // 6030
+    #[msg("validity window is inverted or longer than MAX_VALIDITY_SLOTS")]
+    InvalidValidityWindow, // 6031
 }

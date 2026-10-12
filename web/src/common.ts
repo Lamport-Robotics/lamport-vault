@@ -2,6 +2,9 @@ import { Connection, PublicKey } from "@solana/web3.js";
 
 export const CLUSTER = "devnet" as const;
 export const RPC_URL = "https://api.devnet.solana.com";
+export const GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; // devnet; mainnet 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
+/** ~400 ms per slot: a rough wall-clock for a slot number relative to `now` */
+export const slotToDate = (slot: bigint | number, nowSlot: number) => new Date(Date.now() + (Number(slot) - nowSlot) * 400);
 export const EXPLORER = (sig: string) => `https://explorer.solana.com/tx/${sig}?cluster=${CLUSTER}`;
 export const EXPLORER_ADDR = (a: string) => `https://explorer.solana.com/address/${a}?cluster=${CLUSTER}`;
 
@@ -34,6 +37,7 @@ export interface SignRequest {
   lmsPubkey: string;   // base64, 56 bytes
   nextQ: number;       // the leaf to sign with (first free one, or the signer's lane)
   generation: number;  // key generation of the vault at request time; part of the signed message
+  issuedSlot: string;  // decimal; the window issued..expiry is at most ~1 day of slots
   expirySlot: string;  // decimal
   action:
     | { kind: "TransferSol"; to: string; lamports: string }
@@ -47,6 +51,7 @@ export interface SignedBlob {
   q: number;
   action: SignRequest["action"];
   generation?: number;
+  issuedSlot: string;
   expirySlot: string;
   signature: string;   // base64
 }

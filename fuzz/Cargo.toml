@@ -1,0 +1,72 @@
+# Fuzz targets for the LMS verifier and the vault's pure state logic.
+#
+#   cargo install cargo-fuzz            (needs a nightly toolchain)
+#   cd fuzz && python3 gen_seeds.py     (seed corpora from kat/)
+#   cargo +nightly fuzz run lms_verify corpus/lms_verify seeds/lms_verify -- -max_total_time=600
+#
+# This crate is its own workspace root on purpose: cargo-fuzz builds with
+# sanitizer flags that must not leak into the program build.
+[package]
+name = "lamport-vault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+name = "lamport_vault_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anchor-lang = "0.32.1"
+lamport-lms = { path = "../programs/lms", features = ["sign"] }
+lamport-vault = { path = "../programs/lamport-vault", features = ["no-entrypoint"] }
+
+[[bin]]
+name = "lms_parse"
+path = "fuzz_targets/lms_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lms_verify"
+path = "fuzz_targets/lms_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "action_decode"
+path = "fuzz_targets/action_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_history"
+path = "fuzz_targets/key_history.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "leaf_bitmap"
+path = "fuzz_targets/leaf_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[workspace]

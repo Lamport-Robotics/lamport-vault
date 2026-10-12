@@ -1,0 +1,113 @@
+name: verify
+
+# Reproducible build of both programs with solana-verify (Docker) and, on a
+# release tag, comparison with the program deployed on that cluster.
+#
+#   push to main        build, print hashes, upload the .so files
+#   tag devnet-<x>      same, then compare with devnet and fail on mismatch
+#   tag mainnet-<x>     same, against mainnet-beta
+#
+# Deploy from the artifact this job uploads, then push the tag: the hash it
+# prints is the one that must be on chain. docs/VERIFY.md has the full story.
+
+on:
+  push:
+    branches: [main]
+    tags: ["devnet-*", "mainnet-*"]
+  workflow_dispatch:
+
+env:
+  SOLANA_VERIFY_VERSION: "0.5.2"
+  # Agave 2.3.13 image; cargo-build-sbf inside it reads tools-version from
+  # the program's Cargo.toml and fetches platform-tools v1.56.
+  BASE_IMAGE: solanafoundation/solana-verifiable-build:2.3.13
+  PLATFORM_TOOLS: v1.56
+  # The anchor CLI behind `anchor build` and scripts/verify-deploy.sh; the
+  # crate versions are fixed by Cargo.lock.
+  ANCHOR_VERSION: "0.32.1"
+
+jobs:
+  build:
+    name: ${{ matrix.lib }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: lamport-vault
+            lib: lamport_vault
+            program_id: B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
+          - crate: pq-registry
+            lib: pq_registry
+            program_id: 48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the toolchain pins
+        run: |
+          grep -q "tools-version = \"$PLATFORM_TOOLS\"" programs/${{ matrix.crate }}/Cargo.toml \
+            || { echo "programs/${{ matrix.crate }}/Cargo.toml must pin tools-version = \"$PLATFORM_TOOLS\""; exit 1; }
+          grep -A1 'name = "anchor-lang"' Cargo.lock | grep -q 'version = "0.32.' \
+            || { echo "Cargo.lock must resolve anchor-lang 0.32.x"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache solana-verify
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/solana-verify
+          key: solana-verify-${{ env.SOLANA_VERIFY_VERSION }}-${{ runner.os }}
+
+      - name: Install solana-verify
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo install --locked solana-verify --version "$SOLANA_VERIFY_VERSION"
+
+      - name: Build ${{ matrix.lib }} in ${{ env.BASE_IMAGE }}
+        run: solana-verify build --library-name ${{ matrix.lib }} --base-image "$BASE_IMAGE"
+
+      - name: Hash
+        id: hash
+        run: |
+          so=target/deploy/${{ matrix.lib }}.so
+          hash=$(solana-verify get-executable-hash "$so" | tail -n1)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${{ matrix.lib }}"
+            echo
+            echo '```'
+            echo "commit   $GITHUB_SHA"
+            echo "hash     $hash"
+            echo "size     $(wc -c < "$so") bytes"
+            echo "image    $BASE_IMAGE (platform-tools $PLATFORM_TOOLS)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ matrix.lib }} $hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.lib }}-${{ github.sha }}
+          path: target/deploy/${{ matrix.lib }}.so
+          if-no-files-found: error
+
+      - name: Compare with the deployed program
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          case "$GITHUB_REF_NAME" in
+            devnet-*)  url=https://api.devnet.solana.com ;;
+            mainnet-*) url=https://api.mainnet-beta.solana.com ;;
+            *) echo "tag must start with devnet- or mainnet-"; exit 1 ;;
+          esac
+          built="${{ steps.hash.outputs.hash }}"
+          onchain=$(solana-verify get-program-hash --url "$url" ${{ matrix.program_id }} | tail -n1)
+          echo "built     $built"
+          echo "on-chain  $onchain  (${{ matrix.program_id }} on $url)"
+          {
+            echo
+            echo "on-chain \`$onchain\` at \`$url\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$built" != "$onchain" ]; then
+            echo "MISMATCH: the program on $url is not this commit" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "MATCH" | tee -a "$GITHUB_STEP_SUMMARY"

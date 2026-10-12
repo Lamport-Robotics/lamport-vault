@@ -3,7 +3,7 @@ import "./style.css";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
-import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, b64, copy, el, isPubkey, rpc, short, sol, unb64, type SignRequest, type SignedBlob } from "./common.ts";
+import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
 import { holdings, destinationTokenAccount, toBase, type Holding } from "./tokens.ts";
@@ -16,6 +16,7 @@ let vault: VaultAccount | null = null;
 let vaultLamports = 0;
 let vaultTokens: Holding[] = [];
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
+const SCOPE = { genesisHash: GENESIS_HASH, programId: LAMPORT_VAULT_PROGRAM_ID };
 let lastRun: { vault: string; q: number; kind: string; sigs: string[] } | null = null;
 type Tab = "deposit" | "withdraw" | "rotate" | "registry";
 let tab: Tab = "deposit";
@@ -136,7 +137,7 @@ async function newVault(box: HTMLElement) {
   const prog = el("div", { class: "ok" }, "Deriving the key…");
   const btn = el("button", { class: "btn primary wide", id: "mk", disabled: "" }, "I wrote them down — create the vault");
   box.append(el("div", { class: "notice warn", style: "margin-top:22px" }, "These 24 words are the vault. Paper or metal, never a screenshot. Nothing here stores them."), grid, prog, el("div", { style: "margin-top:16px" }, btn), el("div", { class: "err hidden", id: "mkerr" }));
-  const key = await LmsPrivateKey.generateAsync(deriveKeyMaterial(mnemonicToMaster(words), 0, LMS_SHA256_M32_H10), { onProgress: (d, t) => (prog.textContent = `Deriving the key ${Math.round((d / t) * 100)}%`) });
+  const key = await LmsPrivateKey.generateAsync(deriveKeyMaterial(mnemonicToMaster(words), 0, SCOPE, LMS_SHA256_M32_H10), { onProgress: (d, t) => (prog.textContent = `Deriving the key ${Math.round((d / t) * 100)}%`) });
   prog.textContent = `Address ${findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, key.publicKey).address.toBase58()}`;
   btn.removeAttribute("disabled");
   btn.addEventListener("click", async () => {
@@ -274,6 +275,17 @@ function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest[
   return { node, read };
 }
 
+/** in-panel confirmation: the action in words, a validity note, Confirm / Cancel */
+function confirmPanel(host: HTMLElement, what: string, note: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const box = el("div", { class: "notice", style: "margin-top:16px" }, el("div", { class: "mono", style: "font-size:13px;margin-bottom:6px" }, what), el("div", { class: "quiet", style: "font-size:12.5px;margin-bottom:12px" }, note),
+      el("div", { class: "actions" }, el("button", { class: "btn primary sm", id: "cf-yes" }, "Confirm"), el("button", { class: "link quiet", id: "cf-no" }, "Cancel")));
+    host.append(box);
+    $("#cf-yes", box).addEventListener("click", () => { box.remove(); resolve(true); });
+    $("#cf-no", box).addEventListener("click", () => { box.remove(); resolve(false); });
+  });
+}
+
 function describe(a: SignRequest["action"]): string {
   if (a.kind === "TransferSol") return `Send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`;
   if (a.kind === "TransferToken") return `Send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
@@ -281,11 +293,11 @@ function describe(a: SignRequest["action"]): string {
   return `Close the vault and send everything to ${a.to}`;
 }
 
-function toAction(a: SignRequest["action"], expirySlot: bigint): Action {
-  if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), expirySlot };
-  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), expirySlot };
-  if (a.kind === "Rotate") return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), expirySlot };
-  return { kind: "Close", to: new PublicKey(a.to), expirySlot };
+function toAction(a: SignRequest["action"], issuedSlot: bigint, expirySlot: bigint): Action {
+  if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
+  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
+  if (a.kind === "Rotate") return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), issuedSlot, expirySlot };
+  return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
 }
 
 function coldFlow(scope: Scope) {
@@ -297,7 +309,8 @@ function coldFlow(scope: Scope) {
       el("label", { class: "field" }, el("span", {}, "Request · for the cold signer"), el("textarea", { class: "mono", id: "reqtxt", rows: "3", readonly: "" })),
       el("div", { class: "actions" }, el("button", { class: "link", id: "cpreq" }, "Copy"), el("button", { class: "link", id: "qrreq" }, "Show QR"), el("a", { class: "link quiet", href: "/signer.html", download: "lamport-vault-signer.html" }, "Download the signer")),
       el("div", { id: "qrbox", class: "qr", style: "margin-top:14px" }),
-      el("p", { class: "quiet", style: "margin-top:14px" }, "Open the signer on a machine with no network. Paste or scan the request, type the words, bring the signature back here. The request stays valid for about an hour.")),
+      el("p", { class: "quiet", style: "margin-top:14px" }, "Open the signer on a machine with no network. Paste or scan the request, type the words, bring the signature back here."),
+      el("p", { class: "quiet mono", id: "reqvalid", style: "font-size:12px" })),
     el("div", { style: "margin-top:22px" },
       el("label", { class: "field" }, el("span", {}, "Signature · from the cold signer"), el("textarea", { class: "mono", id: "sigtxt", rows: "3", placeholder: "" })),
       el("div", { class: "actions" }, el("button", { class: "btn primary", id: "run" }, "Verify and execute"), el("button", { class: "link quiet", id: "scansig" }, "Scan QR")),
@@ -309,8 +322,9 @@ function coldFlow(scope: Scope) {
     try {
       const slot = await rpc.getSlot("confirmed");
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
-      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, expirySlot: String(slot + 9000), action: form.read() };
+      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, issuedSlot: String(slot), expirySlot: String(slot + 9000), action: form.read() };
       ($("#reqtxt", s) as HTMLTextAreaElement).value = JSON.stringify(req); $("#reqout", s).classList.remove("hidden");
+      $("#reqvalid", s).textContent = `Valid until about ${slotToDate(slot + 9000, slot).toLocaleTimeString()} (slot ${slot + 9000}).`;
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
   $("#cpreq", s).addEventListener("click", (e) => copy(($("#reqtxt", s) as HTMLTextAreaElement).value, e.currentTarget as HTMLButtonElement));
@@ -328,7 +342,7 @@ function coldFlow(scope: Scope) {
       const blob = JSON.parse(($("#sigtxt", s) as HTMLTextAreaElement).value) as SignedBlob;
       if (blob.v !== 1 || blob.vault !== vaultAddr!.toBase58()) throw new Error("This signature belongs to another vault.");
       if ((blob.generation ?? 0) !== v.generation) throw new Error("This signature was made for an earlier key generation. Prepare a new request.");
-      await stageAndExecute(toAction(blob.action, BigInt(blob.expirySlot)), unb64(blob.signature), blob.q, $("#steps", s), $("#run", s) as HTMLButtonElement);
+      await stageAndExecute(toAction(blob.action, BigInt(blob.issuedSlot ?? blob.expirySlot), BigInt(blob.expirySlot)), unb64(blob.signature), blob.q, $("#steps", s), $("#run", s) as HTMLButtonElement);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
   return s;
@@ -355,14 +369,15 @@ function hotFlow(scope: Scope) {
         const words = ($("#hwords", s) as HTMLTextAreaElement).value.trim().toLowerCase().split(/\s+/).join(" ");
         if (!isValidMnemonic(words)) throw new Error("That is not a valid 24-word phrase.");
         btn.setAttribute("disabled", ""); btn.classList.add("spin");
-        const found = await recoverKey(mnemonicToMaster(words, ($("#hpass", s) as HTMLInputElement).value), v.lmsPubkey, { onProgress: (d, t) => (btn.textContent = `Deriving ${Math.round((d / t) * 100)}%`) });
+        const found = await recoverKey(mnemonicToMaster(words, ($("#hpass", s) as HTMLInputElement).value), v.lmsPubkey, SCOPE, { onProgress: (d, t) => (btn.textContent = `Deriving ${Math.round((d / t) * 100)}%`) });
         if (!found) throw new Error("These words do not open this vault.");
         hotKey = found.key;
       }
       const a = form.read();
-      if (!confirm(describe(a) + "\n\nSign this with one of the vault's one-time keys?")) return;
       const slot = await rpc.getSlot("confirmed");
-      const action = toAction(a, BigInt(slot + 1500));
+      const until = slotToDate(slot + 1500, slot);
+      if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.`))) return;
+      const action = toAction(a, BigInt(slot), BigInt(slot + 1500));
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const leaves = 2 ** lmsParams(parseLmsPublicKey(v.lmsPubkey).lmsType).h;
       if (leaves - v.spent <= 1 && action.kind !== "Rotate") throw new Error("Last one-time key: only a rotation is allowed now.");

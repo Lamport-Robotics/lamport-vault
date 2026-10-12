@@ -27,14 +27,32 @@ pub struct LmsPublicKey {
 }
 
 impl LmsPublicKey {
-    /// Parses the 56-byte form (Algorithm 6, steps 1 and 2).
+    /// Parses the 56-byte form (Algorithm 6, steps 1 and 2) under the default
+    /// LM-OTS policy, [`LmotsType::ACCEPTED`] (W4 only). This is the parser
+    /// the vault program uses.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        Self::parse_with(bytes, LmotsType::ACCEPTED)
+    }
+
+    /// Parses the 56-byte form accepting every Table 1 LM-OTS row
+    /// ([`LmotsType::ALL`]): W1, W2, W4 and W8. For tooling and
+    /// interoperability tests; the program never calls this.
+    pub fn parse_any(bytes: &[u8]) -> Result<Self, Error> {
+        Self::parse_with(bytes, LmotsType::ALL)
+    }
+
+    /// Parses the 56-byte form, admitting only the LM-OTS parameter sets in
+    /// `lmots_accepted`. The signature parser and verifier then follow the
+    /// key: a signature's typecodes must equal the key's.
+    pub fn parse_with(bytes: &[u8], lmots_accepted: &[LmotsType]) -> Result<Self, Error> {
         if bytes.len() != LMS_PUBLIC_KEY_LEN {
             return Err(Error::PublicKeyLength);
         }
         let lms_type = LmsType::from_typecode(u32::from_be_bytes(bytes[0..4].try_into().unwrap()))?;
-        let lmots_type =
-            LmotsType::from_typecode(u32::from_be_bytes(bytes[4..8].try_into().unwrap()))?;
+        let lmots_type = LmotsType::from_typecode_in(
+            u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+            lmots_accepted,
+        )?;
         let mut i = [0u8; 16];
         i.copy_from_slice(&bytes[8..24]);
         let mut t1 = [0u8; N];

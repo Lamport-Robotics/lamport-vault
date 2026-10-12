@@ -19,9 +19,12 @@
 //! ```
 //!
 //! `i = 0xfffd` never occurs as a chain index (`i < 265`) so this input is
-//! distinct from every other use of `H` in the scheme. Verifiers never look at
-//! how `C` was produced; the independent known-answer vectors in `kat/` use a
-//! random `C` and verify under this crate just the same.
+//! distinct from every other use of `H` in the scheme. It is also the
+//! convention of Cisco's hash-sigs, which produced the RFC 8554 Appendix F
+//! vectors: given test case 2's SEED and I, [`LmsPrivateKey::sign_with_tree`]
+//! reproduces the RFC's signatures byte for byte (`tests/vectors.rs`).
+//! Verifiers never look at how `C` was produced; the hsslms vectors in `kat/`
+//! use a random `C` and verify under this crate just the same.
 
 use alloc::vec::Vec;
 

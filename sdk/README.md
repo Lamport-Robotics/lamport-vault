@@ -19,9 +19,10 @@ npm run bench
 ## `@lamport-robotics/lms`
 
 Parameter sets: `LMOTS_SHA256_N32_W4` (typecode 3; W1/W2/W8 are in the tables and work the same way)
-and `LMS_SHA256_M32_H5 … H20` (typecodes 5–8). Private keys follow RFC 8554 Appendix A: everything is
-derived from a 32-byte `SEED` and a 16-byte `I`, so a key is fully described by `(lmsType, lmotsType,
-seed, I)`.
+and `LMS_SHA256_M32_H5 … H20` (typecodes 5–8). The vault and the registry accept H5, H10 and H15 with
+W4 (`VAULT_LMS_TYPES`); H20 verifies here but is refused on chain. Private keys follow RFC 8554
+Appendix A: everything is derived from a 32-byte `SEED` and a 16-byte `I`, so a key is fully described
+by `(lmsType, lmotsType, seed, I)`.
 
 ```ts
 import {
@@ -72,6 +73,7 @@ I_k     = HMAC-SHA256(key = "lamport-vault/lms-id/v1",   msg = master || u32be(k
 
 `deriveLmsInputs(master, k)` returns `(SEED_k, I_k)`; `deriveKeyMaterial` adds the typecodes;
 `deriveRegistryKeyMaterial` uses the reserved index `k = 0xFFFFFFFF` for the pq-registry commitment key.
+`issued_slot` and the v2 derivation are described in [`docs/DESIGN.md`](../docs/DESIGN.md).
 
 Recovery:
 
@@ -104,12 +106,12 @@ await signer.createVault();                           // one transaction; vault 
 
 // Deposit: a plain SystemProgram.transfer to signer.vault, from anywhere.
 
-// Withdraw: reads the bitmap + generation, picks a free leaf, signs, stages, executes.
+// Withdraw: reads the bitmap + generation, picks a free leaf, signs, sends.
 const res = await signer.execute({ kind: "TransferSol", to, lamports: 1_000_000_000n });
 res.q;            // leaf used
 res.generation;   // key generation the message was bound to
-res.signatures;   // [open_sig_buffer, write_sig, write_sig, execute] for an H10 key
-res.mode;         // "staged"; with { mode: "direct-v1" } one execute_direct transaction v1 (see below), "auto" tries direct first
+res.mode;         // "staged" (default): [open_sig_buffer, write_sig, write_sig, execute] for an H10 key, in res.signatures
+                  // "direct-v1": one execute_direct transaction v1; "auto": direct first, staged if the RPC or wallet refuses v1
 
 // Other actions
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
@@ -138,7 +140,14 @@ const robot = new VaultSigner({ rpc, key, payer, reserve: async (q) => store.mar
 read a decoded account; `signer.nextQ()` is the lane's next free leaf (`undefined` once exhausted).
 
 After a `Rotate`, construct the next `VaultSigner` with the new key and `vault: signer.vault`; the
-vault PDA is derived from the *initial* key and never changes.
+vault PDA is derived from the *initial* key and never changes. A vault keeps the hashes of its past
+keys, up to `VAULT_MAX_KEY_HISTORY` (128; a commitment `COMMITMENT_MAX_KEY_HISTORY`, 32), and refuses
+any of them (`KeyReused`) or a rotate past the cap (`HistoryFull`). With a full history the vault still
+spends and `Close`s; the next key gets a new vault, created the same way.
+
+`decodeVault` and `decodeCommitment` accept account version 2 (`VAULT_ACCOUNT_VERSION`,
+`COMMITMENT_ACCOUNT_VERSION`) and throw on anything else; there is no in-place migration, an older
+account is closed and recreated.
 
 The registry:
 

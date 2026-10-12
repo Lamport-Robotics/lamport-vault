@@ -16,6 +16,7 @@ import {
   currentSlot,
   expectError,
   expectRejects,
+  expiredWindow,
   fund,
   keyHash,
   leafUsed,
@@ -27,7 +28,11 @@ import {
   sigBufferPda,
   vaultMessage,
   vaultPda,
+  window,
 } from "./helpers";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 describe("lamport-vault", () => {
   const provider = makeProvider();
@@ -45,8 +50,11 @@ describe("lamport-vault", () => {
 
   /** `MAX_KEY_HISTORY` of the deployed build (128, or 2 with `--features small-history`). */
   const MAX_KEY_HISTORY = Number(program.idl.constants.find((c) => c.name === "maxKeyHistory")!.value);
+  /** `MAX_VALIDITY_SLOTS`: the longest window the program accepts (216 000, about a day). */
+  const MAX_VALIDITY_SLOTS = Number(program.idl.constants.find((c) => c.name === "maxValiditySlots")!.value);
 
-  const FAR = () => currentSlot(provider).then((s) => s + 5000);
+  /** A window issued now, open for 5 000 slots. */
+  const FAR = () => window(provider);
 
   async function createVault(key: LmsKey): Promise<PublicKey> {
     const [pda] = vaultPda(program.programId, key.pubkey());
@@ -321,10 +329,22 @@ describe("lamport-vault", () => {
   });
 
   it("expired", async () => {
-    const slot = await currentSlot(provider);
-    const action = Action.transferSol(recipient.publicKey, 1000, Math.max(0, slot - 1));
+    const action = Action.transferSol(recipient.publicKey, 1000, await expiredWindow(provider));
     const buf = await stage(vault, keyA, 10, action);
     await expectError(execute(vault, buf, [meta(recipient.publicKey, true)]), "ActionExpired");
+    expect(await isUsed(vault, 10)).to.eq(false);
+  });
+
+  it("issued in the future", async () => {
+    const slot = await currentSlot(provider);
+    const action = Action.transferSol(recipient.publicKey, 1000, { issued: slot + 1000, expiry: slot + 2000 });
+    const buf = await stage(vault, keyA, 10, action);
+    await expectError(execute(vault, buf, [meta(recipient.publicKey, true)]), "IssuedInFuture");
+    expect(await isUsed(vault, 10)).to.eq(false);
+    // a zero-length window ahead of the clock: still not issued (staging takes a few slots, so stay well ahead)
+    const far = Action.transferSol(recipient.publicKey, 1000, { issued: slot + 500, expiry: slot + 500 });
+    const buf2 = await stage(vault, keyA, 10, far);
+    await expectError(execute(vault, buf2, [meta(recipient.publicKey, true)]), "IssuedInFuture");
     expect(await isUsed(vault, 10)).to.eq(false);
   });
 
@@ -739,7 +759,7 @@ describe("lamport-vault", () => {
     await fund(provider, vaultP, 0.2);
     const sizeBefore = (await connection.getAccountInfo(vaultP, "confirmed"))!.data.length;
 
-    const expiredRotate = async () => Action.rotate(keyQ.pubkey(), Math.max(0, (await currentSlot(provider)) - 1));
+    const expiredRotate = async () => Action.rotate(keyQ.pubkey(), await expiredWindow(provider));
     const stale = await stage(vaultP, keyP, 0, await expiredRotate());
     await expectError(execute(vaultP, stale, []), "ActionExpired");
     let v = await fetchVault(vaultP);
@@ -766,5 +786,92 @@ describe("lamport-vault", () => {
     expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyQ.pubkey());
     expect(v.generation).to.eq(1);
     expect(v.spent).to.eq(0);
+  });
+  it("validity window: at most one day; a far expiry on an old signature is unrepresentable", async () => {
+    expect(MAX_VALIDITY_SLOTS).to.eq(216_000);
+    const keyW = LmsKey.random(LMS_H5);
+    const vaultW = await createVault(keyW);
+    await fund(provider, vaultW, 0.2);
+    const slot = await currentSlot(provider);
+
+    // One slot past the cap: refused, the leaf is not burned.
+    const tooLong = Action.transferSol(recipient.publicKey, 1000, { issued: slot, expiry: slot + MAX_VALIDITY_SLOTS + 1 });
+    const b1 = await stage(vaultW, keyW, 0, tooLong);
+    await expectError(execute(vaultW, b1, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+    // Issued at 0 with the largest expiry the field holds: the signer cannot grant itself a far future.
+    const forever = Action.transferSol(recipient.publicKey, 1000, { issued: 0, expiry: new BN("18446744073709551615") });
+    const b2 = await stage(vaultW, keyW, 0, forever);
+    await expectError(execute(vaultW, b2, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+    // Issued a day ago with a far expiry: the window, not the clock, is what fails.
+    const issuedBefore = Math.max(0, slot - 10);
+    const longTail = Action.transferSol(recipient.publicKey, 1000, { issued: issuedBefore, expiry: issuedBefore + MAX_VALIDITY_SLOTS + 1 });
+    const b3 = await stage(vaultW, keyW, 0, longTail);
+    await expectError(execute(vaultW, b3, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+
+    // Exactly one day is accepted (the clock has moved a few slots since `slot`, the window has not).
+    const now = await currentSlot(provider);
+    const day = Action.transferSol(recipient.publicKey, 1000, { issued: now, expiry: now + MAX_VALIDITY_SLOTS });
+    const b4 = await stage(vaultW, keyW, 0, day);
+    await execute(vaultW, b4, [meta(recipient.publicKey, true)]);
+    expect(await isUsed(vaultW, 0)).to.eq(true);
+    // A window that closes in the signing slot is the shortest one; it is accepted when it still holds.
+    const rotateWindow = await window(provider, 0);
+    rotateWindow.expiry = Number(rotateWindow.issued) + 200; // leave time for the three staging transactions
+    const b5 = await stage(vaultW, keyW, 1, Action.transferSol(recipient.publicKey, 1000, rotateWindow));
+    await execute(vaultW, b5, [meta(recipient.publicKey, true)]);
+    expect(await spent(vaultW)).to.eq(2);
+    // The same rules apply to Rotate, with the same error.
+    const keyX = LmsKey.random(LMS_H5);
+    const b6 = await stage(vaultW, keyW, 2, Action.rotate(keyX.pubkey(), { issued: now, expiry: now + MAX_VALIDITY_SLOTS + 1 }));
+    await expectError(execute(vaultW, b6, []), "InvalidValidityWindow");
+    expect((await fetchVault(vaultW)).generation).to.eq(0);
+  });
+
+  it("signer journal: restored from an old backup, only Rotate; after it lands, fresh", async () => {
+    // The SDK's VaultSigner with a FileLeafJournal against the real chain.
+    const { vault: sdk, lms } = loadSdk();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lamport-journal-"));
+    const journalPath = path.join(dir, "journal.json");
+    const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
+    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed", journal: new sdk.FileLeafJournal(journalPath) });
+    const live = signer();
+    const created = await live.createVault();
+    const vaultJ = new PublicKey(created.vault.toBase58());
+    await fund(provider, vaultJ, 0.2);
+    const transfer = { kind: "TransferSol", to: recipient.publicKey, lamports: 1000n };
+    const r0 = await live.execute(transfer);
+    expect(r0.q).to.eq(0);
+    expect(r0.action.issuedSlot).to.be.a("bigint");
+    expect(Number(r0.action.expirySlot - r0.action.issuedSlot)).to.eq(300); // the default window
+    const backup = fs.readFileSync(journalPath, "utf8");
+    expect(JSON.parse(backup)).to.deep.eq({ v: 1, generation: 0, spent: 0, reserved: [0] });
+    const r1 = await live.execute(transfer);
+    expect(r1.q).to.eq(1);
+    expect(await spent(vaultJ)).to.eq(2);
+
+    // Restore the day-1 backup: the chain shows a spent leaf the journal never reserved.
+    fs.writeFileSync(journalPath, backup);
+    const restored = signer();
+    await expectRejects(restored.execute(transfer), /stale signer state.*Only Rotate/);
+    await expectRejects(restored.sign({ kind: "Close", to: recipient.publicKey }), /stale signer state/);
+    expect(await spent(vaultJ)).to.eq(2);
+    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq({ v: 1, generation: 0, spent: 0, reserved: [0] });
+    // Rotate goes through (staged), and once it lands the journal is fresh for generation 1.
+    const next = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
+    const rot = await restored.execute({ kind: "Rotate", newLmsPubkey: next.publicKey }, { allowForeignKey: true });
+    expect(rot.q).to.eq(2);
+    const v = await fetchVault(vaultJ);
+    expect(v.generation).to.eq(1);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(Buffer.from(next.publicKey));
+    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq({ v: 1, generation: 1, spent: 0, reserved: [] });
+    const fresh = new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(journalPath) });
+    const r2 = await fresh.execute(transfer);
+    expect(r2.q).to.eq(0);
+    expect(r2.generation).to.eq(1);
+    expect(await spent(vaultJ)).to.eq(1);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -10,13 +10,14 @@ import { fileURLToPath } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { fromHex, toHex } from "../../lms/src/index.ts";
 import { commitmentAccountSize, COMMITMENT_MAX_KEY_HISTORY, encodeCommitment, encodePqSigBuffer, encodeSigBuffer, encodeVault, KEY_HASH_LEN, usedKeyHash, vaultAccountSize, VAULT_MAX_KEY_HISTORY } from "../src/accounts.ts";
-import { type Action, encodeAction } from "../src/action.ts";
+import { type Action, ACTION_SIZES, encodeAction, MAX_VALIDITY_SLOTS } from "../src/action.ts";
 import { ACCOUNT, IX } from "../src/discriminator.ts";
 import { createVaultInstruction, openSigBufferInstruction, writeSigInstruction } from "../src/instructions.ts";
 import { MESSAGE_VERSION, registryMessage, vaultMessage } from "../src/message.ts";
 import { findCommitmentPda, findPqSigBufferPda, findSigBufferPda, findVaultPda, vaultId } from "../src/pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "../src/programIds.ts";
 import { commitInstruction, openPqBufferInstruction } from "../src/registry.ts";
+import { writeDerivationKat } from "./write-derivation-kat.ts";
 
 const out = fileURLToPath(new URL("../../../../kat/vault_encoding.json", import.meta.url));
 
@@ -25,7 +26,9 @@ const PK_22 = new PublicKey(new Uint8Array(32).fill(0x22));
 const H5_PUBKEY = fromHex("000000050000000300112233445566778899aabbccddeeffcd079a17aad0d1f9554c1812f20a4d465dd0503acd83608f890a58d715e20253");
 const H10_PUBKEY = fromHex("00000006000000034c616d706f727420526f626f7469637363aa0e1c3a5949b62fc83d2506d79688f5116d25fbd201c70a63bf3bec9a8521");
 const NONCE = 0x0102030405060708n;
+const ISSUED = 0x12340000n;
 const EXPIRY = 0x12345678n;
+const WINDOW = { issuedSlot: ISSUED, expirySlot: EXPIRY };
 /** Key generation the vault message vectors are bound to (the vault account vector has the same generation). */
 const GENERATION = 2;
 /** Generation of the registry message vector and of the commitment account vector. */
@@ -34,10 +37,10 @@ const REGISTRY_GENERATION = 1;
 const H5_PAST_PUBKEY = fromHex("0000000500000003" + "aa".repeat(16) + "bb".repeat(32));
 
 const actions: Record<string, Action> = {
-  transfer_sol: { kind: "TransferSol", to: PK_11, lamports: 1_500_000_000n, expirySlot: EXPIRY },
-  transfer_token: { kind: "TransferToken", mint: PK_22, to: PK_11, amount: 123_456_789_012n, expirySlot: EXPIRY },
-  rotate: { kind: "Rotate", newLmsPubkey: H10_PUBKEY, expirySlot: EXPIRY },
-  close: { kind: "Close", to: PK_11, expirySlot: EXPIRY },
+  transfer_sol: { kind: "TransferSol", to: PK_11, lamports: 1_500_000_000n, ...WINDOW },
+  transfer_token: { kind: "TransferToken", mint: PK_22, to: PK_11, amount: 123_456_789_012n, ...WINDOW },
+  rotate: { kind: "Rotate", newLmsPubkey: H10_PUBKEY, ...WINDOW },
+  close: { kind: "Close", to: PK_11, ...WINDOW },
 };
 
 const id = vaultId(H5_PUBKEY);
@@ -69,7 +72,10 @@ const doc = {
     h10_pubkey_hex: toHex(H10_PUBKEY),
     nonce: NONCE.toString(),
     nonce_le_hex: "0807060504030201",
+    issued_slot: ISSUED.toString(),
+    issued_slot_le_hex: "0000341200000000",
     expiry_slot: EXPIRY.toString(),
+    expiry_slot_le_hex: "7856341200000000",
     generation: String(GENERATION),
     registry_generation: String(REGISTRY_GENERATION),
   },
@@ -101,6 +107,11 @@ const doc = {
     commitment: { address: commitment.address.toBase58(), bump: commitment.bump, seeds: ["pq", "owner=pk_11"] },
     pq_sig_buffer: { address: pqSigBuffer.address.toBase58(), bump: pqSigBuffer.bump, seeds: ["pqsig", "owner=pk_11", "payer=pk_22", "nonce_le_u64"] },
   },
+  validity: {
+    note: "every Action ends in issued_slot || expiry_slot (u64le each); the program requires issued_slot <= slot <= expiry_slot and expiry_slot - issued_slot <= max_validity_slots",
+    max_validity_slots: Number(MAX_VALIDITY_SLOTS),
+    action_sizes: ACTION_SIZES,
+  },
   actions: actionVectors,
   messages: {
     message_version: MESSAGE_VERSION,
@@ -108,13 +119,15 @@ const doc = {
     vault_message_formula: "sha256(prefix || program_id || vault || u32le(generation) || action_bytes)",
     vault_message_inputs: { program_id: LAMPORT_VAULT_PROGRAM_ID.toBase58(), vault: vault.address.toBase58(), generation: String(GENERATION) },
     registry_prefix_hex: toHex(new TextEncoder().encode("pq-registry/v1")),
-    registry_message_formula: "sha256(prefix || program_id || owner || u32le(generation) || new_pq_pubkey)",
-    registry_message_hex: toHex(registryMessage(PK_11, REGISTRY_GENERATION, H10_PUBKEY)),
+    registry_message_formula: "sha256(prefix || program_id || owner || u32le(generation) || new_pq_pubkey || u64le(issued_slot) || u64le(expiry_slot))",
+    registry_message_hex: toHex(registryMessage(PK_11, REGISTRY_GENERATION, H10_PUBKEY, WINDOW)),
     registry_message_inputs: {
       program_id: PQ_REGISTRY_PROGRAM_ID.toBase58(),
       owner: PK_11.toBase58(),
       generation: String(REGISTRY_GENERATION),
       new_pq_pubkey_hex: toHex(H10_PUBKEY),
+      issued_slot: ISSUED.toString(),
+      expiry_slot: EXPIRY.toString(),
     },
   },
   instruction_data: {
@@ -132,7 +145,7 @@ const doc = {
     ),
     write_sig_hex: toHex(writeSigInstruction({ programId: LAMPORT_VAULT_PROGRAM_ID, sigBuffer: sigBuffer.address, payer: PK_11, offset: 900, chunk: new Uint8Array([9, 8, 7]) }).data),
     commit_hex: toHex(commitInstruction({ programId: PQ_REGISTRY_PROGRAM_ID, owner: PK_11, pqPubkey: H10_PUBKEY }).instruction.data),
-    open_pq_buffer_hex: toHex(openPqBufferInstruction({ programId: PQ_REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: H5_PUBKEY, sigLen: 2508 }).instruction.data),
+    open_pq_buffer_hex: toHex(openPqBufferInstruction({ programId: PQ_REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: H5_PUBKEY, sigLen: 2508, window: WINDOW }).instruction.data),
   },
   accounts: {
     // H5 vault at generation 2: 6 leaves spent (bits 0,1,2,22,24,31), the two past keys were H10_PUBKEY and H5_PAST_PUBKEY.
@@ -185,6 +198,7 @@ const doc = {
         payer: PK_22,
         nonce: NONCE,
         newPqPubkey: H5_PUBKEY,
+        ...WINDOW,
         sigLen: 4,
         filled: 1,
         sig: new Uint8Array([0xaa, 0, 0, 0]),
@@ -220,3 +234,4 @@ const doc = {
 
 writeFileSync(out, JSON.stringify(doc, null, 2) + "\n");
 console.log(`wrote ${out}`);
+writeDerivationKat();

@@ -100,6 +100,16 @@ export function firstFreeLeaf(vault: Pick<VaultAccount, "used">, lane = 0, lanes
   return undefined;
 }
 
+/** Spent leaves of the current key in lane `lane` of `lanes` (all leaves by default). */
+export function spentLeavesInLane(vault: Pick<VaultAccount, "used">, lane = 0, lanes = 1): number {
+  if (!Number.isInteger(lanes) || lanes < 1) throw new RangeError(`lanes must be >= 1, got ${lanes}`);
+  if (!Number.isInteger(lane) || lane < 0 || lane >= lanes) throw new RangeError(`lane must be in 0..${lanes - 1}, got ${lane}`);
+  let n = 0;
+  const total = vault.used.length * 8;
+  for (let q = lane; q < total; q += lanes) if (isLeafUsed(vault, q)) n++;
+  return n;
+}
+
 export interface SigBufferAccount {
   version: number;
   bump: number;
@@ -144,6 +154,10 @@ export interface PqSigBufferAccount {
   payer: PublicKey;
   nonce: bigint;
   newPqPubkey: Uint8Array;
+  /** first slot of the signed validity window */
+  issuedSlot: bigint;
+  /** last slot of the signed validity window */
+  expirySlot: bigint;
   sigLen: number;
   filled: number;
   sig: Uint8Array;
@@ -295,11 +309,13 @@ export function decodePqSigBuffer(data: Uint8Array): PqSigBufferAccount {
   const payer = r.pubkey();
   const nonce = r.u64();
   const newPqPubkey = r.fixed(56);
+  const issuedSlot = r.u64();
+  const expirySlot = r.u64();
   const sigLen = r.u16();
   const filled = r.u16();
   const sig = r.vecU8();
   if (sig.length !== sigLen) throw new Error("PqSigBuffer: sig vector length differs from sig_len");
-  return { version, bump, owner, payer, nonce, newPqPubkey, sigLen, filled, sig };
+  return { version, bump, owner, payer, nonce, newPqPubkey, issuedSlot, expirySlot, sigLen, filled, sig };
 }
 
 export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
@@ -312,6 +328,8 @@ export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
     .pubkey(b.payer)
     .u64(b.nonce)
     .fixed(b.newPqPubkey, 56)
+    .u64(b.issuedSlot)
+    .u64(b.expirySlot)
     .u16(b.sigLen)
     .u16(b.filled)
     .vecU8(b.sig)
@@ -320,5 +338,5 @@ export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
 
 /** Space a PqSigBuffer needs for a signature of `sigLen` bytes (PqSigBuffer::space). */
 export function pqSigBufferSize(sigLen: number): number {
-  return 8 + 1 + 1 + 32 + 32 + 8 + 56 + 2 + 2 + (4 + sigLen);
+  return 8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + (4 + sigLen);
 }

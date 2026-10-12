@@ -46,7 +46,7 @@ const bogusSig = (n: number) => new Uint8Array(n).fill(0xab);
 
 describe("execute_direct instruction", () => {
   it("data = disc || vec<u8> action || vec<u8> signature; accounts vault(w) payer(ws) system + remaining", () => {
-    const action = { kind: "TransferSol" as const, to: PK_33, lamports: 5n, expirySlot: 9n };
+    const action = { kind: "TransferSol" as const, to: PK_33, lamports: 5n, issuedSlot: 0n, expirySlot: 9n };
     const sig = bogusSig(2508);
     const ix = executeDirectInstruction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: PK_11, payer: PK_22, action, signature: sig });
     const r = new ByteReader(new Uint8Array(ix.data));
@@ -67,7 +67,7 @@ describe("v1 transaction builder", () => {
   const base = { programId: LAMPORT_VAULT_PROGRAM_ID, vault: PK_11, payer: payer.publicKey, blockhash: BLOCKHASH };
 
   it("H10 TransferSol: version 0x81, header, config in the header, one instruction, under 4096 bytes", () => {
-    const action = { kind: "TransferSol" as const, to: PK_33, lamports: 5n, expirySlot: 9n };
+    const action = { kind: "TransferSol" as const, to: PK_33, lamports: 5n, issuedSlot: 0n, expirySlot: 9n };
     const built = buildDirectV1Transaction({ ...base, action, signature: bogusSig(2508) });
     const m = built.messageBytes;
     expect(m[0]).toBe(V1_VERSION_BYTE);
@@ -88,7 +88,7 @@ describe("v1 transaction builder", () => {
     expect(decompiled.instructions).toHaveLength(1);
     const ix = decompiled.instructions[0]!;
     expect(ix.programAddress).toBe(LAMPORT_VAULT_PROGRAM_ID.toBase58());
-    expect(ix.data?.length).toBe(8 + 4 + 49 + 4 + 2508);
+    expect(ix.data?.length).toBe(8 + 4 + 57 + 4 + 2508);
     expect(ix.accounts?.map((a) => a.address)).toEqual([PK_11, payer.publicKey, SystemProgram.programId, PK_33].map((k) => k.toBase58()));
     // Bits [0,1] priority fee, [2] compute-unit limit, [3] loaded accounts data size.
     if (compiled.version !== 1) throw new Error("unreachable");
@@ -96,7 +96,7 @@ describe("v1 transaction builder", () => {
   });
 
   it("priority fee and limits pass through; config values are LE in the header", () => {
-    const action = { kind: "Rotate" as const, newLmsPubkey: KAT_H10_PUBKEY, expirySlot: 9n };
+    const action = { kind: "Rotate" as const, newLmsPubkey: KAT_H10_PUBKEY, issuedSlot: 0n, expirySlot: 9n };
     const built = buildDirectV1Transaction({ ...base, action, signature: bogusSig(2508), computeUnitLimit: 250_000, priorityFeeLamports: 12_345n, loadedAccountsDataSizeLimit: 1 << 20 });
     expect(built.config).toEqual({ computeUnitLimit: 250_000, priorityFeeLamports: 12_345n, loadedAccountsDataSizeLimit: 1 << 20 });
     const decompiled = decompileTransactionMessage(getCompiledTransactionMessageDecoder().decode(built.messageBytes));
@@ -113,17 +113,17 @@ describe("v1 transaction builder", () => {
   it("every parameter set and action fits: the largest (H15 TransferToken) stays under 4096", () => {
     const sizes: Record<string, number> = {};
     for (const [label, sigLen] of [["H5", 2348], ["H10", 2508], ["H15", 2668]] as const) {
-      const token = { kind: "TransferToken" as const, mint: PK_22, to: PK_33, amount: 1n, expirySlot: 9n };
+      const token = { kind: "TransferToken" as const, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 9n };
       sizes[label] = buildDirectV1Transaction({ ...base, action: token, signature: bogusSig(sigLen) }).size;
       expect(sizes[label]).toBeLessThan(V1_MAX_TRANSACTION_BYTES);
     }
     expect(sizes["H15"]! - sizes["H5"]!).toBe(2668 - 2348);
     // Four signatures would not fit; the builder refuses instead of producing bytes the cluster drops.
-    expect(() => buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, expirySlot: 9n }, signature: bogusSig(4000) })).toThrow(/4096/);
+    expect(() => buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, issuedSlot: 0n, expirySlot: 9n }, signature: bogusSig(4000) })).toThrow(/4096/);
   });
 
   it("assembleV1Transaction appends exactly num_required_signatures 64-byte signatures", () => {
-    const built = buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, expirySlot: 9n }, signature: bogusSig(2348) });
+    const built = buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, issuedSlot: 0n, expirySlot: 9n }, signature: bogusSig(2348) });
     const sig = new Uint8Array(64).fill(7);
     const wire = assembleV1Transaction(built.messageBytes, [sig]);
     expect(wire.length).toBe(built.size);
@@ -136,7 +136,7 @@ describe("v1 transaction builder", () => {
   });
 
   it("keypairV1Signer produces an ed25519 signature the payer's public key verifies", async () => {
-    const built = buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, expirySlot: 9n }, signature: bogusSig(2348) });
+    const built = buildDirectV1Transaction({ ...base, action: { kind: "Close", to: PK_33, issuedSlot: 0n, expirySlot: 9n }, signature: bogusSig(2348) });
     const sig = await keypairV1Signer(payer.secretKey)(built.messageBytes);
     expect(sig.length).toBe(64);
     const pub = await getPublicKeyFromAddress(address(payer.publicKey.toBase58()));
@@ -301,7 +301,7 @@ describe("VaultSigner modes", () => {
   it("H10 and H15 vaults build direct transactions too", () => {
     for (const lmsType of [LMS_SHA256_M32_H10, LMS_SHA256_M32_H15]) {
       const sigLen = { [LMS_SHA256_M32_H10]: 2508, [LMS_SHA256_M32_H15]: 2668 }[lmsType]!;
-      const built = buildDirectV1Transaction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault, payer: payer.publicKey, blockhash: BLOCKHASH, action: { kind: "TransferSol", to, lamports: 1n, expirySlot: 1n }, signature: bogusSig(sigLen) });
+      const built = buildDirectV1Transaction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault, payer: payer.publicKey, blockhash: BLOCKHASH, action: { kind: "TransferSol", to, lamports: 1n, issuedSlot: 0n, expirySlot: 1n }, signature: bogusSig(sigLen) });
       expect(built.size).toBeLessThan(V1_MAX_TRANSACTION_BYTES);
     }
   });

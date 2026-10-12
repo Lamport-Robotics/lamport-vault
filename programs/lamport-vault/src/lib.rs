@@ -45,6 +45,13 @@ pub const MAX_KEY_HISTORY: u16 = 128;
 #[constant]
 pub const MAX_KEY_HISTORY: u16 = 2;
 
+/// Longest validity window of an action, in slots: `expiry_slot - issued_slot`
+/// must not exceed it. 216 000 slots is about one day at 400 ms, so a signature
+/// that leaks or is forgotten stops being submittable within a day of signing,
+/// whatever expiry the signer wrote.
+#[constant]
+pub const MAX_VALIDITY_SLOTS: u64 = 216_000;
+
 /// LMS parameter sets a vault may use: H5, H10, H15. H20 is parsed by the
 /// crate but refused here (its 128 KB bitmap would not fit the account).
 pub const ACCEPTED_LMS_TYPES: &[LmsType] = &[LmsType::Sha256M32H5, LmsType::Sha256M32H10, LmsType::Sha256M32H15];
@@ -119,10 +126,23 @@ pub fn verify_action_signature(vault: &Vault, vault_key: &Pubkey, action_bytes: 
     Ok(Verified { q: sig.q, last_free, pk })
 }
 
-/// Step 6 before the action runs: decode, expiry, exhaustion rule. Pure.
+/// The validity-window rule shared by every action: not issued in the future,
+/// not expired, `issued_slot <= expiry_slot <= issued_slot + MAX_VALIDITY_SLOTS`.
+pub fn check_validity_window(issued_slot: u64, expiry_slot: u64, slot: u64) -> Result<()> {
+    require!(issued_slot <= slot, VaultError::IssuedInFuture);
+    require!(expiry_slot >= slot, VaultError::ActionExpired);
+    require!(
+        expiry_slot >= issued_slot && expiry_slot - issued_slot <= MAX_VALIDITY_SLOTS,
+        VaultError::InvalidValidityWindow
+    );
+    Ok(())
+}
+
+/// Step 6 before the action runs: decode, validity window, exhaustion rule. Pure.
 pub fn check_action(action_bytes: &[u8], slot: u64, last_free: bool) -> Result<Action> {
     let action = Action::decode(action_bytes)?;
-    require!(action.expiry_slot() >= slot, VaultError::ActionExpired);
+    let (issued_slot, expiry_slot) = action.window();
+    check_validity_window(issued_slot, expiry_slot, slot)?;
     // Exhaustion rule: when this is the last free leaf it may only Rotate.
     if last_free {
         require!(matches!(action, Action::Rotate { .. }), VaultError::LastLeafReservedForRotate);
@@ -184,7 +204,7 @@ fn verify_and_act<'info>(
     let verified = verify_action_signature(vault, &vault_key, action_bytes, signature)?;
     // 5. burn the leaf before doing anything else.
     vault.spend_leaf(verified.q)?;
-    // 6. decode, expiry, exhaustion rule, perform.
+    // 6. decode, validity window, exhaustion rule, perform.
     let action = check_action(action_bytes, Clock::get()?.slot, verified.last_free)?;
     let pk = verified.pk;
 
@@ -507,7 +527,7 @@ mod tests {
     #[test]
     fn message_is_domain_program_vault_generation_le_action() {
         let vault = Pubkey::new_unique();
-        let action = [0x03u8; 41];
+        let action = [0x03u8; 49];
         let mut concat = Vec::new();
         concat.extend_from_slice(b"lamport-vault/v1");
         concat.extend_from_slice(ID.as_ref());
@@ -521,11 +541,11 @@ mod tests {
     #[test]
     fn message_changes_with_every_input() {
         let vault = Pubkey::new_unique();
-        let action = Action::Close { to: Pubkey::new_unique(), expiry_slot: 1 }.encode();
+        let action = Action::Close { to: Pubkey::new_unique(), issued_slot: 0, expiry_slot: 1 }.encode();
         let base = signed_message(&vault, 0, &action);
         assert_ne!(base, signed_message(&vault, 1, &action), "generation must bind");
         assert_ne!(base, signed_message(&Pubkey::new_unique(), 0, &action), "vault must bind");
-        let other = Action::Close { to: Pubkey::new_unique(), expiry_slot: 1 }.encode();
+        let other = Action::Close { to: Pubkey::new_unique(), issued_slot: 0, expiry_slot: 1 }.encode();
         assert_ne!(base, signed_message(&vault, 0, &other), "action must bind");
         assert_eq!(base, signed_message(&vault, 0, &action), "deterministic");
     }
@@ -635,7 +655,7 @@ mod tests {
     }
 
     fn transfer_action(expiry_slot: u64) -> Vec<u8> {
-        Action::TransferSol { to: Pubkey::new_unique(), lamports: 1, expiry_slot }.encode()
+        Action::TransferSol { to: Pubkey::new_unique(), lamports: 1, issued_slot: 0, expiry_slot }.encode()
     }
 
     #[test]
@@ -724,12 +744,40 @@ mod tests {
         assert!(matches!(check_action(&transfer, 100, false).unwrap(), Action::TransferSol { .. }));
         assert_eq!(code(check_action(&transfer, 101, false)), vault_err(VaultError::ActionExpired));
         assert_eq!(code(check_action(&transfer, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
-        let rotate = Action::Rotate { new_lms_pubkey: [1; 56], expiry_slot: 100 }.encode();
+        let rotate = Action::Rotate { new_lms_pubkey: [1; 56], issued_slot: 0, expiry_slot: 100 }.encode();
         assert!(matches!(check_action(&rotate, 100, true).unwrap(), Action::Rotate { .. }));
         assert_eq!(code(check_action(&rotate, 101, true)), vault_err(VaultError::ActionExpired));
         assert_eq!(code(check_action(&[9, 9], 0, false)), vault_err(VaultError::ActionDecode));
         let mut trailing = transfer.clone();
         trailing.push(0);
         assert_eq!(code(check_action(&trailing, 0, false)), vault_err(VaultError::ActionDecode));
+    }
+
+    fn windowed(issued_slot: u64, expiry_slot: u64) -> Vec<u8> {
+        Action::Close { to: Pubkey::new_unique(), issued_slot, expiry_slot }.encode()
+    }
+
+    #[test]
+    fn validity_window_rules() {
+        assert_eq!(MAX_VALIDITY_SLOTS, 216_000);
+        let now = 1_000_000u64;
+        // issued now, expires now: fine; issued earlier, expires later within a day: fine.
+        assert!(check_action(&windowed(now, now), now, false).is_ok());
+        assert!(check_action(&windowed(now - 10, now + 10), now, false).is_ok());
+        // Exactly one day is the longest window.
+        assert!(check_action(&windowed(now, now + MAX_VALIDITY_SLOTS), now, false).is_ok());
+        assert!(check_action(&windowed(now - MAX_VALIDITY_SLOTS, now), now, false).is_ok());
+        assert_eq!(code(check_action(&windowed(now, now + MAX_VALIDITY_SLOTS + 1), now, false)), vault_err(VaultError::InvalidValidityWindow));
+        // Issued in the future, even by one slot, even with a fine window.
+        assert_eq!(code(check_action(&windowed(now + 1, now + 2), now, false)), vault_err(VaultError::IssuedInFuture));
+        // Expired: checked before the window shape.
+        assert_eq!(code(check_action(&windowed(now - 5, now - 1), now, false)), vault_err(VaultError::ActionExpired));
+        // An inverted window can never pass the two clock checks: whichever side the clock is on,
+        // it is either expired or not yet issued.
+        assert_eq!(code(check_action(&windowed(now, now - 1), now, false)), vault_err(VaultError::ActionExpired));
+        assert_eq!(code(check_validity_window(now, now - 1, now - 1)), vault_err(VaultError::IssuedInFuture));
+        // A far-future expiry on an old signature is impossible by construction: the window is capped.
+        assert_eq!(code(check_action(&windowed(0, u64::MAX), now, false)), vault_err(VaultError::InvalidValidityWindow));
+        assert_eq!(code(check_validity_window(0, u64::MAX, 0)), vault_err(VaultError::InvalidValidityWindow));
     }
 }

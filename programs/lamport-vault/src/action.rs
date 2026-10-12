@@ -1,13 +1,14 @@
 //! The Borsh `Action` enum that a signature authorises.
 //!
 //! Encoding (Borsh): one byte variant index, then the fields in order, all
-//! integers little-endian.
+//! integers little-endian. Every variant ends in the validity window
+//! `issued_slot: u64, expiry_slot: u64` (see [`crate::MAX_VALIDITY_SLOTS`]).
 //!
 //! ```text
-//! 0 TransferSol   { to: Pubkey, lamports: u64, expiry_slot: u64 }        49 bytes
-//! 1 TransferToken { mint: Pubkey, to: Pubkey, amount: u64, expiry_slot: u64 }  81 bytes
-//! 2 Rotate        { new_lms_pubkey: [u8; 56], expiry_slot: u64 }         65 bytes
-//! 3 Close         { to: Pubkey, expiry_slot: u64 }                       41 bytes
+//! 0 TransferSol   { to: Pubkey, lamports: u64, issued_slot: u64, expiry_slot: u64 }         57 bytes
+//! 1 TransferToken { mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }  89 bytes
+//! 2 Rotate        { new_lms_pubkey: [u8; 56], issued_slot: u64, expiry_slot: u64 }          73 bytes
+//! 3 Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                        49 bytes
 //! ```
 
 use anchor_lang::prelude::*;
@@ -23,7 +24,9 @@ pub enum Action {
         to: Pubkey,
         /// Amount in lamports.
         lamports: u64,
-        /// Last slot at which the action may execute.
+        /// Slot the action was signed at; must not be in the future.
+        issued_slot: u64,
+        /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
     /// SPL transfer (Token or Token-2022) signed by the vault PDA.
@@ -34,7 +37,9 @@ pub enum Action {
         to: Pubkey,
         /// Amount in base units.
         amount: u64,
-        /// Last slot at which the action may execute.
+        /// Slot the action was signed at; must not be in the future.
+        issued_slot: u64,
+        /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
     /// Replace the LMS key: bitmap cleared, `spent = 0`, `generation += 1`. The
@@ -43,14 +48,18 @@ pub enum Action {
     Rotate {
         /// The new 56-byte LMS public key.
         new_lms_pubkey: [u8; 56],
-        /// Last slot at which the action may execute.
+        /// Slot the action was signed at; must not be in the future.
+        issued_slot: u64,
+        /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
     /// Send every lamport to `to` and delete the vault account.
     Close {
         /// Destination of all lamports.
         to: Pubkey,
-        /// Last slot at which the action may execute.
+        /// Slot the action was signed at; must not be in the future.
+        issued_slot: u64,
+        /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
 }
@@ -71,14 +80,24 @@ impl Action {
         out
     }
 
+    /// The action's validity window `(issued_slot, expiry_slot)`.
+    pub fn window(&self) -> (u64, u64) {
+        match self {
+            Action::TransferSol { issued_slot, expiry_slot, .. }
+            | Action::TransferToken { issued_slot, expiry_slot, .. }
+            | Action::Rotate { issued_slot, expiry_slot, .. }
+            | Action::Close { issued_slot, expiry_slot, .. } => (*issued_slot, *expiry_slot),
+        }
+    }
+
+    /// The action's issued slot.
+    pub fn issued_slot(&self) -> u64 {
+        self.window().0
+    }
+
     /// The action's expiry slot.
     pub fn expiry_slot(&self) -> u64 {
-        match self {
-            Action::TransferSol { expiry_slot, .. }
-            | Action::TransferToken { expiry_slot, .. }
-            | Action::Rotate { expiry_slot, .. }
-            | Action::Close { expiry_slot, .. } => *expiry_slot,
-        }
+        self.window().1
     }
 }
 
@@ -91,36 +110,45 @@ mod tests {
         let a = Action::TransferSol {
             to: Pubkey::new_unique(),
             lamports: 5,
+            issued_slot: 8,
             expiry_slot: 9,
         };
         let b = a.encode();
-        assert_eq!(b.len(), 49);
+        assert_eq!(b.len(), 57);
         assert_eq!(b[0], 0);
+        assert_eq!(&b[41..49], &8u64.to_le_bytes(), "issued_slot sits before expiry_slot");
+        assert_eq!(&b[49..57], &9u64.to_le_bytes());
         assert_eq!(Action::decode(&b).unwrap(), a);
+        assert_eq!(a.window(), (8, 9));
 
         let t = Action::TransferToken {
             mint: Pubkey::new_unique(),
             to: Pubkey::new_unique(),
             amount: 1,
+            issued_slot: 1,
             expiry_slot: 2,
         };
-        assert_eq!(t.encode().len(), 81);
+        assert_eq!(t.encode().len(), 89);
         let r = Action::Rotate {
             new_lms_pubkey: [7; 56],
+            issued_slot: 2,
             expiry_slot: 3,
         };
-        assert_eq!(r.encode().len(), 65);
+        assert_eq!(r.encode().len(), 73);
         let c = Action::Close {
             to: Pubkey::new_unique(),
+            issued_slot: 3,
             expiry_slot: 4,
         };
-        assert_eq!(c.encode().len(), 41);
+        assert_eq!(c.encode().len(), 49);
         assert_eq!(c.encode()[0], 3);
+        assert_eq!(c.issued_slot(), 3);
+        assert_eq!(c.expiry_slot(), 4);
 
         let mut trailing = c.encode();
         trailing.push(0);
         assert!(Action::decode(&trailing).is_err());
-        assert!(Action::decode(&b[..48]).is_err());
+        assert!(Action::decode(&b[..56]).is_err());
         assert!(Action::decode(&[9]).is_err());
     }
 }

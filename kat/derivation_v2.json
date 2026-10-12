@@ -1,0 +1,179 @@
+{
+  "source": "@lamport-robotics/lms (this repository), docs/SPEC-DERIVATION.md",
+  "version": "v2",
+  "formula": {
+    "seed": "SEED_k = HKDF-SHA256(ikm = master, salt = \"lamport-vault/lms-seed/v2\", info = genesis_hash[32] || program_id[32] || u32be(k) || \"seed\")[0..32]",
+    "id": "I_k = HKDF-SHA256(ikm = master, salt = \"lamport-vault/lms-id/v2\", info = genesis_hash[32] || program_id[32] || u32be(k) || \"id\")[0..16]",
+    "master": "BIP-39 seed (PBKDF2-HMAC-SHA512, 2048 rounds, salt \"mnemonic\" || passphrase), 64 bytes",
+    "registry_key_index": 4294967295,
+    "seed_salt_hex": "6c616d706f72742d7661756c742f6c6d732d736565642f7632",
+    "id_salt_hex": "6c616d706f72742d7661756c742f6c6d732d69642f7632"
+  },
+  "masters": {
+    "ref": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "passphrase": "",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+    },
+    "ref_trezor": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "passphrase": "TREZOR",
+      "master_hex": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+    }
+  },
+  "clusters": {
+    "devnet": {
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab"
+    },
+    "mainnet-beta": {
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "genesis_hash_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef0"
+    }
+  },
+  "programs": {
+    "lamport_vault": {
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58"
+    },
+    "pq_registry": {
+      "program_id": "48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad",
+      "program_id_hex": "2e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92"
+    }
+  },
+  "vectors": [
+    {
+      "name": "ref / devnet / lamport_vault / k=0",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "devnet",
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab",
+      "program": "lamport_vault",
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58",
+      "k": 0,
+      "seed_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000000073656564",
+      "id_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58000000006964",
+      "seed_hex": "6e42a917a028a7af7364c6a11622681f789de945fed299a9cab7f6739cea18d5",
+      "I_hex": "502724761db73ff7d5dfaf5be0c80312",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003502724761db73ff7d5dfaf5be0c80312eeffbf8b8d7f6e16c099087361139629c0a61a230ef637545cba4662e1073faf"
+    },
+    {
+      "name": "ref / devnet / lamport_vault / k=1",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "devnet",
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab",
+      "program": "lamport_vault",
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58",
+      "k": 1,
+      "seed_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000000173656564",
+      "id_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58000000016964",
+      "seed_hex": "d62a4841076351afdcdbff01018f2741d5407c10a1d79fb9e73c71cc0c1e6ae0",
+      "I_hex": "5c525bd5e9b08c1794b4d477f500cb80",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "00000005000000035c525bd5e9b08c1794b4d477f500cb804ec622fbfde21d74820de849963baeb0bece2592518495cc76f9d10d2a4e089a"
+    },
+    {
+      "name": "ref / devnet / lamport_vault / k=65535",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "devnet",
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab",
+      "program": "lamport_vault",
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58",
+      "k": 65535,
+      "seed_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000ffff73656564",
+      "id_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000ffff6964",
+      "seed_hex": "c3791efb98b502eb067ad989716df14a5601d7e6c36897ba11151331be34f7bb",
+      "I_hex": "d7f92e7a1454816a7efdc49515e92632",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003d7f92e7a1454816a7efdc49515e926328258ce00eac9b14a38a4764f561a1718156c90b3b5834933989349a323891b9e"
+    },
+    {
+      "name": "ref / mainnet-beta / lamport_vault / k=0",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "mainnet-beta",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "genesis_hash_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef0",
+      "program": "lamport_vault",
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58",
+      "k": 0,
+      "seed_info_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef096477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000000073656564",
+      "id_info_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef096477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58000000006964",
+      "seed_hex": "deef71d8accd3c2adb6865a37498f0bdd812778aba6b21db6cf9206f69efbe82",
+      "I_hex": "bdf772a4bb206f4ed22e9529946b9271",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003bdf772a4bb206f4ed22e9529946b927173895ca64f8e46d5674f695222424335d6654c8f369fce1d01bea982063ddd8c"
+    },
+    {
+      "name": "ref / devnet / pq_registry / k=4294967295",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "devnet",
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab",
+      "program": "pq_registry",
+      "program_id": "48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad",
+      "program_id_hex": "2e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92",
+      "k": 4294967295,
+      "seed_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab2e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92ffffffff73656564",
+      "id_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab2e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92ffffffff6964",
+      "seed_hex": "ceef8aecd0c55604a02985992543693ff19128ace770dfdace3d9bff23fce938",
+      "I_hex": "795c45302d3d01c6c20530fecf0764c8",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003795c45302d3d01c6c20530fecf0764c85efa68fdae8d3282d54da86e07ea1738fdec332f42489e6c9c54949e08696262"
+    },
+    {
+      "name": "ref / mainnet-beta / pq_registry / k=4294967295",
+      "master": "ref",
+      "master_hex": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "cluster": "mainnet-beta",
+      "genesis_hash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "genesis_hash_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef0",
+      "program": "pq_registry",
+      "program_id": "48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad",
+      "program_id_hex": "2e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92",
+      "k": 4294967295,
+      "seed_info_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef02e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92ffffffff73656564",
+      "id_info_hex": "45296998a6f8e2a784db5d9f95e18fc23f70441a1039446801089879b08c7ef02e715f1e73ceaf1a3c18a926478bbdc5724ccedc2c52375744c89ed2319cab92ffffffff6964",
+      "seed_hex": "ddec1ce962f47e8b30f36dbb8fb75188db8eddb639ebb7d14f73ad4768e59c4e",
+      "I_hex": "b9e82643c8de9fdad7533d1adfe2b065",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003b9e82643c8de9fdad7533d1adfe2b065be0faa4e98bbc476f8fc6a3c2e368b8f0c30b16a9512769730a34d35f8a37b98"
+    },
+    {
+      "name": "ref_trezor / devnet / lamport_vault / k=0",
+      "master": "ref_trezor",
+      "master_hex": "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+      "cluster": "devnet",
+      "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "genesis_hash_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab",
+      "program": "lamport_vault",
+      "program_id": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+      "program_id_hex": "96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58",
+      "k": 0,
+      "seed_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a580000000073656564",
+      "id_info_hex": "ce59db5080fc2c6d3bcf7ca90712d3c2e5e6c28f27f0dfbb9953bdb0894c03ab96477b29bf9b881a2929e2b175c135b09441684f6a4157e1f161b90be0eb1a58000000006964",
+      "seed_hex": "cdb36cfd63cdf28ef8564ad7a87987d456d459e0d3bd397e1c7d033b12c622d1",
+      "I_hex": "f72e063b9a1317a21b2f5184496eec4c",
+      "lms_type": 5,
+      "lmots_type": 3,
+      "public_key_hex": "0000000500000003f72e063b9a1317a21b2f5184496eec4cf5430ee216a9dbe9560767ef99ea1982f23eb39da28bad3bf4ffebb3f55cbb93"
+    }
+  ]
+}

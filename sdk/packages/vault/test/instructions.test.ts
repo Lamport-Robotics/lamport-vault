@@ -88,10 +88,10 @@ describe("vault instruction data and accounts", () => {
   });
 
   it("open_sig_buffer: disc || nonce_le || vec<u8> action || sig_len_le || vec<u8> first_chunk", () => {
-    const action = encodeAction({ kind: "Close", to: PK_22, expirySlot: 5n });
+    const action = encodeAction({ kind: "Close", to: PK_22, issuedSlot: 0n, expirySlot: 5n });
     const { instruction, sigBuffer } = openSigBufferInstruction({ programId: VAULT_PROGRAM_ID, vault, payer, nonce: NONCE, action, sigLen: 2348 });
     expect(sigBuffer.equals(findSigBufferPda(VAULT_PROGRAM_ID, vault, payer, NONCE).address)).toBe(true);
-    expect(toHex(instruction.data)).toBe(toHex(IX.openSigBuffer) + "0807060504030201" + "29000000" + toHex(action) + "2c09" + "00000000");
+    expect(toHex(instruction.data)).toBe(toHex(IX.openSigBuffer) + "0807060504030201" + "31000000" + toHex(action) + "2c09" + "00000000");
     expect(keysOf(instruction)).toEqual([
       [payer.toBase58(), true, true],
       [vault.toBase58(), false, false],
@@ -124,7 +124,7 @@ describe("vault instruction data and accounts", () => {
       [payer.toBase58(), true, true],
       [PK_33.toBase58(), false, true],
     ]);
-    const ix = executeInstruction({ programId: VAULT_PROGRAM_ID, vault, sigBuffer: PK_33, payer, action: { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, expirySlot: 1n } });
+    const ix = executeInstruction({ programId: VAULT_PROGRAM_ID, vault, sigBuffer: PK_33, payer, action: { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, issuedSlot: 0n, expirySlot: 1n } });
     expect(toHex(ix.data)).toBe(toHex(IX.execute));
     expect(keysOf(ix)).toEqual([
       [vault.toBase58(), false, true],
@@ -134,10 +134,10 @@ describe("vault instruction data and accounts", () => {
   });
 
   it("execute remaining accounts follow the action", () => {
-    expect(executeRemainingAccounts(vault, { kind: "TransferSol", to: PK_22, lamports: 1n, expirySlot: 1n }).map((k) => [k.pubkey.toBase58(), k.isWritable])).toEqual([[PK_22.toBase58(), true]]);
-    expect(executeRemainingAccounts(vault, { kind: "Close", to: PK_22, expirySlot: 1n }).map((k) => k.pubkey.toBase58())).toEqual([PK_22.toBase58()]);
+    expect(executeRemainingAccounts(vault, { kind: "TransferSol", to: PK_22, lamports: 1n, issuedSlot: 0n, expirySlot: 1n }).map((k) => [k.pubkey.toBase58(), k.isWritable])).toEqual([[PK_22.toBase58(), true]]);
+    expect(executeRemainingAccounts(vault, { kind: "Close", to: PK_22, issuedSlot: 0n, expirySlot: 1n }).map((k) => k.pubkey.toBase58())).toEqual([PK_22.toBase58()]);
     expect(
-      executeRemainingAccounts(vault, { kind: "Close", to: PK_22, expirySlot: 1n }, TOKEN_PROGRAM_ID, [{ account: PK_33 }, { account: PK_11, tokenProgram: TOKEN_2022_PROGRAM_ID }]).map((k) => [k.pubkey.toBase58(), k.isWritable]),
+      executeRemainingAccounts(vault, { kind: "Close", to: PK_22, issuedSlot: 0n, expirySlot: 1n }, TOKEN_PROGRAM_ID, [{ account: PK_33 }, { account: PK_11, tokenProgram: TOKEN_2022_PROGRAM_ID }]).map((k) => [k.pubkey.toBase58(), k.isWritable]),
     ).toEqual([
       [PK_22.toBase58(), true],
       [PK_33.toBase58(), true],
@@ -145,21 +145,21 @@ describe("vault instruction data and accounts", () => {
       [PK_11.toBase58(), true],
       [TOKEN_2022_PROGRAM_ID.toBase58(), false],
     ]);
-    expect(executeRemainingAccounts(vault, { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, expirySlot: 1n })).toEqual([]);
-    const tok = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, expirySlot: 1n });
+    expect(executeRemainingAccounts(vault, { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, issuedSlot: 0n, expirySlot: 1n })).toEqual([]);
+    const tok = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n });
     expect(tok.map((k) => [k.pubkey.toBase58(), k.isWritable])).toEqual([
       [associatedTokenAddress(vault, PK_22).toBase58(), true],
       [PK_33.toBase58(), true],
       [PK_22.toBase58(), false],
       [TOKEN_PROGRAM_ID.toBase58(), false],
     ]);
-    const tok22 = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, expirySlot: 1n }, TOKEN_2022_PROGRAM_ID);
+    const tok22 = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_2022_PROGRAM_ID);
     expect(tok22[0]!.pubkey.equals(associatedTokenAddress(vault, PK_22, TOKEN_2022_PROGRAM_ID))).toBe(true);
     expect(tok22[3]!.pubkey.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
   });
 
   it("execute transaction requests 400k compute units first", () => {
-    const ixs = executeInstructions({ programId: VAULT_PROGRAM_ID, vault, sigBuffer: PK_33, payer, action: { kind: "Close", to: PK_22, expirySlot: 1n } });
+    const ixs = executeInstructions({ programId: VAULT_PROGRAM_ID, vault, sigBuffer: PK_33, payer, action: { kind: "Close", to: PK_22, issuedSlot: 0n, expirySlot: 1n } });
     expect(ixs.length).toBe(2);
     expect(ixs[0]!.programId.equals(ComputeBudgetProgram.programId)).toBe(true);
     expect(toHex(ixs[0]!.data)).toBe(toHex(ComputeBudgetProgram.setComputeUnitLimit({ units: EXECUTE_COMPUTE_UNITS }).data));
@@ -169,10 +169,10 @@ describe("vault instruction data and accounts", () => {
   it("stages with the first chunk in open_sig_buffer: H10 needs 4 transactions, every one fits a packet", () => {
     const kp = Keypair.generate();
     const actions: Action[] = [
-      { kind: "TransferSol", to: PK_22, lamports: 1n, expirySlot: 1n },
-      { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, expirySlot: 1n },
-      { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, expirySlot: 1n },
-      { kind: "Close", to: PK_22, expirySlot: 1n },
+      { kind: "TransferSol", to: PK_22, lamports: 1n, issuedSlot: 0n, expirySlot: 1n },
+      { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n },
+      { kind: "Rotate", newLmsPubkey: KAT_H10_PUBKEY, issuedSlot: 0n, expirySlot: 1n },
+      { kind: "Close", to: PK_22, issuedSlot: 0n, expirySlot: 1n },
     ];
     for (const lms of [LMS_SHA256_M32_H5, LMS_SHA256_M32_H10, 7, 8]) {
       const sig = new Uint8Array(lmsSignatureLength(lms, LMOTS_SHA256_N32_W4)).map((_, i) => (i * 13) & 0xff);
@@ -222,8 +222,13 @@ describe("registry instruction data", () => {
   });
 
   it("open_pq_buffer / write_pq_sig / close_pq_buffer / rotate_pq", () => {
-    const { instruction: open, buffer, commitment } = openPqBufferInstruction({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508 });
-    expect(toHex(open.data)).toBe(toHex(IX.openPqBuffer) + "0807060504030201" + toHex(KAT_H5_PUBKEY) + "cc09");
+    const window = { issuedSlot: 0x1234n, expirySlot: 0x5678n };
+    const { instruction: open, buffer, commitment } = openPqBufferInstruction({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508, window });
+    // disc || nonce_le || new_pq_pubkey || sig_len_le || issued_slot_le || expiry_slot_le
+    expect(toHex(open.data)).toBe(toHex(IX.openPqBuffer) + "0807060504030201" + toHex(KAT_H5_PUBKEY) + "cc09" + "3412000000000000" + "7856000000000000");
+    // a window the chain would refuse is refused here
+    expect(() => openPqBufferInstruction({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508, window: { issuedSlot: 10n, expirySlot: 9n } })).toThrow(/inverted/);
+    expect(() => openPqBufferInstruction({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508, window: { issuedSlot: 0n, expirySlot: 216_001n } })).toThrow(/MAX_VALIDITY_SLOTS/);
     expect(keysOf(open)).toEqual([
       [PK_22.toBase58(), true, true],
       [commitment.toBase58(), false, false],
@@ -239,7 +244,7 @@ describe("registry instruction data", () => {
     expect(toHex(closePqBufferInstruction({ programId: REGISTRY_PROGRAM_ID, buffer, payer: PK_22 }).data)).toBe(toHex(IX.closePqBuffer));
 
     const sig = new Uint8Array(2508).fill(1);
-    const staged = buildStagedRotatePq({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, signature: sig });
+    const staged = buildStagedRotatePq({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: PK_22, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, window, signature: sig });
     expect(staged.chunks.map((c) => c.bytes.length)).toEqual([900, 900, 708]);
     expect(toHex(Buffer.concat(staged.chunks.map((c) => c.bytes)))).toBe(toHex(sig));
     expect(staged.transactions.length).toBe(5);
@@ -250,7 +255,7 @@ describe("registry instruction data", () => {
       [PK_22.toBase58(), false, true],
     ]);
     const kp = Keypair.generate();
-    for (const ixs of buildStagedRotatePq({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: kp.publicKey, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, signature: new Uint8Array(2828) }).transactions) {
+    for (const ixs of buildStagedRotatePq({ programId: REGISTRY_PROGRAM_ID, owner: PK_11, payer: kp.publicKey, nonce: NONCE, newPqPubkey: KAT_H5_PUBKEY, window, signature: new Uint8Array(2828) }).transactions) {
       const tx = new Transaction({ feePayer: kp.publicKey, blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 1 }).add(...ixs);
       tx.sign(kp);
       expect(tx.serialize().length).toBeLessThanOrEqual(PACKET_DATA_SIZE);

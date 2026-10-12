@@ -4,6 +4,7 @@ export * from "./chunk.ts";
 export * from "./direct.ts";
 export * from "./discriminator.ts";
 export * from "./instructions.ts";
+export * from "./journal.ts";
 export * from "./message.ts";
 export * from "./pda.ts";
 export * from "./registry.ts";

@@ -5,15 +5,21 @@ use crate::error::Error;
 /// Hash output length in bytes (`n` for LM-OTS, `m` for LMS). SHA-256 only.
 pub const N: usize = 32;
 
-/// Upper bound on `p` among the accepted LM-OTS parameter sets. Sizes the
-/// scratch space used by the verifier. Raise it when accepting W1 or W2.
+/// Largest `p` among the LM-OTS parameter sets the default policy
+/// ([`LmotsType::ACCEPTED`]) admits: W4's 67 chains. [`LmotsType::ALL`]
+/// goes up to 265 (W1); callers that size buffers from this constant and opt
+/// into `ALL` must use [`LmotsType::p`] of the key instead.
 pub const MAX_P: usize = 67;
 
 /// LM-OTS parameter set (RFC 8554 Table 1).
 ///
-/// The enum carries all four SHA-256 rows so that the arithmetic in
-/// [`crate::lmots`] can be written once. Which rows a parser accepts is a
-/// separate list, [`LmotsType::ACCEPTED`].
+/// The enum carries all four SHA-256 rows and the arithmetic in
+/// [`crate::lmots`] is written once for any `w`. Which rows a parser admits is
+/// a policy passed at parse time: [`LmotsType::from_typecode`] and
+/// [`crate::LmsPublicKey::parse`] use the conservative [`LmotsType::ACCEPTED`]
+/// (W4 only, what the vault program enforces);
+/// [`LmotsType::from_typecode_in`] and [`crate::LmsPublicKey::parse_with`]
+/// take an explicit list, usually [`LmotsType::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LmotsType {
@@ -28,11 +34,30 @@ pub enum LmotsType {
 }
 
 impl LmotsType {
-    /// Parameter sets this build accepts in public keys and signatures.
+    /// The default acceptance policy: W4 only. This is what
+    /// [`Self::from_typecode`] and [`crate::LmsPublicKey::parse`] enforce, and
+    /// therefore what the vault program accepts on chain.
     pub const ACCEPTED: &'static [LmotsType] = &[LmotsType::Sha256N32W4];
+
+    /// Every SHA-256 row of Table 1, for tooling and interoperability tests
+    /// (RFC 8554 Appendix F uses W8; hash-sigs produces all four).
+    pub const ALL: &'static [LmotsType] = &[
+        LmotsType::Sha256N32W1,
+        LmotsType::Sha256N32W2,
+        LmotsType::Sha256N32W4,
+        LmotsType::Sha256N32W8,
+    ];
 
     /// Looks a typecode up in Table 1 and checks it is in [`Self::ACCEPTED`].
     pub fn from_typecode(code: u32) -> Result<Self, Error> {
+        Self::from_typecode_in(code, Self::ACCEPTED)
+    }
+
+    /// Looks a typecode up in Table 1 and checks it is in `accepted`.
+    ///
+    /// Any code outside Table 1, or inside it but not in `accepted`, is
+    /// [`Error::UnknownLmotsType`].
+    pub fn from_typecode_in(code: u32, accepted: &[LmotsType]) -> Result<Self, Error> {
         let t = match code {
             1 => LmotsType::Sha256N32W1,
             2 => LmotsType::Sha256N32W2,
@@ -40,7 +65,7 @@ impl LmotsType {
             4 => LmotsType::Sha256N32W8,
             _ => return Err(Error::UnknownLmotsType),
         };
-        if Self::ACCEPTED.contains(&t) {
+        if accepted.contains(&t) {
             Ok(t)
         } else {
             Err(Error::UnknownLmotsType)

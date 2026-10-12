@@ -1,0 +1,99 @@
+# cargo-fuzz campaigns for the LMS verifier and the vault's state logic.
+#
+#   push / PR : 5 minutes per target (smoke)
+#   weekly    : 2 hours per target, corpus cached between runs
+#
+# Targets live in fuzz/ (its own workspace); seeds come from kat/ via
+# fuzz/gen_seeds.py. A crash uploads the reproducer as an artifact.
+name: fuzz
+
+on:
+  push:
+    paths:
+      - "programs/lms/**"
+      - "programs/lamport-vault/src/**"
+      - "fuzz/**"
+      - "kat/**"
+      - ".github/workflows/fuzz.yml"
+  pull_request:
+    paths:
+      - "programs/lms/**"
+      - "programs/lamport-vault/src/**"
+      - "fuzz/**"
+      - "kat/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    # Sundays 03:17 UTC
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "seconds per target"
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [lms_parse, lms_verify, action_decode, key_history, leaf_bitmap]
+    env:
+      # 5 min smoke on push/PR, 2 h on the weekly schedule, user-chosen on dispatch.
+      SECONDS: ${{ github.event_name == 'schedule' && '7200' || (github.event_name == 'workflow_dispatch' && inputs.seconds) || '300' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add --toolchain nightly rust-src llvm-tools-preview
+
+      - name: Cache cargo registry, fuzz target dir and corpus
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-fuzz
+            fuzz/target
+            fuzz/corpus/${{ matrix.target }}
+          key: fuzz-${{ matrix.target }}-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.toml', 'programs/lms/Cargo.toml', 'programs/lamport-vault/Cargo.toml') }}
+          restore-keys: |
+            fuzz-${{ matrix.target }}-${{ runner.os }}-
+
+      - name: Install cargo-fuzz
+        run: command -v cargo-fuzz >/dev/null || cargo +nightly install cargo-fuzz --locked
+
+      - name: Seed corpus from kat/
+        run: |
+          cd fuzz
+          python3 gen_seeds.py
+          mkdir -p corpus/${{ matrix.target }}
+
+      - name: Build
+        run: cd fuzz && cargo +nightly fuzz build ${{ matrix.target }}
+
+      - name: Run ${{ matrix.target }} for $SECONDS s
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            corpus/${{ matrix.target }} seeds/${{ matrix.target }} \
+            -- -max_total_time=$SECONDS -max_len=16384 -timeout=30 -print_final_stats=1
+
+      - name: Minimise corpus (weekly only)
+        if: github.event_name == 'schedule'
+        run: cd fuzz && cargo +nightly fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

@@ -131,15 +131,15 @@ describe("Vault account", () => {
 });
 
 describe("SigBuffer account", () => {
-  const action = encodeAction({ kind: "TransferSol", to: PK_22, lamports: 10n, expirySlot: 20n });
+  const action = encodeAction({ kind: "TransferSol", to: PK_22, lamports: 10n, issuedSlot: 0n, expirySlot: 20n });
   const sig = new Uint8Array(2348).map((_, i) => (i * 7) & 0xff);
   const b: SigBufferAccount = { version: 1, bump: 250, vault: PK_11, payer: PK_22, nonce: NONCE, action, sigLen: 2348, filled: 900, sig };
 
   it("lays out vec<u8> action, sig_len/filled u16, then vec<u8> sig (SigBuffer::space)", () => {
     const bytes = encodeSigBuffer(b);
     expect(bytes.length).toBe(sigBufferSize(action.length, 2348));
-    expect(sigBufferSize(49, 2348)).toBe(8 + 1 + 1 + 32 + 32 + 8 + (4 + 49) + 2 + 2 + (4 + 2348));
-    const head = toHex(ACCOUNT.sigBuffer) + "01" + "fa" + "11".repeat(32) + "22".repeat(32) + "0807060504030201" + "31000000" + toHex(action) + "2c09" + "8403" + "2c090000";
+    expect(sigBufferSize(57, 2348)).toBe(8 + 1 + 1 + 32 + 32 + 8 + (4 + 57) + 2 + 2 + (4 + 2348));
+    const head = toHex(ACCOUNT.sigBuffer) + "01" + "fa" + "11".repeat(32) + "22".repeat(32) + "0807060504030201" + "39000000" + toHex(action) + "2c09" + "8403" + "2c090000";
     expect(toHex(bytes.subarray(0, head.length / 2))).toBe(head);
     expect(toHex(bytes.subarray(head.length / 2))).toBe(toHex(sig));
     const back = decodeSigBuffer(bytes);
@@ -207,11 +207,17 @@ describe("Commitment account", () => {
 describe("PqSigBuffer account", () => {
   it("round-trips with PqSigBuffer::space", () => {
     const sig = new Uint8Array(2508).fill(3);
-    const bytes = encodePqSigBuffer({ version: 1, bump: 1, owner: PK_11, payer: PK_22, nonce: 9n, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508, filled: 2508, sig });
+    const bytes = encodePqSigBuffer({ version: 1, bump: 1, owner: PK_11, payer: PK_22, nonce: 9n, newPqPubkey: KAT_H5_PUBKEY, issuedSlot: 0x1234n, expirySlot: 0x5678n, sigLen: 2508, filled: 2508, sig });
     expect(bytes.length).toBe(pqSigBufferSize(2508));
-    expect(pqSigBufferSize(2508)).toBe(8 + 1 + 1 + 32 + 32 + 8 + 56 + 2 + 2 + 4 + 2508);
+    expect(pqSigBufferSize(2508)).toBe(8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + 4 + 2508);
+    // the window sits between the key and sig_len: u64le issued, u64le expiry
+    const w = 8 + 1 + 1 + 32 + 32 + 8 + 56;
+    expect(toHex(bytes.subarray(w, w + 16))).toBe("3412000000000000" + "7856000000000000");
+    expect(toHex(bytes.subarray(w + 16, w + 18))).toBe("cc09");
     const back = decodePqSigBuffer(bytes);
     expect(back.nonce).toBe(9n);
+    expect(back.issuedSlot).toBe(0x1234n);
+    expect(back.expirySlot).toBe(0x5678n);
     expect(toHex(back.newPqPubkey)).toBe(toHex(KAT_H5_PUBKEY));
     expect(toHex(back.sig)).toBe(toHex(sig));
   });

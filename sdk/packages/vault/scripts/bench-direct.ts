@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   const results: Measured[] = [];
 
   // 1. TransferSol, direct v1.
-  const transfer: Omit<Extract<Action, { kind: "TransferSol" }>, "expirySlot"> = { kind: "TransferSol", to: recipient, lamports: BigInt(0.002 * LAMPORTS_PER_SOL) };
+  const transfer: Omit<Extract<Action, { kind: "TransferSol" }>, "issuedSlot" | "expirySlot"> = { kind: "TransferSol", to: recipient, lamports: BigInt(0.002 * LAMPORTS_PER_SOL) };
   results.push(await measureDirect(signerA, "TransferSol", await signerA.sign(transfer)));
   console.log(row(results.at(-1)!));
 
@@ -152,7 +152,8 @@ async function main(): Promise<void> {
 
   // 4. Rotate to key B, direct v1 (payer pays the 16-byte rent delta).
   const vaultBefore = await connection.getBalance(vault, COMMITMENT);
-  results.push(await measureDirect(signerA, "Rotate", await signerA.sign({ kind: "Rotate", newLmsPubkey: keyB.publicKey })));
+  // Key B is random, not derived from any words, so the foreign-key guard needs the explicit opt-in.
+  results.push(await measureDirect(signerA, "Rotate", await signerA.sign({ kind: "Rotate", newLmsPubkey: keyB.publicKey }, { allowForeignKey: true })));
   console.log(row(results.at(-1)!));
   const vaultAfter = await connection.getBalance(vault, COMMITMENT);
   const v = await new VaultSigner({ rpc: connection, key: keyB, payer, vault, commitment: COMMITMENT }).fetchVault();

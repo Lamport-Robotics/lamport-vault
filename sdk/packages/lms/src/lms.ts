@@ -169,7 +169,7 @@ function computeLeafRange(tree: Uint8Array, mat: LmsKeyMaterial, ots: LmotsParam
  * An LMS private key with its full node array T[1..2^(h+1)) in memory (32 bytes per node), so
  * signing is one LM-OTS signature plus a copy of h nodes (Appendix D).
  *
- * Leaf state (`q`) is intentionally NOT tracked here: the vault account holds `next_q` and the
+ * Leaf state (`q`) is intentionally NOT tracked here: the vault account holds the used-leaf bitmap and the
  * caller chooses q from it. See `VaultSigner` in `@lamport-robotics/vault`.
  */
 export class LmsPrivateKey {
@@ -277,7 +277,7 @@ export class LmsPrivateKey {
 
   /**
    * Sign `message` with leaf `q`. `C` defaults to 32 fresh random bytes; pass a fixed `C` only for
-   * test vectors. Never sign two different messages with the same q: the vault's `next_q` is the
+   * test vectors. Never sign two different messages with the same q: the vault's used-leaf bitmap is the
    * guard for that, read it before choosing q.
    */
   sign(q: number, message: Uint8Array, opts: { C?: Uint8Array } = {}): Uint8Array {

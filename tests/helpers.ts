@@ -104,31 +104,37 @@ export class LmsKey {
   }
 }
 
-/** Borsh encoding of `lamport_vault::Action`. */
+/** An action's validity window: `issued_slot <= slot <= expiry_slot`, at most MAX_VALIDITY_SLOTS wide. */
+export interface Window {
+  issued: BN | number;
+  expiry: BN | number;
+}
+
+/** `u64le(issued) || u64le(expiry)`, the tail of every Action. */
+export function windowBytes(w: Window): Buffer {
+  return Buffer.concat([new BN(w.issued).toArrayLike(Buffer, "le", 8), new BN(w.expiry).toArrayLike(Buffer, "le", 8)]);
+}
+
+/** Borsh encoding of `lamport_vault::Action`; every variant ends in the window. */
 export const Action = {
-  transferSol(to: PublicKey, lamports: BN | number, expirySlot: BN | number): Buffer {
-    return Buffer.concat([
-      Buffer.from([0]),
-      to.toBuffer(),
-      new BN(lamports).toArrayLike(Buffer, "le", 8),
-      new BN(expirySlot).toArrayLike(Buffer, "le", 8),
-    ]);
+  transferSol(to: PublicKey, lamports: BN | number, w: Window): Buffer {
+    return Buffer.concat([Buffer.from([0]), to.toBuffer(), new BN(lamports).toArrayLike(Buffer, "le", 8), windowBytes(w)]);
   },
-  transferToken(mint: PublicKey, to: PublicKey, amount: BN | number, expirySlot: BN | number): Buffer {
+  transferToken(mint: PublicKey, to: PublicKey, amount: BN | number, w: Window): Buffer {
     return Buffer.concat([
       Buffer.from([1]),
       mint.toBuffer(),
       to.toBuffer(),
       new BN(amount).toArrayLike(Buffer, "le", 8),
-      new BN(expirySlot).toArrayLike(Buffer, "le", 8),
+      windowBytes(w),
     ]);
   },
-  rotate(newLmsPubkey: Buffer, expirySlot: BN | number): Buffer {
+  rotate(newLmsPubkey: Buffer, w: Window): Buffer {
     expect(newLmsPubkey.length).to.eq(56);
-    return Buffer.concat([Buffer.from([2]), newLmsPubkey, new BN(expirySlot).toArrayLike(Buffer, "le", 8)]);
+    return Buffer.concat([Buffer.from([2]), newLmsPubkey, windowBytes(w)]);
   },
-  close(to: PublicKey, expirySlot: BN | number): Buffer {
-    return Buffer.concat([Buffer.from([3]), to.toBuffer(), new BN(expirySlot).toArrayLike(Buffer, "le", 8)]);
+  close(to: PublicKey, w: Window): Buffer {
+    return Buffer.concat([Buffer.from([3]), to.toBuffer(), windowBytes(w)]);
   },
 };
 
@@ -143,9 +149,9 @@ export function vaultMessage(programId: PublicKey, vault: PublicKey, generation:
   return sha256(Buffer.from("lamport-vault/v1"), programId.toBuffer(), vault.toBuffer(), u32le(generation), actionBytes);
 }
 
-/** sha256("pq-registry/v1" || program_id || owner || u32le(generation) || new_pq_pubkey) */
-export function registryMessage(programId: PublicKey, owner: PublicKey, generation: number, newPqPubkey: Buffer): Buffer {
-  return sha256(Buffer.from("pq-registry/v1"), programId.toBuffer(), owner.toBuffer(), u32le(generation), newPqPubkey);
+/** sha256("pq-registry/v1" || program_id || owner || u32le(generation) || new_pq_pubkey || u64le(issued) || u64le(expiry)) */
+export function registryMessage(programId: PublicKey, owner: PublicKey, generation: number, newPqPubkey: Buffer, w: Window): Buffer {
+  return sha256(Buffer.from("pq-registry/v1"), programId.toBuffer(), owner.toBuffer(), u32le(generation), newPqPubkey, windowBytes(w));
 }
 
 /** sha256(pubkey)[0..16]: a `used_keys` entry. */
@@ -245,6 +251,18 @@ export async function fund(provider: anchor.AnchorProvider, to: PublicKey, sol: 
 
 export async function currentSlot(provider: anchor.AnchorProvider): Promise<number> {
   return provider.connection.getSlot("confirmed");
+}
+
+/** A window issued now and open for `slots` more slots (default 5 000, well inside the one-day cap). */
+export async function window(provider: anchor.AnchorProvider, slots = 5000): Promise<Window> {
+  const slot = await currentSlot(provider);
+  return { issued: slot, expiry: slot + slots };
+}
+
+/** A window that closed before the current slot (and was issued before that). */
+export async function expiredWindow(provider: anchor.AnchorProvider): Promise<Window> {
+  const slot = await currentSlot(provider);
+  return { issued: Math.max(0, slot - 2), expiry: Math.max(0, slot - 1) };
 }
 
 export function meta(pubkey: PublicKey, isWritable: boolean, isSigner = false): AccountMeta {

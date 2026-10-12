@@ -7,7 +7,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
 use lamport_lms::LmsType;
-use lamport_vault::{signed_message, vault_id_for, Action, SigBuffer, Vault, KEY_HASH_LEN, MESSAGE_VERSION, SIG_SEED, VAULT_SEED};
+use lamport_vault::{
+    signed_message, vault_id_for, Action, SigBuffer, Vault, KEY_HASH_LEN, MAX_VALIDITY_SLOTS, MESSAGE_VERSION, SIG_SEED, VAULT_SEED,
+};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -47,7 +49,12 @@ fn vectors_target_this_program_id() {
 #[test]
 fn action_encodings_and_messages() {
     let d = v();
+    let issued = u64s(&d["inputs"]["issued_slot"]);
     let expiry = u64s(&d["inputs"]["expiry_slot"]);
+    assert_eq!(issued.to_le_bytes().to_vec(), hx(&d["inputs"]["issued_slot_le_hex"]));
+    assert_eq!(expiry.to_le_bytes().to_vec(), hx(&d["inputs"]["expiry_slot_le_hex"]));
+    assert_eq!(d["validity"]["max_validity_slots"].as_u64().unwrap(), MAX_VALIDITY_SLOTS);
+    let sizes = &d["validity"]["action_sizes"];
     let generation = u32s(&d["inputs"]["generation"]);
     let h10: [u8; 56] = hx(&d["inputs"]["h10_pubkey_hex"]).try_into().unwrap();
     let (vault, _) = Pubkey::find_program_address(&[VAULT_SEED, &vault_id_for(&h5(&d))], &lamport_vault::ID);
@@ -64,6 +71,7 @@ fn action_encodings_and_messages() {
             Action::TransferSol {
                 to: pk(&a["transfer_sol"]["action"]["to"]),
                 lamports: u64s(&a["transfer_sol"]["action"]["lamports"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -73,6 +81,7 @@ fn action_encodings_and_messages() {
                 mint: pk(&a["transfer_token"]["action"]["mint"]),
                 to: pk(&a["transfer_token"]["action"]["to"]),
                 amount: u64s(&a["transfer_token"]["action"]["amount"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -80,6 +89,7 @@ fn action_encodings_and_messages() {
             "rotate",
             Action::Rotate {
                 new_lms_pubkey: h10,
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -87,6 +97,7 @@ fn action_encodings_and_messages() {
             "close",
             Action::Close {
                 to: pk(&a["close"]["action"]["to"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -95,6 +106,18 @@ fn action_encodings_and_messages() {
         let bytes = action.encode();
         assert_eq!(bytes, hx(&a[name]["action_hex"]), "{name} encoding");
         assert_eq!(Action::decode(&bytes).unwrap(), action, "{name} decode");
+        assert_eq!(action.window(), (issued, expiry), "{name} window");
+        let size_key = match name {
+            "transfer_sol" => "TransferSol",
+            "transfer_token" => "TransferToken",
+            "rotate" => "Rotate",
+            _ => "Close",
+        };
+        assert_eq!(bytes.len() as u64, sizes[size_key].as_u64().unwrap(), "{name} size");
+        // The window is the last 16 bytes of every variant: issued_slot then expiry_slot.
+        let n = bytes.len();
+        assert_eq!(&bytes[n - 16..n - 8], &issued.to_le_bytes());
+        assert_eq!(&bytes[n - 8..], &expiry.to_le_bytes());
         assert_eq!(
             signed_message(&vault, generation, &bytes).to_vec(),
             hx(&a[name]["message_hex"]),

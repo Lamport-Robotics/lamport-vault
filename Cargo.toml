@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "programs/*"
+]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1
+
+# Host tests hash a few million times (tree construction, bit-flip sweeps);
+# optimize dependencies so `cargo test` stays quick while keeping debug info
+# for the crates under test.
+[profile.dev.package."*"]
+opt-level = 3

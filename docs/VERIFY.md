@@ -61,19 +61,21 @@ Not deployed. The plan, in order:
 
 ## Record
 
-devnet, from commit `c596d0a` (`anchor build`, platform-tools v1.56):
+devnet, from commit `17c7880` (`anchor build`, platform-tools v1.56; the same binaries CI built):
 
 ```
 lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-  hash       4d492d9e99d61cabac01a2e4a5ca93e8eeb61cb24b0f9175ef9332df67a7d8c1
-  slot       510255069
+  hash       d7481e2404bf89408cb1b76694395b31ae93938120a42db637cb886ece978f85
+  slot       510277112
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
 
 pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
-  hash       ad3beeabf96a0140d0b00781c3c22286b15b9f984aac7b8432e21d751db3de81
-  slot       510250792
+  hash       3480ae2de802671ee6231c3a191b07b45cc462b5999ee20e29d3ad14ba00bd9f
+  slot       510277271
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
 ```
+
+earlier: commit `c596d0a`, vault `4d492d9e…d8c1` at slot 510255069, registry `ad3beeab…de81` at slot 510250792.
 
 Devnet is redeployed as the code changes; this block is updated with each deployment and the script
 is the source of truth in between.

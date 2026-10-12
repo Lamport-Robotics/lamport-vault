@@ -10,6 +10,7 @@ import { LAMPORT_VAULT_PROGRAM_ID } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
+import { openJournal } from "./journal.ts";
 
 const app = $("#app");
 app.className = "shell";
@@ -73,13 +74,25 @@ $("#sign").addEventListener("click", async () => {
     btn.disabled = true; btn.classList.add("spin"); btn.textContent = "deriving key";
     const master = mnemonicToMaster(words, ($("#pass") as HTMLInputElement).value);
     const pub = unb64(req.lmsPubkey);
-    const scope = { genesisHash: (CLUSTERS as Record<string, { genesisHash: string }>)[req.cluster === "mainnet-beta" ? "mainnet" : req.cluster]?.genesisHash ?? CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    const clusterKey = req.cluster === "mainnet-beta" ? "mainnet" : req.cluster;
+    const cluster = (CLUSTERS as Record<string, { genesisHash: string }>)[clusterKey];
+    if (!cluster) throw new Error(`unknown cluster "${req.cluster}" in the request; refusing to sign`);
+    const scope = { genesisHash: cluster.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    // one-time keys: never sign the same leaf twice. the journal is this browser's durable memory of
+    // which leaves this signer has used; it advances q past anything it has already signed.
+    const journal = await openJournal();
+    if (!journal) throw new Error("this browser gives the signer no durable storage, so it cannot remember which one-time keys it used; open the file in Chrome or Firefox, or use a hardware signer");
+    const jk = `${req.vault}:${req.generation ?? 0}`;
+    const rec = journal.get(jk);
+    const q = Math.max(req.nextQ, rec ? rec.maxQ + 1 : 0);
+    if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}, but this signer already used it; signing with key ${q} instead`);
+    if (!(await journal.reserve(jk, q))) throw new Error(`key ${q} is already recorded as used by this signer`);
     const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
     const action = toAction(req);
     const message = vaultMessage(new PublicKey(req.vault), req.generation ?? 0, encodeAction(action));
-    const signature = found.key.sign(req.nextQ, message);
-    const blob: SignedBlob = { v: 1, vault: req.vault, q: req.nextQ, generation: req.generation ?? 0, action: req.action, issuedSlot: req.issuedSlot, expirySlot: req.expirySlot, signature: b64(signature) };
+    const signature = found.key.sign(q, message);
+    const blob: SignedBlob = { v: 1, vault: req.vault, q, generation: req.generation ?? 0, action: req.action, issuedSlot: req.issuedSlot, expirySlot: req.expirySlot, signature: b64(signature) };
     ($("#sig") as HTMLTextAreaElement).value = JSON.stringify(blob);
     $("#out").classList.remove("hidden");
     ($("#words") as HTMLTextAreaElement).value = ""; ($("#pass") as HTMLInputElement).value = "";
@@ -114,3 +127,5 @@ function toAction(r: SignRequest): Action {
 
 // keep the key-derivation code path warm so the first sign is not a cold import
 void LmsPrivateKey; void deriveKeyMaterial;
+
+function note(text: string) { const n = el("div", { class: "notice", style: "margin-top:14px" }, text); $("#out").prepend(n); }

@@ -8,6 +8,7 @@ import { connectStandard, listWallets, localWallet, onWalletsChange, remember, r
 import * as qr from "./qr.ts";
 import { holdings, destinationTokenAccount, toBase, type Holding } from "./tokens.ts";
 import { tape } from "./tape.ts";
+import { openJournal } from "./journal.ts";
 
 // ── state ──
 let wallet: Wallet | null = null;
@@ -378,9 +379,16 @@ function hotFlow(scope: Scope) {
       const until = slotToDate(slot + 1500, slot);
       if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.`))) return;
       const action = toAction(a, BigInt(slot), BigInt(slot + 1500));
-      const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
+      // never sign the same one-time key twice, even if the chain has not seen the first signature yet
+      const journal = await openJournal();
+      if (!journal) throw new Error("This browser gives no durable storage for the key journal; signing here is not safe.");
+      const jk = `${vaultAddr!.toBase58()}:${v.generation}`;
+      const rec = journal.get(jk);
+      const minQ = rec ? rec.maxQ + 1 : 0;
+      const q = firstFreeLeaf(v, 0, 1, (x) => x < minQ); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const leaves = 2 ** lmsParams(parseLmsPublicKey(v.lmsPubkey).lmsType).h;
       if (leaves - v.spent <= 1 && action.kind !== "Rotate") throw new Error("Last one-time key: only a rotation is allowed now.");
+      if (!(await journal.reserve(jk, q))) throw new Error(`One-time key ${q} is already recorded as used in this browser.`);
       const signature = hotKey.sign(q, vaultMessage(vaultAddr!, v.generation, encodeAction(action)));
       await stageAndExecute(action, signature, q, $("#steps", s), btn);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }

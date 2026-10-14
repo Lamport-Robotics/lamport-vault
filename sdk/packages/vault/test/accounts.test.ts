@@ -18,6 +18,7 @@ import {
   encodeVault,
   firstFreeLeaf,
   freeLeaves,
+  freeLeavesExcluding,
   hasUsedKey,
   isLeafUsed,
   isTombstone,
@@ -101,6 +102,13 @@ describe("Vault account", () => {
     const fresh = new Uint8Array(KAT_H5_PUBKEY);
     fresh[55]! ^= 1;
     expect(hasUsedKey(v, fresh)).toBe(false);
+  });
+
+  it("counts free leaves without the ones a signer already used", () => {
+    expect(freeLeavesExcluding(v)).toBe(freeLeaves(v));
+    const below10 = Array.from({ length: 10 }, (_, q) => q).filter((q) => !isLeafUsed(v, q)).length;
+    expect(freeLeavesExcluding(v, (q) => q < 10)).toBe(freeLeaves(v) - below10);
+    expect(freeLeavesExcluding(v, () => true)).toBe(0);
   });
 
   it("reads the bitmap: isLeafUsed, freeLeaves, firstFreeLeaf with lanes", () => {

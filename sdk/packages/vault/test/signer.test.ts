@@ -241,6 +241,20 @@ describe("VaultSigner", () => {
     await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).rejects.toThrow(/used before/);
   });
 
+  it("signed but unsent leaves count toward the exhaustion rule", async () => {
+    const rpc = new MockRpc();
+    const payer = Keypair.generate();
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    // 30 of 32 spent on chain; the two free leaves are 7 and 9
+    rpc.accounts.set(signer.vault.toBase58(), vaultAccount(range(32).filter((q) => q !== 7 && q !== 9)));
+    const t = await signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n });
+    expect(t.q).toBe(7);
+    // leaf 7 is signed but not sent: the chain still shows two free leaves, the signer must not
+    await expect(signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    const close = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(close.q).toBe(9);
+  });
+
   it("rotate to a key not from the words", async () => {
     // The vault's key is index 0 of a 24-word phrase; the only Rotate target the signer accepts
     // on its own is index 1 of the same words. Anything else needs { allowForeignKey: true }.

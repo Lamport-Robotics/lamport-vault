@@ -104,9 +104,21 @@ export function leafCount(vault: Pick<VaultAccount, "lmsPubkey">): number {
   return 2 ** lmsParams(parseLmsPublicKey(vault.lmsPubkey).lmsType).h;
 }
 
-/** Leaves still free under the current key. */
+/** Leaves still free under the current key, as the chain counts them. */
 export function freeLeaves(vault: Pick<VaultAccount, "lmsPubkey" | "spent">): number {
   return leafCount(vault) - vault.spent;
+}
+
+/**
+ * Leaves still free under the current key once `skip` (leaves this signer has already signed
+ * with, sent or not) is taken out. The exhaustion rule must use this count: a signature that
+ * exists but has not landed still consumes its leaf.
+ */
+export function freeLeavesExcluding(vault: Pick<VaultAccount, "lmsPubkey" | "used">, skip?: (q: number) => boolean): number {
+  const total = leafCount(vault);
+  let n = 0;
+  for (let q = 0; q < total; q++) if (!isLeafUsed(vault, q) && !skip?.(q)) n++;
+  return n;
 }
 
 /** Whether leaf `q` is spent on chain. Leaves outside the tree count as spent. */

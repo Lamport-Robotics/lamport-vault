@@ -732,6 +732,7 @@ export function nextKeyMaterial(master: Uint8Array, vault: Pick<VaultAccount, "l
   for (let k = 0; k <= max; k++) {
     if (!equalBytes(deriveLmsInputs(master, k, scope).I, current.I)) continue;
     if (k === 0xffffffff) throw new Error("the vault's key is the registry key (index 0xffffffff); it has no next index");
+    if (k + 1 > max) throw new Error(`the next key index ${k + 1} is past the recovery limit ${max}; it could not be found again from the words`);
     return { k, material: deriveKeyMaterial(master, k + 1, scope, current.lmsType, current.lmotsType) };
   }
   throw new Error(`the vault's current key is not derived from this master seed for this cluster and program (indices 0..${max} tried)`);

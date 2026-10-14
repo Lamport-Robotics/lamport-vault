@@ -28,8 +28,12 @@ export const SEED_INFO_LABEL = "seed";
 export const ID_INFO_LABEL = "id";
 /** The pq-registry commitment key uses this reserved index so it never collides with a vault key. */
 export const REGISTRY_KEY_INDEX = 0xffffffff;
-/** Recovery walks k = 0..RECOVERY_MAX_INDEX (inclusive) before giving up. */
-export const RECOVERY_MAX_INDEX = 64;
+/**
+ * Recovery walks k = 0..RECOVERY_MAX_INDEX (inclusive) before giving up. A probe is two HKDF
+ * expansions, so the whole walk is milliseconds; the tree is only built on a match. A Rotate never
+ * targets an index past this, so a key the words produced is always found again.
+ */
+export const RECOVERY_MAX_INDEX = 4096;
 
 /** A Solana cluster, identified by its genesis hash (base58 of 32 bytes). */
 export interface Cluster {

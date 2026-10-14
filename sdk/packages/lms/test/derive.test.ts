@@ -195,6 +195,12 @@ describe("recovery", () => {
     expect(toHex(found!.key.publicKey)).toBe(toHex(k3.publicKey));
   });
 
+  it("finds a key far past the first few indices with the default limit", async () => {
+    const master = mnemonicToMaster(REF_MNEMONIC);
+    const k300 = LmsPrivateKey.generate(deriveKeyMaterial(master, 300, DEVNET, LMS_SHA256_M32_H5));
+    expect((await recoverKey(master, k300.publicKey, DEVNET))?.k).toBe(300);
+  });
+
   it("returns null for a key that is not derived from these words, or from another cluster or program", async () => {
     const master = mnemonicToMaster(REF_MNEMONIC);
     const stranger = LmsPrivateKey.generate(deriveKeyMaterial(mnemonicToMaster(REF_MNEMONIC, "x"), 0, DEVNET, LMS_SHA256_M32_H5));

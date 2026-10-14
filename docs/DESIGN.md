@@ -168,7 +168,7 @@ signed-but-unsubmitted action stays valid. A signature made under generation `g`
 TransferSol   { to: Pubkey, lamports: u64, issued_slot: u64, expiry_slot: u64 }                      57 bytes
 TransferToken { mint: Pubkey, to: Pubkey /* token account */, amount: u64, issued_slot: u64, expiry_slot: u64 }  89 bytes
 Rotate        { new_lms_pubkey: [u8;56], issued_slot: u64, expiry_slot: u64 }   // bitmap cleared, spent = 0, generation += 1   73 bytes
-Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                 // all lamports but the tombstone's rent to `to`; token accounts must be empty  49 bytes
+Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                 // all lamports but the tombstone's rent to `to`; empty token accounts passed in are closed, any other balance is swept to `to` later by `sweep_closed`  49 bytes
 ```
 
 **Validity window.** Every variant ends in `issued_slot || expiry_slot` (u64 little-endian each). With

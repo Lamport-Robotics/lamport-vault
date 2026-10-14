@@ -157,6 +157,10 @@ describe("vault instruction data and accounts", () => {
     const tok22 = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_2022_PROGRAM_ID);
     expect(tok22[0]!.pubkey.equals(associatedTokenAddress(vault, PK_22, TOKEN_2022_PROGRAM_ID))).toBe(true);
     expect(tok22[3]!.pubkey.equals(TOKEN_2022_PROGRAM_ID)).toBe(true);
+    // a token sitting in a non-associated account owned by the vault is drawn from that account
+    const aux = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_PROGRAM_ID, [], PK_11);
+    expect(aux[0]!.pubkey.equals(PK_11)).toBe(true);
+    expect(aux[0]!.isWritable).toBe(true);
   });
 
   it("sweep_closed: payer, tombstone, heir, heir ATA, vault token account, mint, token program, system, ATA program; only the discriminator", () => {

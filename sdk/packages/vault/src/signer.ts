@@ -242,6 +242,8 @@ export interface ExecuteOpts extends SendOpts {
   allowForeignKey?: boolean;
   nonce?: bigint;
   closeTokenAccounts?: CloseTokenAccount[];
+  /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
   /** Overrides the signer's default mode for this call. */
   mode?: ExecuteMode;
   /** In "auto" mode: called with the rejection before the staged flow starts. */
@@ -605,6 +607,7 @@ export class VaultSigner {
       ...(cfg.loadedAccountsDataSizeLimit !== undefined ? { loadedAccountsDataSizeLimit: cfg.loadedAccountsDataSizeLimit } : {}),
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
+      ...(opts.source ? { source: opts.source } : {}),
       commitment: opts.commitment ?? this.opts.commitment,
     });
     opts.onTransaction?.(0, 1, res.signature);
@@ -625,6 +628,7 @@ export class VaultSigner {
       computeUnits: this.opts.computeUnits ?? EXECUTE_COMPUTE_UNITS,
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
+      ...(opts.source ? { source: opts.source } : {}),
     });
     const signatures = await sendSequence(this.rpc, this.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
     return { ...signed, mode: "staged", nonce, sigBuffer: staged.sigBuffer, signatures };

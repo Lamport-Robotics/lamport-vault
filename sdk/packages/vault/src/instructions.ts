@@ -164,6 +164,8 @@ export interface ExecuteParams {
   tokenProgram?: PublicKey;
   /** For `Close`: empty token accounts owned by the vault to close to `to` in the same instruction. */
   closeTokenAccounts?: CloseTokenAccount[];
+  /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
 }
 
 /** Remaining accounts `execute` needs for an action (docs/DESIGN.md "Actions", program `execute` doc). */
@@ -172,12 +174,13 @@ export function executeRemainingAccounts(
   action: Action,
   tokenProgram = TOKEN_PROGRAM_ID,
   closeTokenAccounts: CloseTokenAccount[] = [],
+  source?: PublicKey,
 ): AccountMeta[] {
   switch (action.kind) {
     case "TransferSol":
       return [w(action.to)];
     case "TransferToken":
-      return [w(associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram)];
+      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram)];
     case "Rotate":
       return [];
     case "Close":
@@ -188,7 +191,7 @@ export function executeRemainingAccounts(
 export function executeInstruction(p: ExecuteParams): TransactionInstruction {
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts)],
+    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source)],
     data: Buffer.from(IX.execute),
   });
 }
@@ -224,6 +227,8 @@ export interface StagedExecutionParams {
   chunkSize?: number;
   tokenProgram?: PublicKey;
   closeTokenAccounts?: CloseTokenAccount[];
+  /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
   computeUnits?: number;
 }
 
@@ -254,6 +259,7 @@ export function buildStagedExecution(p: StagedExecutionParams): StagedExecution 
       action: p.action,
       ...(p.tokenProgram ? { tokenProgram: p.tokenProgram } : {}),
       ...(p.closeTokenAccounts ? { closeTokenAccounts: p.closeTokenAccounts } : {}),
+      ...(p.source ? { source: p.source } : {}),
     },
     p.computeUnits ?? EXECUTE_COMPUTE_UNITS,
   );

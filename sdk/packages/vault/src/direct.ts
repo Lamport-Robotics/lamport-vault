@@ -62,6 +62,8 @@ export interface ExecuteDirectParams {
   tokenProgram?: PublicKey;
   /** For `Close`: empty token accounts owned by the vault to close to `to` in the same instruction. */
   closeTokenAccounts?: CloseTokenAccount[];
+  /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
 }
 
 /**
@@ -74,7 +76,7 @@ export function executeDirectInstruction(p: ExecuteDirectParams): TransactionIns
   const data = new ByteWriter().raw(IX.executeDirect).vecU8(actionBytes).vecU8(p.signature).bytes();
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts)],
+    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source)],
     data: Buffer.from(data),
   });
 }

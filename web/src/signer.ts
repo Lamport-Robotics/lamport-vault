@@ -5,8 +5,8 @@
 import "./polyfill.ts";
 import "./style.css";
 import { PublicKey } from "@solana/web3.js";
-import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, CLUSTERS } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID } from "@lamport-robotics/vault";
+import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, lmsParams, equalBytes, CLUSTERS } from "@lamport-robotics/lms";
+import { LAMPORT_VAULT_PROGRAM_ID, nextKeyMaterial } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
@@ -53,7 +53,7 @@ $("#req").addEventListener("input", () => {
     const a = r.action;
     const line = a.kind === "TransferSol" ? `send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`
       : a.kind === "TransferToken" ? `send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount + " base units"} of token ${short(a.mint, 6)} to token account ${a.to}`
-      : a.kind === "Rotate" ? `rotate the vault key to ${short(a.newLmsPubkey, 10)}` : `close the vault, everything to ${a.to}`;
+      : a.kind === "Rotate" ? "rotate the vault to the next key from your words" : `close the vault, everything to ${a.to}`;
     v.append(el("dl", { class: "spec", style: "margin-top:4px" },
       el("dt", {}, "vault"), el("dd", {}, r.vault),
       el("dt", {}, "action"), el("dd", {}, line),
@@ -86,11 +86,25 @@ $("#sign").addEventListener("click", async () => {
     const rec = await journal.get(jk);
     const q = Math.max(req.nextQ, rec ? rec.maxQ + 1 : 0);
     if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}, but this signer already used it; signing with key ${q} instead`);
-    if (!(await journal.reserve(jk, q, { vault: req.vault, generation: req.generation ?? 0 }))) throw new Error(`key ${q} is already recorded as used by this signer`);
     const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
+    // exhaustion rule, with what this signer knows: leaves it signed with but never sent are gone too
+    const total = 2 ** lmsParams(parseLmsPublicKey(pub).lmsType).h;
+    const chainFree = req.freeLeaves ?? total;
+    const freeNow = Math.min(chainFree - (q - req.nextQ), total - q);
+    if (freeNow <= 1 && req.action.kind !== "Rotate" && req.action.kind !== "Close") throw new Error("this is the last one-time key of the vault; it may only be spent on a rotation or on closing the vault");
+    if (req.action.kind === "Rotate") {
+      // the target is the next key of these same words, derived here; a target in the request must be that key
+      btn.textContent = "deriving the next key";
+      const { k, material } = nextKeyMaterial(master, { lmsPubkey: pub }, scope);
+      const next = await LmsPrivateKey.generateAsync(material, { onProgress: (d, t) => (btn.textContent = `deriving the next key ${Math.round((d / t) * 100)}%`) });
+      if (req.action.newLmsPubkey && !equalBytes(unb64(req.action.newLmsPubkey), next.publicKey)) throw new Error(`the request asks to rotate to a key these words cannot reproduce (not index ${k + 1}); refusing, the vault would be lost`);
+      req.action = { kind: "Rotate", newLmsPubkey: b64(next.publicKey) };
+    }
     const action = toAction(req);
     const message = vaultMessage(new PublicKey(req.vault), req.generation ?? 0, encodeAction(action));
+    // every check passed: record the leaf durably, then sign. a refused request costs no leaf.
+    if (!(await journal.reserve(jk, q, { vault: req.vault, generation: req.generation ?? 0 }))) throw new Error(`key ${q} is already recorded as used by this signer`);
     const signature = found.key.sign(q, message);
     const blob: SignedBlob = { v: 1, vault: req.vault, q, generation: req.generation ?? 0, action: req.action, issuedSlot: req.issuedSlot, expirySlot: req.expirySlot, signature: b64(signature) };
     ($("#sig") as HTMLTextAreaElement).value = JSON.stringify(blob);
@@ -121,7 +135,7 @@ function toAction(r: SignRequest): Action {
   const a = r.action;
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
   if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
-  if (a.kind === "Rotate") { const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, issuedSlot, expirySlot }; }
+  if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("rotation target not derived"); const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, issuedSlot, expirySlot }; }
   return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
 }
 

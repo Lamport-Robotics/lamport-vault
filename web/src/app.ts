@@ -5,7 +5,7 @@ import "./interface.css";
 import { presentHome } from "./presentation.ts";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, isLeafUsed, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
+import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, freeLeaves, freeLeavesExcluding, isLeafUsed, nextKeyMaterial, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
 import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
@@ -22,6 +22,7 @@ let vaultLamports = 0;
 let vaultTokens: Holding[] = [];
 let closed = false;   // the address holds a closed vault's tombstone
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
+let hotMaster: Uint8Array | null = null;   // with it: the seed the next key (a Rotate target) is derived from
 const SCOPE = { genesisHash: GENESIS_HASH, programId: LAMPORT_VAULT_PROGRAM_ID };
 let lastRun: { vault: string; q: number; kind: string; sigs: string[] } | null = null;
 type Tab = "deposit" | "withdraw" | "rotate" | "registry";
@@ -267,17 +268,16 @@ function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest[
     ? [el("option", { value: "Rotate" }, "Rotate to a new key"), el("option", { value: "Close" }, "Close the vault")]
     : [el("option", { value: "TransferSol" }, "Send SOL"), ...(vaultTokens.length ? [el("option", { value: "TransferToken" }, "Send a token")] : [])];
   const kind = el("select", { id: "kind" }, ...kinds);
-  const mint = el("select", { id: "mint" }, ...vaultTokens.map((t) => el("option", { value: t.mint.toBase58() }, `${short(t.mint.toBase58(), 5)} · ${t.ui}`)));
+  const mint = el("select", { id: "mint" }, ...vaultTokens.map((t) => el("option", { value: t.account.toBase58() }, `${short(t.mint.toBase58(), 5)} · ${t.ui}${t.account.equals(associatedTokenAddress(vaultAddr!, t.mint, t.tokenProgram)) ? "" : " · " + short(t.account.toBase58(), 4)}`)));
   const to = el("input", { class: "mono", id: "to", autocomplete: "off", spellcheck: "false" });
   const amt = el("input", { class: "mono", id: "wamt", inputmode: "decimal", placeholder: "0.00" });
-  const rot = el("input", { class: "mono", id: "rot", placeholder: "base64, 56 bytes", autocomplete: "off", spellcheck: "false" });
   const node = el("div", {},
     el("label", { class: "field" }, el("span", {}, "Action"), kind),
     el("label", { class: "field", id: "f-mint" }, el("span", {}, "Token"), mint),
     el("div", { class: "two" },
       el("label", { class: "field", id: "f-to" }, el("span", {}, "Destination"), to),
       el("label", { class: "field", id: "f-amt" }, el("span", {}, "Amount"), amt)),
-    el("label", { class: "field", id: "f-rot" }, el("span", {}, "New public key"), rot));
+    el("p", { class: "quiet", id: "f-rot", style: "font-size:13px" }, "The new key is the next one derived from your words, so the same words keep opening this vault. Nothing to type."));
   const sync = () => {
     const k = (kind as HTMLSelectElement).value;
     $("#f-to", node).classList.toggle("hidden", k === "Rotate");
@@ -290,14 +290,14 @@ function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest[
     const k = (kind as HTMLSelectElement).value;
     if (k === "TransferSol") { if (!isPubkey(to.value)) throw new Error("Enter a destination address."); const n = Number(amt.value); if (!(n > 0)) throw new Error("Enter an amount."); return { kind: "TransferSol", to: to.value.trim(), lamports: String(Math.round(n * 1e9)) }; }
     if (k === "TransferToken") {
-      const h = vaultTokens.find((t) => t.mint.toBase58() === (mint as HTMLSelectElement).value); if (!h) throw new Error("Pick a token.");
+      const h = vaultTokens.find((t) => t.account.toBase58() === (mint as HTMLSelectElement).value); if (!h) throw new Error("Pick a token.");
       if (!isPubkey(to.value)) throw new Error("Enter a destination address.");
       const amount = toBase(amt.value, h.decimals); if (amount <= 0n || amount > h.amount) throw new Error("Enter an amount the vault holds.");
       lastTokenOwner = new PublicKey(to.value.trim());
       const ata = associatedTokenAddress(lastTokenOwner, h.mint, h.tokenProgram);
-      return { kind: "TransferToken", mint: h.mint.toBase58(), to: ata.toBase58(), amount: amount.toString(), tokenProgram: h.tokenProgram.toBase58(), decimals: h.decimals };
+      return { kind: "TransferToken", mint: h.mint.toBase58(), to: ata.toBase58(), amount: amount.toString(), tokenProgram: h.tokenProgram.toBase58(), decimals: h.decimals, source: h.account.toBase58() };
     }
-    if (k === "Rotate") { const b = unb64(rot.value); parseLmsPublicKey(b); return { kind: "Rotate", newLmsPubkey: b64(b) }; }
+    if (k === "Rotate") return { kind: "Rotate" };
     if (!isPubkey(to.value)) throw new Error("Enter a destination address."); return { kind: "Close", to: to.value.trim() };
   };
   return { node, read };
@@ -317,15 +317,24 @@ function confirmPanel(host: HTMLElement, what: string, note: string): Promise<bo
 function describe(a: SignRequest["action"]): string {
   if (a.kind === "TransferSol") return `Send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`;
   if (a.kind === "TransferToken") return `Send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
-  if (a.kind === "Rotate") return `Rotate the vault to a new key ${short(a.newLmsPubkey, 10)}`;
+  if (a.kind === "Rotate") return a.newLmsPubkey ? `Rotate the vault to the next key from your words ${short(a.newLmsPubkey, 10)}` : "Rotate the vault to the next key from your words";
   return `Close the vault and send everything to ${a.to}`;
 }
 
 function toAction(a: SignRequest["action"], issuedSlot: bigint, expirySlot: bigint): Action {
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
   if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
-  if (a.kind === "Rotate") return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), issuedSlot, expirySlot };
+  if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("The rotation target is missing; the signer derives it from the words."); return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), issuedSlot, expirySlot }; }
   return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
+}
+
+/** the token account a TransferToken draws from: the one the form picked, else any vault account of that mint that covers the amount */
+function sourceFor(a: Action & { kind: "TransferToken" }, picked?: string): Holding {
+  const byAccount = picked ? vaultTokens.find((t) => t.account.toBase58() === picked) : undefined;
+  if (byAccount) return byAccount;
+  const h = vaultTokens.filter((t) => t.mint.equals(a.mint) && t.amount >= a.amount).sort((x, y) => Number(y.account.equals(associatedTokenAddress(vaultAddr!, y.mint, y.tokenProgram))) - Number(x.account.equals(associatedTokenAddress(vaultAddr!, x.mint, x.tokenProgram))))[0];
+  if (!h) throw new Error("The vault has no token account of that mint with that balance.");
+  return h;
 }
 
 function coldFlow(scope: Scope) {
@@ -352,7 +361,7 @@ function coldFlow(scope: Scope) {
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const act = form.read();
       if (act.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
-      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
+      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, freeLeaves: freeLeaves(v), issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
       ($("#reqtxt", s) as HTMLTextAreaElement).value = JSON.stringify(req); $("#reqout", s).classList.remove("hidden");
       $("#reqvalid", s).textContent = `Valid until about ${slotToDate(slot + 9000, slot).toLocaleTimeString()} (slot ${slot + 9000}).`;
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
@@ -372,7 +381,8 @@ function coldFlow(scope: Scope) {
       const blob = JSON.parse(($("#sigtxt", s) as HTMLTextAreaElement).value) as SignedBlob;
       if (blob.v !== 1 || blob.vault !== vaultAddr!.toBase58()) throw new Error("This signature belongs to another vault.");
       if ((blob.generation ?? 0) !== v.generation) throw new Error("This signature was made for an earlier key generation. Prepare a new request.");
-      await stageAndExecute(toAction(blob.action, BigInt(blob.issuedSlot ?? blob.expirySlot), BigInt(blob.expirySlot)), unb64(blob.signature), blob.q, $("#steps", s), $("#run", s) as HTMLButtonElement);
+      const action = toAction(blob.action, BigInt(blob.issuedSlot ?? blob.expirySlot), BigInt(blob.expirySlot));
+      await stageAndExecute(action, unb64(blob.signature), blob.q, $("#steps", s), $("#run", s) as HTMLButtonElement, blob.action.kind === "TransferToken" ? blob.action.source : undefined);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
   return s;
@@ -390,7 +400,7 @@ function hotFlow(scope: Scope) {
     el("div", { class: "actions" }, el("button", { class: "btn primary", id: "hrun" }, "Sign and execute")),
     el("ul", { class: "steps hidden", id: "steps" }),
     el("div", { class: "err hidden", id: "werr" }));
-  $("#forget", s)?.addEventListener("click", () => { hotKey = null; render(); });
+  $("#forget", s)?.addEventListener("click", () => { hotKey = null; hotMaster = null; render(); });
   $("#hrun", s).addEventListener("click", async () => {
     const err = $("#werr", s), btn = $("#hrun", s) as HTMLButtonElement; err.classList.add("hidden");
     try {
@@ -399,13 +409,21 @@ function hotFlow(scope: Scope) {
         const words = ($("#hwords", s) as HTMLTextAreaElement).value.trim().toLowerCase().split(/\s+/).join(" ");
         if (!isValidMnemonic(words)) throw new Error("That is not a valid 24-word phrase.");
         btn.setAttribute("disabled", ""); btn.classList.add("spin");
-        const found = await recoverKey(mnemonicToMaster(words, ($("#hpass", s) as HTMLInputElement).value), v.lmsPubkey, SCOPE, { onProgress: (d, t) => (btn.textContent = `Deriving ${Math.round((d / t) * 100)}%`) });
+        const master = mnemonicToMaster(words, ($("#hpass", s) as HTMLInputElement).value);
+        const found = await recoverKey(master, v.lmsPubkey, SCOPE, { onProgress: (d, t) => (btn.textContent = `Deriving ${Math.round((d / t) * 100)}%`) });
         if (!found) throw new Error("These words do not open this vault.");
-        hotKey = found.key;
+        hotKey = found.key; hotMaster = master;
       }
-      if (!equalBytes(hotKey.publicKey, v.lmsPubkey)) { hotKey = null; throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
+      if (!equalBytes(hotKey.publicKey, v.lmsPubkey) || !hotMaster) { hotKey = null; hotMaster = null; throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
       const a = form.read();
       if (a.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
+      if (a.kind === "Rotate") {
+        // the only target this page signs for is the next key of the same words; anything else would lock the vault
+        btn.setAttribute("disabled", ""); btn.classList.add("spin");
+        const { material } = nextKeyMaterial(hotMaster, v, SCOPE);
+        const next = await LmsPrivateKey.generateAsync(material, { onProgress: (d, t) => (btn.textContent = `Deriving the next key ${Math.round((d / t) * 100)}%`) });
+        a.newLmsPubkey = b64(next.publicKey);
+      }
       const slot = await rpc.getSlot("confirmed");
       const until = slotToDate(slot + 1500, slot);
       if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.`))) return;
@@ -417,25 +435,26 @@ function hotFlow(scope: Scope) {
       const rec = await journal.get(jk);
       const minQ = rec ? rec.maxQ + 1 : 0;
       const q = firstFreeLeaf(v, 0, 1, (x) => x < minQ); if (q === undefined) throw new Error("No one-time keys left on this vault.");
-      const leaves = 2 ** lmsParams(parseLmsPublicKey(v.lmsPubkey).lmsType).h;
-      if (leaves - v.spent <= 1 && action.kind !== "Rotate") throw new Error("Last one-time key: only a rotation is allowed now.");
+      // keys this browser already signed with are gone even if the chain has not seen them yet
+      if (freeLeavesExcluding(v, (x) => x < minQ) <= 1 && action.kind !== "Rotate" && action.kind !== "Close") throw new Error("Last one-time key: only a rotation or closing the vault is allowed now.");
       if (!(await journal.reserve(jk, q, { vault: vaultAddr!.toBase58(), generation: v.generation }))) throw new Error(`One-time key ${q} is already recorded as used in this browser.`);
       const signature = hotKey.sign(q, vaultMessage(vaultAddr!, v.generation, encodeAction(action)));
-      await stageAndExecute(action, signature, q, $("#steps", s), btn);
+      await stageAndExecute(action, signature, q, $("#steps", s), btn, a.kind === "TransferToken" ? a.source : undefined);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
     finally { btn.removeAttribute("disabled"); btn.classList.remove("spin"); btn.textContent = "Sign and execute"; }
   });
   return s;
 }
 
-async function stageAndExecute(action: Action, signature: Uint8Array, q: number, steps: HTMLElement, btn: HTMLButtonElement) {
+async function stageAndExecute(action: Action, signature: Uint8Array, q: number, steps: HTMLElement, btn: HTMLButtonElement, picked?: string) {
   if (!wallet) throw new Error("Connect a wallet to pay the fees.");
   if (isLeafUsed(vault!, q)) throw new Error(`One-time key ${q} is already spent. Sign again with a fresh one.`);
   let tokenProgram = TOKEN_PROGRAM_ID;
+  let source: PublicKey | undefined;
   const pre: { name: string; ixs: TransactionInstruction[] }[] = [];
   if (action.kind === "TransferToken") {
-    const h = vaultTokens.find((t) => t.mint.equals(action.mint)); if (!h) throw new Error("The vault does not hold that token.");
-    tokenProgram = h.tokenProgram;
+    const h = sourceFor(action, picked);
+    tokenProgram = h.tokenProgram; source = h.account;
     const info = await rpc.getAccountInfo(action.to, "confirmed");
     if (!info) {
       const owner = await ownerOfAta(action.to, h);
@@ -457,17 +476,17 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
       const li = addStep("Verify and execute · one transaction");
       try {
         const { blockhash, lastValidBlockHeight } = await rpc.getLatestBlockhash("confirmed");
-        const built = buildDirectV1Transaction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, action, signature, tokenProgram, blockhash, lastValidBlockHeight });
+        const built = buildDirectV1Transaction({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, action, signature, tokenProgram, ...(source ? { source } : {}), blockhash, lastValidBlockHeight });
         sigs.push(await run(li, () => wallet!.sendV1!({ ...built, blockhash, lastValidBlockHeight })));
         done = true;
       } catch (e) { li.classList.remove("on"); li.append(el("span", { class: "mono", style: "margin-left:auto;font-size:11px;color:var(--mute)" }, "not accepted, using the buffer")); console.warn("v1 path", e); }
     }
     if (!done) {
-      const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature, tokenProgram });
+      const staged = buildStagedExecution({ programId: LAMPORT_VAULT_PROGRAM_ID, vault: vaultAddr!, payer: wallet.pubkey, nonce: randomNonce(), action, signature, tokenProgram, ...(source ? { source } : {}) });
       const names = ["Open signature buffer", ...staged.writes.map((_, i) => `Write part ${i + 2} of ${staged.writes.length + 1}`), "Verify and execute"];
       for (let i = 0; i < staged.transactions.length; i++) sigs.push(await run(addStep(names[i]), () => wallet!.send(staged.transactions[i])));
     }
-    hotKey = action.kind === "Rotate" || action.kind === "Close" ? null : hotKey;
+    if (action.kind === "Rotate" || action.kind === "Close") { hotKey = null; hotMaster = null; }
     lastRun = { vault: vaultAddr!.toBase58(), q, kind: action.kind, sigs };
     await load();
   } finally { btn.removeAttribute("disabled"); btn.classList.remove("spin"); }
@@ -481,7 +500,7 @@ async function ownerOfAta(ata: PublicKey, h: Holding): Promise<PublicKey | null>
 
 function registryPanel() {
   const s = el("div", {},
-    el("p", { class: "quiet" }, "Bind a post-quantum key to your ordinary wallet address now. When Solana verifies such signatures natively, the record is proof of intent made before any attacker existed. First write wins; later changes need the committed key."),
+    el("p", { class: "quiet" }, "Bind a post-quantum key to your ordinary wallet address now. This does not protect the funds in that wallet today: it is a dated record of which key you meant, for the day Solana verifies such signatures natively. First write wins; later changes need the committed key."),
     el("div", { id: "regbox" }, wallet ? el("button", { class: "btn", id: "regchk" }, "Check my address") : el("p", { class: "quiet" }, "Connect a wallet to continue.")));
   $("#regchk", s)?.addEventListener("click", async () => {
     const box = $("#regbox", s); box.innerHTML = ""; box.append(el("div", { class: "ok" }, "Checking…"));
@@ -510,6 +529,6 @@ function registryPanel() {
 let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hiddenAt = Date.now();
-  else if (hotKey && hiddenAt && Date.now() - hiddenAt > 5 * 60_000) { hotKey = null; render(); }
+  else if (hotKey && hiddenAt && Date.now() - hiddenAt > 5 * 60_000) { hotKey = null; hotMaster = null; render(); }
 });
-addEventListener("pagehide", () => { hotKey = null; });
+addEventListener("pagehide", () => { hotKey = null; hotMaster = null; });

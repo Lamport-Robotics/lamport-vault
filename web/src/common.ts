@@ -39,12 +39,14 @@ export interface SignRequest {
   lmsPubkey: string;   // base64, 56 bytes
   nextQ: number;       // the leaf to sign with (first free one, or the signer's lane)
   generation: number;  // key generation of the vault at request time; part of the signed message
+  freeLeaves?: number; // leaves the chain still shows as free; the signer subtracts what it has signed itself
   issuedSlot: string;  // decimal; the window issued..expiry is at most ~1 day of slots
   expirySlot: string;  // decimal
   action:
     | { kind: "TransferSol"; to: string; lamports: string }
-    | { kind: "TransferToken"; mint: string; to: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number }
-    | { kind: "Rotate"; newLmsPubkey: string }
+    | { kind: "TransferToken"; mint: string; to: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number; source?: string }
+    // the signer derives the target itself: the next key of the same words. a target given here must match it.
+    | { kind: "Rotate"; newLmsPubkey?: string }
     | { kind: "Close"; to: string };
 }
 export interface SignedBlob {

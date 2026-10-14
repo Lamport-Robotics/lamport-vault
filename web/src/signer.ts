@@ -5,7 +5,7 @@
 import "./polyfill.ts";
 import "./style.css";
 import { PublicKey } from "@solana/web3.js";
-import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, lmsParams, equalBytes, CLUSTERS } from "@lamport-robotics/lms";
+import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, lmsParams, equalBytes, CLUSTERS, RECOVERY_MAX_INDEX } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, nextKeyMaterial } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
@@ -87,7 +87,7 @@ $("#sign").addEventListener("click", async () => {
     const q = Math.max(req.nextQ, rec ? rec.maxQ + 1 : 0);
     if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}, but this signer already used it; signing with key ${q} instead`);
     const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
-    if (!found) throw new Error("these words do not open this vault (checked k = 0…64)");
+    if (!found) throw new Error(`these words do not open this vault (checked k = 0…${RECOVERY_MAX_INDEX})`);
     // exhaustion rule, with what this signer knows: leaves it signed with but never sent are gone too
     const total = 2 ** lmsParams(parseLmsPublicKey(pub).lmsType).h;
     const chainFree = req.freeLeaves ?? total;

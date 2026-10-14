@@ -5,7 +5,7 @@ import "./interface.css";
 import { presentHome } from "./presentation.ts";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, freeLeaves, freeLeavesExcluding, isLeafUsed, nextKeyMaterial, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, isTombstone, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
+import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, freeLeaves, freeLeavesExcluding, isLeafUsed, nextKeyMaterial, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, decodeTombstone, isTombstone, sweepClosedInstruction, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
 import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
@@ -21,6 +21,7 @@ let vault: VaultAccount | null = null;
 let vaultLamports = 0;
 let vaultTokens: Holding[] = [];
 let closed = false;   // the address holds a closed vault's tombstone
+let heir: PublicKey | null = null;   // with it: where sweep_closed sends what the vault still holds
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
 let hotMaster: Uint8Array | null = null;   // with it: the seed the next key (a Rotate target) is derived from
 const SCOPE = { genesisHash: GENESIS_HASH, programId: LAMPORT_VAULT_PROGRAM_ID };
@@ -106,11 +107,11 @@ async function load() {
   const next = isPubkey(h) ? new PublicKey(h) : null;
   if (!next || !vaultAddr || !next.equals(vaultAddr)) hotKey = null;   // a key loaded for one vault never outlives a switch
   vaultAddr = next;
-  vault = null; vaultLamports = 0; closed = false;
+  vault = null; vaultLamports = 0; closed = false; heir = null;
   if (vaultAddr) {
     const info = await rpc.getAccountInfo(vaultAddr, "confirmed").catch(() => null);
     if (info && info.owner.equals(LAMPORT_VAULT_PROGRAM_ID)) {
-      try { vault = decodeVault(info.data); } catch (e) { closed = isTombstone(info.data); if (!closed) console.warn("vault account not readable", e); vault = null; }
+      try { vault = decodeVault(info.data); } catch (e) { closed = isTombstone(info.data); if (closed) heir = decodeTombstone(info.data).heir; else console.warn("vault account not readable", e); vault = null; }
       vaultLamports = info.lamports;
       try { vaultTokens = await holdings(vaultAddr); } catch (e) { console.error("holdings", e); vaultTokens = []; }
     }
@@ -152,9 +153,36 @@ function home() {
 }
 
 function notFound() {
-  const s = el("div", { class: "page" }, el("div", {}, el("h2", {}, closed ? "This vault was closed" : "No vault at this address"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""), closed ? el("p", { class: "quiet" }, "A closed vault leaves a permanent marker at its address so it can never be reopened under the same key. Create a new vault; your words give the next key.") : null, el("button", { class: "link arrow", id: "back" }, "Back")));
+  const s = el("div", { class: "page" }, el("div", {}, el("h2", {}, closed ? "This vault was closed" : "No vault at this address"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""), closed ? el("p", { class: "quiet" }, "A closed vault leaves a permanent marker at its address so it can never be reopened under the same key. Create a new vault; your words give the next key.") : null,
+    closed && vaultTokens.length ? el("div", { style: "margin-top:18px" },
+      el("p", { class: "quiet" }, `${vaultTokens.length} token balance${vaultTokens.length > 1 ? "s are" : " is"} still at this address. Anyone can sweep them to the heir the vault was closed to${heir ? ", " + short(heir.toBase58(), 6) : ""}; nowhere else.`),
+      el("div", { class: "actions" }, el("button", { class: "btn", id: "sweep" }, "Sweep to the heir")),
+      el("ul", { class: "steps hidden", id: "steps" }),
+      el("div", { class: "err hidden", id: "werr" })) : null,
+    el("button", { class: "link arrow", id: "back" }, "Back")));
   $("#back", s).addEventListener("click", () => (location.hash = ""));
+  $("#sweep", s)?.addEventListener("click", async () => {
+    const err = $("#werr", s), btn = $("#sweep", s) as HTMLButtonElement; err.classList.add("hidden");
+    try {
+      if (!wallet) throw new Error("Connect a wallet to pay the fees.");
+      btn.setAttribute("disabled", ""); btn.classList.add("spin");
+      await sweepAll($("#steps", s));
+      await load();
+    } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); btn.removeAttribute("disabled"); btn.classList.remove("spin"); }
+  });
   return s;
+}
+
+/** after Close: one `sweep_closed` per token account the vault still owns, each to the tombstone's heir */
+async function sweepAll(steps: HTMLElement) {
+  if (!heir) throw new Error("The tombstone names no heir.");
+  steps.classList.remove("hidden");
+  for (const t of vaultTokens) {
+    const li = el("li", {}, el("span", {}, `Sweep ${short(t.mint.toBase58(), 5)} to the heir`)); steps.append(li); li.classList.add("on");
+    const { instruction } = sweepClosedInstruction({ programId: LAMPORT_VAULT_PROGRAM_ID, payer: wallet!.pubkey, vault: vaultAddr!, heir, mint: t.mint, vaultTokenAccount: t.account, tokenProgram: t.tokenProgram });
+    const sig = await wallet!.send([instruction]);
+    li.classList.remove("on"); li.classList.add("done"); li.append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 5)));
+  }
 }
 
 async function newVault(box: HTMLElement) {
@@ -360,7 +388,7 @@ function coldFlow(scope: Scope) {
       const slot = await rpc.getSlot("confirmed");
       const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const act = form.read();
-      if (act.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
+      if (act.kind === "Close" && vaultTokens.length && !(await confirmPanel(s, describe(act), `${vaultTokens.length} token balance${vaultTokens.length > 1 ? "s" : ""} will be swept to that address after the vault closes; it cannot go anywhere else.`))) return;
       const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, freeLeaves: freeLeaves(v), issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
       ($("#reqtxt", s) as HTMLTextAreaElement).value = JSON.stringify(req); $("#reqout", s).classList.remove("hidden");
       $("#reqvalid", s).textContent = `Valid until about ${slotToDate(slot + 9000, slot).toLocaleTimeString()} (slot ${slot + 9000}).`;
@@ -416,7 +444,6 @@ function hotFlow(scope: Scope) {
       }
       if (!equalBytes(hotKey.publicKey, v.lmsPubkey) || !hotMaster) { hotKey = null; hotMaster = null; throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
       const a = form.read();
-      if (a.kind === "Close" && vaultTokens.length) throw new Error("This vault still holds tokens. Send them out first; a closed vault's token accounts are hard to reach.");
       if (a.kind === "Rotate") {
         // the only target this page signs for is the next key of the same words; anything else would lock the vault
         btn.setAttribute("disabled", ""); btn.classList.add("spin");
@@ -426,7 +453,8 @@ function hotFlow(scope: Scope) {
       }
       const slot = await rpc.getSlot("confirmed");
       const until = slotToDate(slot + 1500, slot);
-      if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.`))) return;
+      const sweepNote = a.kind === "Close" && vaultTokens.length ? ` ${vaultTokens.length} token balance${vaultTokens.length > 1 ? "s" : ""} will be swept to that address after the vault closes; it cannot go anywhere else.` : "";
+      if (!(await confirmPanel(s, describe(a), `Valid until about ${until.toLocaleTimeString()}. One one-time key will be spent.${sweepNote}`))) return;
       const action = toAction(a, BigInt(slot), BigInt(slot + 1500));
       // never sign the same one-time key twice, even if the chain has not seen the first signature yet
       const journal = await openJournal();
@@ -488,6 +516,7 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
     }
     if (action.kind === "Rotate" || action.kind === "Close") { hotKey = null; hotMaster = null; }
     lastRun = { vault: vaultAddr!.toBase58(), q, kind: action.kind, sigs };
+    if (action.kind === "Close" && vaultTokens.length) { closed = true; heir = action.to; await sweepAll(steps); }
     await load();
   } finally { btn.removeAttribute("disabled"); btn.classList.remove("spin"); }
 }

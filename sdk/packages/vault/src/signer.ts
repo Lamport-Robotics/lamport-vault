@@ -22,6 +22,7 @@ import {
   parseLmsPublicKey,
   RECOVERY_MAX_INDEX,
 } from "@lamport-robotics/lms";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   type AccountInfo,
@@ -38,6 +39,7 @@ import {
   decodeVault,
   decodeVaultOrTombstone,
   firstFreeLeaf,
+  lastFreeLeaf,
   freeLeavesExcluding,
   hasUsedKey,
   isLeafUsed,
@@ -64,6 +66,8 @@ export interface Rpc {
     commitment?: Commitment,
   ): Promise<{ value: { err: unknown } }>;
   getSlot(commitment?: Commitment): Promise<number>;
+  /** Optional (Connection has it): lets `nextFreshKeyIndex` refuse a key that is live in another vault. */
+  getProgramAccounts?(programId: PublicKey, config?: unknown): Promise<ReadonlyArray<{ pubkey: PublicKey; account: AccountInfo<Buffer> }>>;
 }
 
 export interface SendOpts {
@@ -303,6 +307,18 @@ export async function withJournalLock<T>(journal: LeafJournal, fn: () => Promise
   }
 }
 
+/** The RPC shows fewer spent leaves than this journal already saw: a lagging, forked or lying view. */
+export class ChainBehindJournalError extends Error {
+  readonly vault: string;
+  readonly journalSpent: number;
+  readonly chainSpent: number;
+  constructor(vault: string, journalSpent: number, chainSpent: number) {
+    super(`vault ${vault}: the chain reports ${chainSpent} spent leaves in this lane but the journal already saw ${journalSpent}; this RPC view is behind (lagging, forked or dishonest). Nothing was signed. Retry against a finalized, trusted RPC.`);
+    this.name = "ChainBehindJournalError";
+    this.vault = vault; this.journalSpent = journalSpent; this.chainSpent = chainSpent;
+  }
+}
+
 export class VaultSigner {
   readonly rpc: Rpc;
   readonly programId: PublicKey;
@@ -322,7 +338,8 @@ export class VaultSigner {
   private warnedEphemeral = false;
 
   constructor(opts: VaultSignerOptions) {
-    this.opts = opts;
+    // the journal decides on what the chain says; a "processed" view can be rolled back, so never below confirmed
+    this.opts = { ...opts, commitment: opts.commitment ?? "confirmed" };
     this.rpc = opts.rpc;
     this.programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
     this.key = opts.key;
@@ -401,13 +418,18 @@ export class VaultSigner {
     const vaultAddress = this.vault.toBase58();
     const loaded = await this.journal.load();
     if (!loaded) {
-      const state: LeafJournalState = { key: this.keyId, vault: vaultAddress, generation: vault.generation, spent: spentInLane, reserved: [] };
+      const state: LeafJournalState = { key: this.keyId, vault: vaultAddress, generation: vault.generation, spent: spentInLane, reserved: [], settled: [] };
       await this.journal.save(state);
       return { state, stale: undefined };
     }
     if (loaded.vault !== vaultAddress) throw new JournalVaultMismatchError(this.keyId, loaded.vault, vaultAddress);
     const state = cloneState(loaded);
     const reservedSpent = state.reserved.filter((q) => isLeafUsed(vault, q));
+    // The chain can only move forward within a generation. Fewer spent leaves than the journal last saw
+    // means this RPC is lagging, forked or lying: nothing may be signed on that view, not even a Rotate.
+    if (state.generation === vault.generation && spentInLane < state.spent) {
+      throw new ChainBehindJournalError(this.vault.toBase58(), state.spent, spentInLane);
+    }
     const behind = state.generation !== vault.generation || spentInLane > state.spent + reservedSpent.length;
     if (behind && !this.staleAcknowledged) {
       const reserved = new Set(state.reserved);
@@ -433,11 +455,15 @@ export class VaultSigner {
         },
       };
     }
-    // Fresh (or the operator overrode a stale journal): adopt the chain's view.
+    // Fresh (or the operator overrode a stale journal): adopt the chain's view of the count, but keep
+    // every leaf this signer ever reserved on record. A leaf that one RPC once showed as spent is not
+    // free again when another RPC shows it clear; it was signed, and that is the fact that matters.
     this.staleAcknowledged = false;
     state.generation = vault.generation;
     state.spent = spentInLane;
+    const landed = state.reserved.filter((q) => isLeafUsed(vault, q));
     state.reserved = state.reserved.filter((q) => !isLeafUsed(vault, q));
+    state.settled = [...new Set([...(state.settled ?? []), ...landed])];
     await this.journal.save(state);
     return { state, stale: undefined };
   }
@@ -478,9 +504,13 @@ export class VaultSigner {
   private async signLocked(request: ActionRequest, opts: SignOpts): Promise<SignedAction> {
     const vault = await this.fetchVault();
     const { state, stale } = await this.syncJournal(vault);
-    const reserved = new Set(state.reserved);
+    const reserved = new Set([...state.reserved, ...(state.settled ?? [])]); // never a leaf this signer ever signed
     const total = leafCount(vault);
-    const q = opts.q ?? firstFreeLeaf(vault, this.lane, this.lanes, (x) => reserved.has(x));
+    // A Rotate retires the whole key, so it takes the highest free leaf of the lane: the smallest one is
+    // exactly the leaf a lost or restored record most likely signed last, and two signatures on one
+    // leaf are a forgery kit. Everything else keeps filling from the bottom.
+    const pick = request.kind === "Rotate" ? lastFreeLeaf : firstFreeLeaf;
+    const q = opts.q ?? pick(vault, this.lane, this.lanes, (x) => reserved.has(x));
     if (q === undefined) throw new Error(`no free leaf left in lane ${this.lane}/${this.lanes}; rotate to a fresh key`);
     if (!Number.isInteger(q) || q < 0 || q >= total) throw new Error(`q=${q} is beyond the last leaf of a ${total}-leaf key`);
     if (isLeafUsed(vault, q)) throw new Error(`q=${q} is already spent on chain`);
@@ -684,7 +714,8 @@ export interface FreshKey {
   /** The vault address `create_vault` would use for it. */
   vault: PublicKey;
   /** Indices skipped because their address holds a live vault or a tombstone. */
-  skipped: { k: number; state: Exclude<VaultAddressState, "free"> }[];
+  /** indices passed over: an address with a live vault, a tombstone, or a key that is live or retired in some vault */
+  skipped: { k: number; state: "vault" | "tombstone" | "in-use" }[];
 }
 
 /**
@@ -700,13 +731,28 @@ export async function nextFreshKeyIndex(master: Uint8Array, scope: DerivationSco
   if (!Number.isInteger(start) || start < 0 || start > max) throw new RangeError(`start must be in 0..${max}, got ${start}`);
   const programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
   const skipped: FreshKey["skipped"] = [];
+  // Fingerprints (sha256[0..16]) of keys that are, or were, in a vault this walk has seen: a vault
+  // rotates to k+1, so key k+1's own address is free while the key is live at the old address.
+  const seen = new Set<string>();
+  const fp = (pk: Uint8Array) => Buffer.from(sha256(pk).subarray(0, 16)).toString("hex");
   for (let k = start; k <= max; k++) {
     const material = deriveKeyMaterial(master, k, scope, opts.lmsType ?? LMS_SHA256_M32_H10, opts.lmotsType ?? LMOTS_SHA256_N32_W4);
     const key = await LmsPrivateKey.generateAsync(material);
     const vault = findVaultPdaForKey(programId, key.publicKey).address;
-    const state = await vaultAddressState(rpc, vault, opts.commitment);
-    if (state === "free") return { k, material, key, vault, skipped };
-    skipped.push({ k, state });
+    const info = await rpc.getAccountInfo(vault, opts.commitment ?? "confirmed");
+    if (info) {
+      const at = decodeVaultOrTombstone(new Uint8Array(info.data));
+      if (at.kind === "vault") { seen.add(fp(at.vault.lmsPubkey)); for (const h of at.vault.usedKeys) seen.add(Buffer.from(h).toString("hex")); }
+      skipped.push({ k, state: at.kind });
+      continue;
+    }
+    if (seen.has(fp(key.publicKey))) { skipped.push({ k, state: "in-use" }); continue; }
+    if (rpc.getProgramAccounts) {
+      // any vault, ours or not, whose current key is this one (lms_pubkey sits at offset 42 of a Vault)
+      const live = await rpc.getProgramAccounts(programId, { commitment: opts.commitment ?? "confirmed", dataSlice: { offset: 0, length: 0 }, filters: [{ memcmp: { offset: 42, bytes: Buffer.from(key.publicKey).toString("base64"), encoding: "base64" } }] });
+      if (live.length) { skipped.push({ k, state: "in-use" }); continue; }
+    }
+    return { k, material, key, vault, skipped };
   }
   throw new Error(`no free vault address among key indices ${start}..${max}`);
 }

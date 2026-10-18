@@ -143,6 +143,22 @@ export function firstFreeLeaf(vault: Pick<VaultAccount, "used">, lane = 0, lanes
   return undefined;
 }
 
+/**
+ * The largest unspent leaf `q` with `q % lanes === lane`, or `undefined` when the lane is exhausted.
+ * A signer that cannot trust its own record (restored, forked, second machine) must not sign the
+ * smallest free leaf: that is the leaf its lost state most likely signed last. Rotate takes this one.
+ */
+export function lastFreeLeaf(vault: Pick<VaultAccount, "used">, lane = 0, lanes = 1, skip?: (q: number) => boolean): number | undefined {
+  if (!Number.isInteger(lanes) || lanes < 1) throw new RangeError(`lanes must be >= 1, got ${lanes}`);
+  if (!Number.isInteger(lane) || lane < 0 || lane >= lanes) throw new RangeError(`lane must be in 0..${lanes - 1}, got ${lane}`);
+  const total = vault.used.length * 8;
+  let q = total - 1 - ((total - 1 - lane) % lanes);
+  for (; q >= lane; q -= lanes) {
+    if (!isLeafUsed(vault, q) && !skip?.(q)) return q;
+  }
+  return undefined;
+}
+
 /** Spent leaves of the current key in lane `lane` of `lanes` (all leaves by default). */
 export function spentLeavesInLane(vault: Pick<VaultAccount, "used">, lane = 0, lanes = 1): number {
   if (!Number.isInteger(lanes) || lanes < 1) throw new RangeError(`lanes must be >= 1, got ${lanes}`);

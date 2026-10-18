@@ -60,6 +60,8 @@ export interface LeafJournalState {
   spent: number;
   /** Leaves this signer has signed (in order of reservation). Written before the signature exists. */
   reserved: number[];
+  /** Leaves this signer signed that the chain has since shown as spent. Kept for good: a leaf once signed is never picked again, whatever an RPC says later. Absent in records written before this field existed. */
+  settled?: number[];
 }
 
 /**
@@ -457,7 +459,7 @@ export function parseJournalFile(text: string, source = "journal", key?: string)
 
 /** The stored form of a state. */
 function toRecord(state: LeafJournalState): Record<string, unknown> {
-  return { v: FILE_FORMAT_VERSION, key: state.key, vault: state.vault, generation: state.generation, spent: state.spent, reserved: [...state.reserved] };
+  return { v: FILE_FORMAT_VERSION, key: state.key, vault: state.vault, generation: state.generation, spent: state.spent, reserved: [...state.reserved], settled: [...(state.settled ?? [])] };
 }
 
 function fromRecord(raw: unknown, source: string, key?: string): LeafJournalState {
@@ -465,7 +467,7 @@ function fromRecord(raw: unknown, source: string, key?: string): LeafJournalStat
   const o = raw as Record<string, unknown>;
   if (o.v !== FILE_FORMAT_VERSION) throw new Error(`${source}: journal format ${String(o.v)} is not supported (want ${FILE_FORMAT_VERSION})`);
   if (!Array.isArray(o.reserved)) throw new Error(`${source}: reserved must be an array`);
-  const state = validateState({ key: o.key as string, vault: o.vault as string, generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])] });
+  const state = validateState({ key: o.key as string, vault: o.vault as string, generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])], settled: Array.isArray(o.settled) ? [...(o.settled as number[])] : [] });
   return key === undefined ? state : checkKey(state, key, source);
 }
 
@@ -486,11 +488,12 @@ export function validateState(state: LeafJournalState): LeafJournalState {
   if (!isU32(state.generation)) throw new Error(`journal: generation must be a u32, got ${String(state.generation)}`);
   if (!isU32(state.spent)) throw new Error(`journal: spent must be a u32, got ${String(state.spent)}`);
   if (!Array.isArray(state.reserved) || !state.reserved.every(isU32)) throw new Error("journal: reserved must be an array of leaf indices");
+  if (state.settled !== undefined && (!Array.isArray(state.settled) || !state.settled.every(isU32))) throw new Error("journal: settled must be an array of leaf indices");
   return state;
 }
 
 export function cloneState(s: LeafJournalState): LeafJournalState {
-  return { key: s.key, vault: s.vault, generation: s.generation, spent: s.spent, reserved: [...s.reserved] };
+  return { key: s.key, vault: s.vault, generation: s.generation, spent: s.spent, reserved: [...s.reserved], settled: [...(s.settled ?? [])] };
 }
 
 /** `dir/name` with one separator, without `node:path` (the module must load in a browser). */

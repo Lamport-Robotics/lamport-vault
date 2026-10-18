@@ -9,6 +9,9 @@ export const GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; // d
 export const slotToDate = (slot: bigint | number, nowSlot: number) => new Date(Date.now() + (Number(slot) - nowSlot) * 400);
 export const EXPLORER = (sig: string) => `https://explorer.solana.com/tx/${sig}?cluster=${CLUSTER}`;
 export const EXPLORER_ADDR = (a: string) => `https://explorer.solana.com/address/${a}?cluster=${CLUSTER}`;
+/** a transaction signature as the rpc or a wallet returns it: base58, 64 bytes. anything else is not linked */
+export const isTxSig = (s: unknown): s is string => typeof s === "string" && /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(s);
+export const txLink = (sig: string, n = 6): HTMLElement => isTxSig(sig) ? el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, n)) : el("span", { class: "quiet" }, "unreadable signature");
 
 export const rpc = new Connection(RPC_URL, "confirmed");
 
@@ -21,7 +24,7 @@ export function isPubkey(s: string): boolean { try { new PublicKey(s.trim()); re
 
 export function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: (Node | string | null | undefined)[]): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) { if (k === "class") n.className = v; else if (k === "html") n.innerHTML = v; else n.setAttribute(k, v); }
+  for (const [k, v] of Object.entries(attrs)) { if (k === "class") n.className = v; else n.setAttribute(k, v); }
   for (const k of kids) if (k != null) n.append(k);
   return n;
 }
@@ -40,11 +43,13 @@ export interface SignRequest {
   nextQ: number;       // the leaf to sign with (first free one, or the signer's lane)
   generation: number;  // key generation of the vault at request time; part of the signed message
   freeLeaves?: number; // leaves the chain still shows as free; the signer subtracts what it has signed itself
+  used?: string;       // base64, the vault's used-leaf bitmap at request time; the signer counts free leaves from it
   issuedSlot: string;  // decimal; the window issued..expiry is at most ~1 day of slots
   expirySlot: string;  // decimal
   action:
     | { kind: "TransferSol"; to: string; lamports: string }
-    | { kind: "TransferToken"; mint: string; to: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number; source?: string }
+    // `to` is the receiver's associated token account; `toOwner` the address the user typed. the signer re-derives `to` from it.
+    | { kind: "TransferToken"; mint: string; to: string; toOwner?: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number; source?: string }
     // the signer derives the target itself: the next key of the same words. a target given here must match it.
     | { kind: "Rotate"; newLmsPubkey?: string }
     | { kind: "Close"; to: string };

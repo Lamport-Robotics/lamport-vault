@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build -c vite.signer.config.ts && cp dist-signer/signer.html dist/signer.html",
+    "build": "vite build && vite build -c vite.signer.config.ts && node csp-signer.mjs dist-signer/signer.html && cp dist-signer/signer.html dist/signer.html",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

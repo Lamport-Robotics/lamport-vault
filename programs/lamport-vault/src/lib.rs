@@ -284,6 +284,9 @@ fn verify_and_act<'info>(
             require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
             require_keys_eq!(*mint_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
             let decimals = mint_decimals(mint_ai)?;
+            // Anything after the four named accounts goes to the token program as is: a Token-2022
+            // mint with a transfer hook needs the hook program and its extra account metas, and
+            // without them such a token could never leave the vault.
             token_interface::transfer_checked(
                 CpiContext::new_with_signer(
                     token_program.clone(),
@@ -294,7 +297,8 @@ fn verify_and_act<'info>(
                         authority: vault.to_account_info(),
                     },
                     &[signer_seeds],
-                ),
+                )
+                .with_remaining_accounts(remaining[4..].to_vec()),
                 amount,
                 decimals,
             )?;
@@ -538,7 +542,7 @@ pub mod lamport_vault {
     /// and closes it, its rent to the heir. The heir is the `to` the `Close`
     /// was signed for, read from the `Tombstone`: anyone may call this, and
     /// funds can only ever go there. Token and Token-2022, any mint.
-    pub fn sweep_closed(ctx: Context<SweepClosed>) -> Result<()> {
+    pub fn sweep_closed<'info>(ctx: Context<'_, '_, 'info, 'info, SweepClosed<'info>>) -> Result<()> {
         let tomb = &ctx.accounts.tombstone;
         let heir = &ctx.accounts.heir;
         let token_program = &ctx.accounts.token_program;
@@ -583,7 +587,8 @@ pub mod lamport_vault {
                         authority: tomb.to_account_info(),
                     },
                     &[signer_seeds],
-                ),
+                )
+                .with_remaining_accounts(ctx.remaining_accounts.to_vec()), // transfer-hook metas, if the mint has one
                 amount,
                 decimals,
             )?;
@@ -597,6 +602,22 @@ pub mod lamport_vault {
             },
             &[signer_seeds],
         ))
+    }
+
+    /// After a `Close`: SOL that arrived at the vault's address afterwards (the address never
+    /// changes, so standing payments keep landing on the tombstone) goes to the heir. Anyone may
+    /// call it; the tombstone keeps exactly its rent and the destination is the heir the `Close`
+    /// signature named, nobody else.
+    pub fn sweep_closed_sol(ctx: Context<SweepClosedSol>) -> Result<()> {
+        let tomb_ai = ctx.accounts.tombstone.to_account_info();
+        let heir = &ctx.accounts.heir;
+        require_keys_eq!(heir.key(), ctx.accounts.tombstone.heir, VaultError::WrongHeir);
+        let keep = Rent::get()?.minimum_balance(Tombstone::SPACE);
+        let payout = tomb_ai.lamports().saturating_sub(keep);
+        require!(payout > 0, VaultError::InsufficientFunds);
+        tomb_ai.sub_lamports(payout)?;
+        heir.add_lamports(payout)?;
+        Ok(())
     }
 }
 
@@ -699,6 +720,16 @@ pub struct SweepClosed<'info> {
     pub token_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, AssociatedToken>,
+}
+
+#[derive(Accounts)]
+pub struct SweepClosedSol<'info> {
+    /// The closed vault: a `Tombstone` at the vault PDA (a live vault fails `VaultNotClosed`).
+    #[account(mut, seeds = [VAULT_SEED, tombstone.vault_id.as_ref()], bump)]
+    pub tombstone: Account<'info, Tombstone>,
+    /// CHECK: must equal `tombstone.heir`; receives everything above the tombstone's rent.
+    #[account(mut)]
+    pub heir: UncheckedAccount<'info>,
 }
 
 #[cfg(test)]

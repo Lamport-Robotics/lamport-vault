@@ -21,6 +21,7 @@ export const IX = {
   executeDirect: instructionDiscriminator("execute_direct"),
   /** Permissionless: moves a closed vault's stranded token balance to the tombstone's heir. */
   sweepClosed: instructionDiscriminator("sweep_closed"),
+  sweepClosedSol: instructionDiscriminator("sweep_closed_sol"),
   // pq-registry
   commit: instructionDiscriminator("commit"),
   openPqBuffer: instructionDiscriminator("open_pq_buffer"),

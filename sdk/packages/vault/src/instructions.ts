@@ -166,6 +166,8 @@ export interface ExecuteParams {
   closeTokenAccounts?: CloseTokenAccount[];
   /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
+  /** For `TransferToken` on a Token-2022 mint with a transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
 }
 
 /** Remaining accounts `execute` needs for an action (docs/DESIGN.md "Actions", program `execute` doc). */
@@ -175,12 +177,13 @@ export function executeRemainingAccounts(
   tokenProgram = TOKEN_PROGRAM_ID,
   closeTokenAccounts: CloseTokenAccount[] = [],
   source?: PublicKey,
+  extraAccounts: AccountMeta[] = [],
 ): AccountMeta[] {
   switch (action.kind) {
     case "TransferSol":
       return [w(action.to)];
     case "TransferToken":
-      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram)];
+      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
     case "Rotate":
       return [];
     case "Close":
@@ -191,7 +194,7 @@ export function executeRemainingAccounts(
 export function executeInstruction(p: ExecuteParams): TransactionInstruction {
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source)],
+    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source, p.extraAccounts)],
     data: Buffer.from(IX.execute),
   });
 }
@@ -279,6 +282,8 @@ export interface SweepClosedParams {
   vaultTokenAccount: PublicKey;
   /** Token or Token-2022: the program that owns `mint`. Default: Token. */
   tokenProgram?: PublicKey;
+  /** A Token-2022 transfer hook's program and extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
 }
 
 /**
@@ -287,6 +292,23 @@ export interface SweepClosedParams {
  * the vault's token account, its rent to the heir. Permissionless; the destination is fixed by the
  * tombstone. Fails `VaultNotClosed` on a live vault.
  */
+export interface SweepClosedSolParams {
+  programId: PublicKey;
+  /** the closed vault's address (the tombstone) */
+  vault: PublicKey;
+  /** must be the tombstone's heir; the program checks */
+  heir: PublicKey;
+}
+
+/**
+ * `sweep_closed_sol`: SOL that landed on a closed vault's address after the `Close` goes to the heir
+ * named by the tombstone. Permissionless; the tombstone keeps its rent. Fails `WrongHeir` on any other
+ * destination and `VaultNotClosed` on a live vault.
+ */
+export function sweepClosedSolInstruction(p: SweepClosedSolParams): TransactionInstruction {
+  return new TransactionInstruction({ programId: p.programId, keys: [w(p.vault), w(p.heir)], data: Buffer.from(IX.sweepClosedSol) });
+}
+
 export function sweepClosedInstruction(p: SweepClosedParams): { instruction: TransactionInstruction; heirTokenAccount: PublicKey } {
   const tokenProgram = p.tokenProgram ?? TOKEN_PROGRAM_ID;
   const heirTokenAccount = associatedTokenAddress(p.heir, p.mint, tokenProgram);
@@ -304,6 +326,7 @@ export function sweepClosedInstruction(p: SweepClosedParams): { instruction: Tra
         r(tokenProgram),
         r(SystemProgram.programId),
         r(ASSOCIATED_TOKEN_PROGRAM_ID),
+        ...(p.extraAccounts ?? []),
       ],
       data: Buffer.from(IX.sweepClosed),
     }),

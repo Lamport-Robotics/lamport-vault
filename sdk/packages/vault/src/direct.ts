@@ -64,6 +64,8 @@ export interface ExecuteDirectParams {
   closeTokenAccounts?: CloseTokenAccount[];
   /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
+  /** Token-2022 transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
 }
 
 /**
@@ -76,7 +78,7 @@ export function executeDirectInstruction(p: ExecuteDirectParams): TransactionIns
   const data = new ByteWriter().raw(IX.executeDirect).vecU8(actionBytes).vecU8(p.signature).bytes();
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source)],
+    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source, p.extraAccounts)],
     data: Buffer.from(data),
   });
 }

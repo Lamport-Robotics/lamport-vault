@@ -37,9 +37,9 @@ const KEY_B = keyFingerprint(keyB.publicKey);
 /** The vault of `key` (its PDA), as every record names it. */
 const VAULT = findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, key.publicKey).address.toBase58();
 /** A state for `key` in its vault. */
-const st = (generation: number, spent: number, reserved: number[], k = KEY): LeafJournalState => ({ key: k, vault: VAULT, generation, spent, reserved });
+const st = (generation: number, spent: number, reserved: number[], k = KEY, settled: number[] = []): LeafJournalState => ({ key: k, vault: VAULT, generation, spent, reserved, settled });
 /** The on-disk record of such a state. */
-const rec = (generation: number, spent: number, reserved: number[], k = KEY) => ({ v: 2, key: k, vault: VAULT, generation, spent, reserved });
+const rec = (generation: number, spent: number, reserved: number[], k = KEY, settled: number[] = []) => ({ v: 2, key: k, vault: VAULT, generation, spent, reserved, settled });
 
 function freshVault(k = key): Uint8Array {
   return encodeVault({ version: 2, bump: 0, vaultId: vaultId(k.publicKey), lmsPubkey: k.publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] });
@@ -313,7 +313,7 @@ describe("VaultSigner with a journal", () => {
     rpc.spend(first.vault, [0, 1]);
     const c = await second.sign(transfer);
     expect(c.q).toBe(2);
-    expect(await journal().load()).toEqual(st(0, 2, [2]));
+    expect(await journal().load()).toEqual(st(0, 2, [2], KEY, [0, 1]));
   });
 
   it("a key never serves two vaults: a journal that names another vault is refused, no override", async () => {
@@ -357,7 +357,7 @@ describe("VaultSigner with a journal", () => {
     expect(r1.q).toBe(1);
     const unsubmitted = await live.sign(transfer);
     expect(unsubmitted.q).toBe(2);
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(0, 2, [2]));
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(0, 2, [2], KEY, [0, 1]));
 
     // Day 3: the device is restored from the day-1 backup.
     writeFileSync(path, backup);
@@ -379,19 +379,19 @@ describe("VaultSigner with a journal", () => {
     // The stale journal is left as evidence: still stale on the next try.
     await expect(restored.sign(transfer)).rejects.toThrow(StaleSignerError);
 
-    // Rotate is allowed. (It would pick leaf 2 from the chain's point of view, the very leaf whose
-    // signature is out there: that is why only a Rotate, which retires the whole key, is allowed.)
+    // Rotate is allowed, and it takes the highest free leaf (31), never leaf 2: that is the leaf whose
+    // signature is out there, and a second signature on it would be a forgery kit.
     const sentBefore = rpc.sent.length;
     const rot = await restored.execute({ kind: "Rotate", newLmsPubkey: keyB.publicKey }, { allowForeignKey: true });
     expect(rot.action.kind).toBe("Rotate");
-    expect(rot.q).toBe(2);
+    expect(rot.q).toBe(31);
     expect(lmsVerify(key.publicKey, rot.message, rot.lmsSignature)).toBe(true);
     expect(rpc.sent.length).toBeGreaterThan(sentBefore);
     const v = rpc.vault(live.vault);
     expect(v.generation).toBe(1);
     expect(Buffer.from(v.lmsPubkey)).toEqual(Buffer.from(keyB.publicKey));
     // The Rotate landed: the retired key's record is closed out at generation 1, its leaves on record.
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(1, 0, [0, 2]));
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(1, 0, [0, 31]));
     // The leaked day-2 signature is dead now (old generation, old key): nothing to protect against.
     // The new key has its own journal file, initialised from the chain.
     const next = new VaultSigner({ rpc, key: keyB, payer, vault: live.vault, journal: new FileLeafJournal(keyB.publicKey, { dir: home }) });
@@ -399,7 +399,7 @@ describe("VaultSigner with a journal", () => {
     expect(r.q).toBe(0);
     expect(r.generation).toBe(1);
     expect(JSON.parse(readFileSync(join(home, `${KEY_B}.json`), "utf8"))).toEqual(rec(1, 0, [0], KEY_B));
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(1, 0, [0, 2])); // the old record is untouched
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(rec(1, 0, [0, 31])); // the old record is untouched
   });
 
   it("a journal behind the chain's generation is stale too, until confirmRotation sees the rotation", async () => {
@@ -418,7 +418,7 @@ describe("VaultSigner with a journal", () => {
     // the rotation lands (generation 2, key B): the journal is reset
     rpc.accounts.set(signer.vault.toBase58(), encodeVault({ ...v, generation: 2, lmsPubkey: keyB.publicKey, usedKeys: [usedKeyHash(past), usedKeyHash(key.publicKey)] }));
     await signer.confirmRotation(rot);
-    expect(await journal.load()).toEqual(st(2, 0, [0])); // closed out at the new generation, leaf 0 (the Rotate) on record
+    expect(await journal.load()).toEqual(st(2, 0, [31])); // closed out at the new generation, leaf 0 (the Rotate) on record
   });
 
   it("another signer moving on in the same lane makes this one stale; other lanes do not", async () => {

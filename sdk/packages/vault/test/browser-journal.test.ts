@@ -18,7 +18,7 @@ const key = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H5, lmotsType: 3, s
 const transfer = { kind: "TransferSol" as const, to: Keypair.generate().publicKey, lamports: 1n };
 const KEY = keyFingerprint(key.publicKey);
 const VAULT = findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, key.publicKey).address.toBase58();
-const st = (generation: number, spent: number, reserved: number[], k = KEY): LeafJournalState => ({ key: k, vault: VAULT, generation, spent, reserved });
+const st = (generation: number, spent: number, reserved: number[], k = KEY, settled: number[] = []): LeafJournalState => ({ key: k, vault: VAULT, generation, spent, reserved, settled });
 const OTHER_KEY = "ab".repeat(32);
 
 function freshVault(): Uint8Array {
@@ -142,7 +142,7 @@ describe("BrowserLeafJournal", () => {
     // once the leaves land the next sync counts them as spent
     rpc.spend(first.vault, [0, 1, 2, 3, 4, 5]);
     expect((await second.sign(transfer)).q).toBe(6);
-    expect(await new BrowserLeafJournal({ key: KEY, indexedDB }).load()).toEqual(st(0, 6, [6]));
+    expect(await new BrowserLeafJournal({ key: KEY, indexedDB }).load()).toEqual(st(0, 6, [6], KEY, [0, 1, 2, 3, 4, 5]));
   });
 
   it("takes a Web Lock named after the record around every load / save pair when the API exists", async () => {

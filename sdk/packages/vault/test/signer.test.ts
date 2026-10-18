@@ -302,18 +302,18 @@ describe("VaultSigner", () => {
 
     // Index 1: accepted without any flag.
     const ok = await guarded.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n });
-    expect(ok.q).toBe(0);
+    expect(ok.q).toBe(31); // a Rotate takes the highest free leaf
     expect(lmsVerify(key0.publicKey, ok.message, ok.lmsSignature)).toBe(true);
     // The override lets a foreign key through, on sign() and on execute().
     const forced = await guarded.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
-    expect(forced.q).toBe(1);
+    expect(forced.q).toBe(30);
     const res = await guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
-    expect(res.q).toBe(2);
+    expect(res.q).toBe(29);
     // The mock applied the Rotate: the vault now holds `foreign` at generation 1 and the signer's
     // journal (key 0's) is closed out at that generation with its three leaves on record. Put the
     // generation-0 account back for the rest of this test.
     expect(rpc.vault(signer.vault).generation).toBe(1);
-    expect(await guarded.journal.load()).toEqual({ key: guarded.keyId, vault: signer.vault.toBase58(), generation: 1, spent: 0, reserved: [0, 1, 2] });
+    expect(await guarded.journal.load()).toEqual({ key: guarded.keyId, vault: signer.vault.toBase58(), generation: 1, spent: 0, reserved: [31, 30, 29], settled: [] });
     rpc.accounts.set(signer.vault.toBase58(), account(key0.publicKey, 0, []));
     expect(decodeAction(new Uint8Array(rpc.sent[0]!.instructions[0]!.data.subarray(20, 20 + rpc.sent[0]!.instructions[0]!.data.readUInt32LE(16)))).kind).toBe("Rotate");
     expect(signed).toBe(3);
@@ -321,9 +321,9 @@ describe("VaultSigner", () => {
     // No master at all: every target is foreign, even the right one, unless overridden.
     const blind = new VaultSigner({ rpc, key: key0, payer, journal: "ephemeral" });
     await expect(blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/no master seed/);
-    expect((await blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).q).toBe(0);
+    expect((await blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).q).toBe(31);
     // Other actions are not touched by the guard.
-    expect((await blind.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).q).toBe(1);
+    expect((await blind.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).q).toBe(0)  // the Rotate took the top leaf, so the bottom is still free;
 
     // After the rotation (index 1 is current, generation 1) the next target is index 2.
     rpc.accounts.set(signer.vault.toBase58(), account(key1.publicKey, 1, [usedKeyHash(key0.publicKey)]));

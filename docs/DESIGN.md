@@ -119,6 +119,7 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 | `execute()` | anyone | verifies and performs; closes the buffer to `payer` |
 | `execute_direct(action, signature)` | payer | the same checks and effects as `execute` with the action and the signature taken from the instruction data; one transaction v1, no buffer |
 | `sweep_closed()` | anyone (payer) | after a `Close`: moves the whole balance of one token account the closed vault still owns to the heir's associated token account (created in the same instruction if missing, rent from `payer`) and closes the account, its rent to the heir; the heir is read from the `Tombstone`, so no caller can choose a destination |
+| `sweep_closed_sol()` | anyone | after a `Close`: lamports above the tombstone's rent go to the heir the tombstone names; the vault's address never changes, so a standing payment that lands after the close is not lost |
 
 `execute` takes the accounts `vault`, `sig_buffer`, `payer` (unsigned, must equal the buffer's payer) and, as
 remaining accounts: `TransferSol` → `[to]`; `TransferToken` → `[vault token account, destination token
@@ -139,6 +140,10 @@ else `WrongMint`), `mint`, `token_program` (Token or Token-2022, must own the mi
 the destination was fixed by the `Close` signature that made it. The SDK's `sweepClosed(rpc, payer,
 vault, mint)` lists the closed vault's token accounts for the mint (`getTokenAccountsByOwner`) and sends
 one `sweep_closed` per account.
+
+Both token CPIs (`TransferToken` and `sweep_closed`) pass any accounts after the named ones straight to
+the token program. A Token-2022 mint with a transfer hook needs its hook program and extra account metas
+there; the SDK takes them as `extraAccounts`. Without this a hooked token could never leave a vault.
 
 `execute_direct` takes the accounts `vault`, `payer` (signer, writable) and `system_program`, then the same
 remaining accounts as `execute`. `action` must be 1..256 bytes. Steps 2–6 below are one shared code path for
@@ -229,6 +234,17 @@ until its `expiry_slot`; submitting it later works, submitting it twice does not
 one key per device behind one vault, which removes the shared-state question entirely.
 
 ### Signer rollback
+
+Three rules follow from this. A `Rotate` always takes the **highest** free leaf of the lane, never the
+smallest: the smallest free leaf is exactly the one a lost or restored record most likely signed last, and a
+second signature on it is a forgery kit, so the one action a stale signer may still perform stays away from
+it. The journal keeps every leaf the signer ever signed: a reservation the chain has confirmed moves to a
+`settled` list instead of being dropped, so a later RPC view that shows the leaf clear (a fork, a lagging
+node, a lie) can never make the signer pick it again. And a chain view that reports fewer spent leaves than
+the journal already saw in the same generation is refused outright (`ChainBehindJournalError`): nothing is
+signed on it, not even a Rotate. The SDK reads the chain at `confirmed` or above for the same reason.
+`nextFreshKeyIndex` refuses an index whose key is the current or a past key of any vault it can see, so
+rotating vault A to key k+1 never lets vault B be created with the same key.
 
 The chain cannot tell a signer that its own memory went backwards. If a signer's state is restored from an
 old backup, or a copy of the key on another device signed and executed leaves after that backup, the

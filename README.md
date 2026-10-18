@@ -43,7 +43,7 @@ keys (a registry commitment 32). When that history is full the vault can still s
 the next key goes in a new vault. `Close` leaves a tombstone at the address, so a closed vault can never
 be recreated and no signature from before the close can replay; it also names the heir, so a token
 account the close didn't get handed can be swept to the heir later (`sweep_closed`, anyone may call it,
-funds go nowhere else). The last free leaf is only ever spent on Rotate or Close, so a vault can't get
+funds go nowhere else), and SOL that lands on the address after the close goes to the heir the same way (`sweep_closed_sol`). A Rotate takes the highest free leaf, so a signer that lost track of its own record never re-signs the leaf it most likely used last. The last free leaf is only ever spent on Rotate or Close, so a vault can't get
 stuck: not even with a full key history. Accounts carry version 2; there's no in-place migration, an older
 vault is closed and a new one created with a fresh key.
 

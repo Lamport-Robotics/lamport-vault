@@ -769,6 +769,35 @@ describe("lamport-vault", () => {
     await expectError(execute(vaultL, spend, [meta(recipient.publicKey, true)]), "VaultClosed");
   });
 
+  it("sweep_closed_sol: SOL that lands on a closed vault's address goes to the heir, and nowhere else", async () => {
+    const keyZ = LmsKey.random(LMS_H5);
+    const vaultZ = await createVault(keyZ);
+    await fund(provider, vaultZ, 0.2);
+    const heir = Keypair.generate().publicKey;
+    const other = Keypair.generate().publicKey;
+    const sweepSol = (to: PublicKey) => program.methods.sweepClosedSol().accounts({ tombstone: vaultZ, heir: to }).rpc({ commitment: "confirmed" });
+
+    // A live vault cannot be swept.
+    await expectError(sweepSol(heir), "VaultNotClosed");
+
+    const bufClose = await stage(vaultZ, keyZ, 0, Action.close(heir, await FAR()));
+    await execute(vaultZ, bufClose, [meta(heir, true)]);
+    const rent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE, "confirmed");
+    expect(await connection.getBalance(vaultZ, "confirmed")).to.eq(rent);
+    // Nothing above the rent yet: nothing to sweep.
+    await expectError(sweepSol(heir), "InsufficientFunds");
+
+    // A standing payment arrives after the Close.
+    await fund(provider, vaultZ, 0.05);
+    const heirBefore = await connection.getBalance(heir, "confirmed");
+    await expectError(sweepSol(other), "WrongHeir");
+    await sweepSol(heir);
+    expect(await connection.getBalance(vaultZ, "confirmed")).to.eq(rent);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(heirBefore + 0.05 * LAMPORTS_PER_SOL);
+    // The tombstone is intact: the address still cannot be recreated.
+    expect((await program.account.tombstone.fetch(vaultZ)).heir.equals(heir)).to.eq(true);
+  });
+
   it("sweep_closed: tokens a Close left behind go to the heir, and nowhere else", async () => {
     const { vault: sdk } = loadSdk();
     const wallet = (provider.wallet as anchor.Wallet).payer;
@@ -1070,7 +1099,7 @@ describe("lamport-vault", () => {
     expect(live.journal.path).to.eq(journalPath);
     const created = await live.createVault();
     const vaultJ = new PublicKey(created.vault.toBase58());
-    const record = (generation: number, spentLeaves: number, reserved: number[], k = keyId) => ({ v: 2, key: k, vault: vaultJ.toBase58(), generation, spent: spentLeaves, reserved });
+    const record = (generation: number, spentLeaves: number, reserved: number[], k = keyId, settled: number[] = []) => ({ v: 2, key: k, vault: vaultJ.toBase58(), generation, spent: spentLeaves, reserved, settled });
     await fund(provider, vaultJ, 0.2);
     const transfer = { kind: "TransferSol", to: recipient.publicKey, lamports: 1000n };
     const r0 = await live.execute(transfer);
@@ -1094,11 +1123,11 @@ describe("lamport-vault", () => {
     // generation 1 (its leaves stay on record) and the new key gets its own journal file.
     const next = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
     const rot = await restored.execute({ kind: "Rotate", newLmsPubkey: next.publicKey }, { allowForeignKey: true });
-    expect(rot.q).to.eq(2);
+    expect(rot.q).to.eq(31); // a Rotate takes the highest free leaf, never the one the lost record signed
     const v = await fetchVault(vaultJ);
     expect(v.generation).to.eq(1);
     expect(Buffer.from(v.lmsPubkey)).to.deep.eq(Buffer.from(next.publicKey));
-    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq(record(1, 0, [0, 2]));
+    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq(record(1, 0, [0, 31]));
     // The old key's journal cannot be handed to the new key.
     expect(() => new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) })).to.throw(/one journal per LMS key/);
     const fresh = new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(next.publicKey, { dir }) });

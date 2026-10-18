@@ -6,12 +6,12 @@ import { presentHome } from "./presentation.ts";
 import { PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import { LmsPrivateKey, generateMnemonic, isValidMnemonic, mnemonicToMaster, deriveKeyMaterial, recoverKey, parseLmsPublicKey, lmsParams, LMS_SHA256_M32_H10 } from "@lamport-robotics/lms";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress, firstFreeLeaf, freeLeaves, freeLeavesExcluding, isLeafUsed, nextKeyMaterial, buildStagedExecution, buildDirectV1Transaction, createVaultInstruction, decodeVault, decodeTombstone, isTombstone, sweepClosedInstruction, decodeCommitment, findCommitmentPda, findVaultPdaForKey, commitInstruction, encodeAction, vaultMessage, randomNonce, type Action, type VaultAccount } from "@lamport-robotics/vault";
-import { $, CLUSTER, EXPLORER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, unb64, type SignRequest, type SignedBlob } from "./common.ts";
+import { $, CLUSTER, EXPLORER_ADDR, GENESIS_HASH, b64, copy, el, isPubkey, rpc, short, sol, slotToDate, txLink, unb64, type SignRequest, type SignedBlob } from "./common.ts";
 import { connectStandard, listWallets, localWallet, onWalletsChange, remember, remembered, type Wallet } from "./wallet.ts";
 import * as qr from "./qr.ts";
 import { holdings, destinationTokenAccount, toBase, type Holding } from "./tokens.ts";
 import { tape } from "./tape.ts";
-import { openJournal, keyFingerprint } from "./journal.ts";
+import { openJournal, openIssued, issuedKey, keyFingerprint } from "./journal.ts";
 import { equalBytes } from "@lamport-robotics/lms";
 
 // ── state ──
@@ -105,7 +105,7 @@ void load();
 async function load() {
   const h = location.hash.slice(1);
   const next = isPubkey(h) ? new PublicKey(h) : null;
-  if (!next || !vaultAddr || !next.equals(vaultAddr)) hotKey = null;   // a key loaded for one vault never outlives a switch
+  if (!next || !vaultAddr || !next.equals(vaultAddr)) dropHot();   // a key loaded for one vault never outlives a switch
   vaultAddr = next;
   vault = null; vaultLamports = 0; closed = false; heir = null;
   if (vaultAddr) {
@@ -181,7 +181,7 @@ async function sweepAll(steps: HTMLElement) {
     const li = el("li", {}, el("span", {}, `Sweep ${short(t.mint.toBase58(), 5)} to the heir`)); steps.append(li); li.classList.add("on");
     const { instruction } = sweepClosedInstruction({ programId: LAMPORT_VAULT_PROGRAM_ID, payer: wallet!.pubkey, vault: vaultAddr!, heir, mint: t.mint, vaultTokenAccount: t.account, tokenProgram: t.tokenProgram });
     const sig = await wallet!.send([instruction]);
-    li.classList.remove("on"); li.classList.add("done"); li.append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 5)));
+    li.classList.remove("on"); li.classList.add("done"); li.append(txLink(sig, 5));
   }
 }
 
@@ -243,7 +243,7 @@ function vaultView() {
 function resultLine(): HTMLElement | null {
   if (!lastRun || lastRun.vault !== vaultAddr!.toBase58()) return null;
   const r = lastRun, last = r.sigs[r.sigs.length - 1];
-  return el("div", { class: "result" }, el("span", {}, `${r.kind} · key ${r.q} spent`), el("a", { href: EXPLORER(last), target: "_blank", rel: "noopener" }, short(last, 6)));
+  return el("div", { class: "result" }, el("span", {}, `${r.kind} · key ${r.q} spent`), txLink(last));
 }
 
 function depositPanel() {
@@ -259,7 +259,7 @@ function depositPanel() {
       const n = Number(($("#amt", s) as HTMLInputElement).value);
       if (!(n > 0)) throw new Error("Enter an amount.");
       const sig = await wallet.send([SystemProgram.transfer({ fromPubkey: wallet.pubkey, toPubkey: vaultAddr!, lamports: Math.round(n * 1e9) })]);
-      ok.innerHTML = `Deposited · <a href="${EXPLORER(sig)}" target="_blank" rel="noopener">${short(sig, 6)}</a>`; ok.classList.remove("hidden");
+      ok.replaceChildren("Deposited · ", txLink(sig)); ok.classList.remove("hidden");
       await load();
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
@@ -323,7 +323,7 @@ function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest[
       const amount = toBase(amt.value, h.decimals); if (amount <= 0n || amount > h.amount) throw new Error("Enter an amount the vault holds.");
       lastTokenOwner = new PublicKey(to.value.trim());
       const ata = associatedTokenAddress(lastTokenOwner, h.mint, h.tokenProgram);
-      return { kind: "TransferToken", mint: h.mint.toBase58(), to: ata.toBase58(), amount: amount.toString(), tokenProgram: h.tokenProgram.toBase58(), decimals: h.decimals, source: h.account.toBase58() };
+      return { kind: "TransferToken", mint: h.mint.toBase58(), to: ata.toBase58(), toOwner: lastTokenOwner.toBase58(), amount: amount.toString(), tokenProgram: h.tokenProgram.toBase58(), decimals: h.decimals, source: h.account.toBase58() };
     }
     if (k === "Rotate") return { kind: "Rotate" };
     if (!isPubkey(to.value)) throw new Error("Enter a destination address."); return { kind: "Close", to: to.value.trim() };
@@ -375,7 +375,8 @@ function coldFlow(scope: Scope) {
       el("div", { class: "actions" }, el("button", { class: "link", id: "cpreq" }, "Copy"), el("button", { class: "link", id: "qrreq" }, "Show QR"), el("a", { class: "link quiet", href: "/signer.html", download: "lamport-vault-signer.html" }, "Download the signer")),
       el("div", { id: "qrbox", class: "qr", style: "margin-top:14px" }),
       el("p", { class: "quiet", style: "margin-top:14px" }, "Open the signer on a machine with no network. Paste or scan the request, type the words, bring the signature back here."),
-      el("p", { class: "quiet mono", id: "reqvalid", style: "font-size:12px" })),
+      el("p", { class: "quiet mono", id: "reqvalid", style: "font-size:12px" }),
+      el("p", { class: "quiet", id: "reqburn", style: "font-size:12.5px" })),
     el("div", { style: "margin-top:22px" },
       el("label", { class: "field" }, el("span", {}, "Signature · from the cold signer"), el("textarea", { class: "mono", id: "sigtxt", rows: "3", placeholder: "" })),
       el("div", { class: "actions" }, el("button", { class: "btn primary", id: "run" }, "Verify and execute"), el("button", { class: "link quiet", id: "scansig" }, "Scan QR")),
@@ -385,13 +386,23 @@ function coldFlow(scope: Scope) {
   $("#mkreq", s).addEventListener("click", async () => {
     const err = $("#werr", s); err.classList.add("hidden");
     try {
-      const slot = await rpc.getSlot("confirmed");
-      const q = firstFreeLeaf(v); if (q === undefined) throw new Error("No one-time keys left on this vault.");
       const act = form.read();
+      // a leaf this page ever handed out, or signed with itself, is never offered again: the signer may hold a
+      // signature for it that the chain has not seen, and a second signature on the same leaf lets anyone forge
+      const issued = await openIssued();
+      if (!issued) throw new Error("This browser gives no durable storage, so the page cannot remember which one-time keys it already handed out. Signing requests cannot be prepared here.");
+      const ik = issuedKey(v.lmsPubkey, v.generation, vaultAddr!.toBase58());
+      const gone = new Set(await issued.list(ik));
+      const hot = await (await openJournal())?.get(keyFingerprint(v.lmsPubkey));
+      const minQ = hot ? hot.maxQ + 1 : 0;
+      const q = firstFreeLeaf(v, 0, 1, (x) => x < minQ || gone.has(x)); if (q === undefined) throw new Error("No one-time keys left on this vault that this page has not already handed out.");
       if (act.kind === "Close" && vaultTokens.length && !(await confirmPanel(s, describe(act), `${vaultTokens.length} token balance${vaultTokens.length > 1 ? "s" : ""} will be swept to that address after the vault closes; it cannot go anywhere else.`))) return;
-      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, freeLeaves: freeLeaves(v), issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
+      const slot = await rpc.getSlot("confirmed");
+      if (!(await issued.add(ik, q))) throw new Error(`One-time key ${q} was handed out by this page moments ago. Prepare the request again.`);
+      const req: SignRequest = { v: 1, cluster: CLUSTER, vault: vaultAddr!.toBase58(), lmsPubkey: b64(v.lmsPubkey), nextQ: q, generation: v.generation, freeLeaves: freeLeaves(v), used: b64(v.used), issuedSlot: String(slot), expirySlot: String(slot + 9000), action: act };
       ($("#reqtxt", s) as HTMLTextAreaElement).value = JSON.stringify(req); $("#reqout", s).classList.remove("hidden");
       $("#reqvalid", s).textContent = `Valid until about ${slotToDate(slot + 9000, slot).toLocaleTimeString()} (slot ${slot + 9000}).`;
+      $("#reqburn", s).textContent = `This request uses one-time key ${q}. This page will not hand that key out again, whether the request is signed, submitted, expires or is discarded: an expired request still burns its key.`;
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
   $("#cpreq", s).addEventListener("click", (e) => copy(($("#reqtxt", s) as HTMLTextAreaElement).value, e.currentTarget as HTMLButtonElement));
@@ -410,6 +421,7 @@ function coldFlow(scope: Scope) {
       if (blob.v !== 1 || blob.vault !== vaultAddr!.toBase58()) throw new Error("This signature belongs to another vault.");
       if ((blob.generation ?? 0) !== v.generation) throw new Error("This signature was made for an earlier key generation. Prepare a new request.");
       const action = toAction(blob.action, BigInt(blob.issuedSlot ?? blob.expirySlot), BigInt(blob.expirySlot));
+      if (blob.action.kind === "TransferToken" && blob.action.toOwner && isPubkey(blob.action.toOwner)) lastTokenOwner = new PublicKey(blob.action.toOwner);
       await stageAndExecute(action, unb64(blob.signature), blob.q, $("#steps", s), $("#run", s) as HTMLButtonElement, blob.action.kind === "TransferToken" ? blob.action.source : undefined);
     } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
   });
@@ -428,7 +440,7 @@ function hotFlow(scope: Scope) {
     el("div", { class: "actions" }, el("button", { class: "btn primary", id: "hrun" }, "Sign and execute")),
     el("ul", { class: "steps hidden", id: "steps" }),
     el("div", { class: "err hidden", id: "werr" }));
-  $("#forget", s)?.addEventListener("click", () => { hotKey = null; hotMaster = null; render(); });
+  $("#forget", s)?.addEventListener("click", () => { dropHot(); render(); });
   $("#hrun", s).addEventListener("click", async () => {
     const err = $("#werr", s), btn = $("#hrun", s) as HTMLButtonElement; err.classList.add("hidden");
     try {
@@ -442,7 +454,7 @@ function hotFlow(scope: Scope) {
         if (!found) throw new Error("These words do not open this vault.");
         hotKey = found.key; hotMaster = master;
       }
-      if (!equalBytes(hotKey.publicKey, v.lmsPubkey) || !hotMaster) { hotKey = null; hotMaster = null; throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
+      if (!equalBytes(hotKey.publicKey, v.lmsPubkey) || !hotMaster) { dropHot(); throw new Error("The loaded key does not belong to this vault. Enter the words again."); }
       const a = form.read();
       if (a.kind === "Rotate") {
         // the only target this page signs for is the next key of the same words; anything else would lock the vault
@@ -462,9 +474,14 @@ function hotFlow(scope: Scope) {
       const jk = keyFingerprint(v.lmsPubkey);
       const rec = await journal.get(jk);
       const minQ = rec ? rec.maxQ + 1 : 0;
-      const q = firstFreeLeaf(v, 0, 1, (x) => x < minQ); if (q === undefined) throw new Error("No one-time keys left on this vault.");
-      // keys this browser already signed with are gone even if the chain has not seen them yet
-      if (freeLeavesExcluding(v, (x) => x < minQ) <= 1 && action.kind !== "Rotate" && action.kind !== "Close") throw new Error("Last one-time key: only a rotation or closing the vault is allowed now.");
+      // leaves this page handed to a cold signer are gone too: it may hold an unsubmitted signature for them
+      const issued = await openIssued();
+      if (!issued) throw new Error("This browser gives no durable storage for the key record; signing here is not safe.");
+      const gone = new Set(await issued.list(issuedKey(v.lmsPubkey, v.generation, vaultAddr!.toBase58())));
+      const skip = (x: number) => x < minQ || gone.has(x);
+      const q = firstFreeLeaf(v, 0, 1, skip); if (q === undefined) throw new Error("No one-time keys left on this vault.");
+      // keys this browser already signed with or handed out are gone even if the chain has not seen them yet
+      if (freeLeavesExcluding(v, skip) <= 1 && action.kind !== "Rotate" && action.kind !== "Close") throw new Error("Last one-time key: only a rotation or closing the vault is allowed now.");
       if (!(await journal.reserve(jk, q, { vault: vaultAddr!.toBase58(), generation: v.generation }))) throw new Error(`One-time key ${q} is already recorded as used in this browser.`);
       const signature = hotKey.sign(q, vaultMessage(vaultAddr!, v.generation, encodeAction(action)));
       await stageAndExecute(action, signature, q, $("#steps", s), btn, a.kind === "TransferToken" ? a.source : undefined);
@@ -493,7 +510,7 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
   }
   steps.innerHTML = ""; steps.classList.remove("hidden");
   const addStep = (n: string) => { const li = el("li", {}, el("span", {}, n)); steps.append(li); return li; };
-  const run = async (li: HTMLElement, f: () => Promise<string>) => { li.classList.add("on"); const sig = await f(); li.classList.remove("on"); li.classList.add("done"); li.append(el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, 5))); return sig; };
+  const run = async (li: HTMLElement, f: () => Promise<string>) => { li.classList.add("on"); const sig = await f(); li.classList.remove("on"); li.classList.add("done"); li.append(txLink(sig, 5)); return sig; };
   btn.setAttribute("disabled", ""); btn.classList.add("spin");
   const sigs: string[] = [];
   try {
@@ -514,11 +531,17 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
       const names = ["Open signature buffer", ...staged.writes.map((_, i) => `Write part ${i + 2} of ${staged.writes.length + 1}`), "Verify and execute"];
       for (let i = 0; i < staged.transactions.length; i++) sigs.push(await run(addStep(names[i]), () => wallet!.send(staged.transactions[i])));
     }
-    if (action.kind === "Rotate" || action.kind === "Close") { hotKey = null; hotMaster = null; }
+    if (action.kind === "Rotate" || action.kind === "Close") dropHot();
     lastRun = { vault: vaultAddr!.toBase58(), q, kind: action.kind, sigs };
     if (action.kind === "Close" && vaultTokens.length) { closed = true; heir = action.to; await sweepAll(steps); }
     await load();
   } finally { btn.removeAttribute("disabled"); btn.classList.remove("spin"); }
+}
+
+/** forget the hot key: best effort, the seed bytes are overwritten before the references go */
+function dropHot() {
+  try { hotMaster?.fill(0); hotKey?.material.seed.fill(0); } catch { /* fine */ }
+  hotKey = null; hotMaster = null;
 }
 
 let lastTokenOwner: PublicKey | null = null;
@@ -547,7 +570,7 @@ function registryPanel() {
         const pk = unb64(($("#regpk", s) as HTMLInputElement).value); parseLmsPublicKey(pk);
         const { instruction } = commitInstruction({ programId: PQ_REGISTRY_PROGRAM_ID, owner: wallet!.pubkey, payer: wallet!.pubkey, pqPubkey: pk });
         const sig = await wallet!.send([instruction]);
-        ok.innerHTML = `Committed · <a href="${EXPLORER(sig)}" target="_blank" rel="noopener">${short(sig, 6)}</a>`; ok.classList.remove("hidden");
+        ok.replaceChildren("Committed · ", txLink(sig)); ok.classList.remove("hidden");
       } catch (e) { err.textContent = String((e as Error).message ?? e); err.classList.remove("hidden"); }
     });
   });
@@ -558,6 +581,6 @@ function registryPanel() {
 let hiddenAt = 0;
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hiddenAt = Date.now();
-  else if (hotKey && hiddenAt && Date.now() - hiddenAt > 5 * 60_000) { hotKey = null; hotMaster = null; render(); }
+  else if (hotKey && hiddenAt && Date.now() - hiddenAt > 5 * 60_000) { dropHot(); render(); }
 });
-addEventListener("pagehide", () => { hotKey = null; hotMaster = null; });
+addEventListener("pagehide", () => dropHot());

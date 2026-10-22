@@ -9,3 +9,4 @@ test-ledger/
 .env.*
 !.env.example
 dist-signer/
+web/preview-shots/

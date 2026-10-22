@@ -4,43 +4,39 @@ export function presentHome(root: HTMLElement): HTMLElement {
   const intro = grid.children[0] as HTMLElement;
   const access = grid.children[1] as HTMLElement;
   const facts = intro.querySelector<HTMLElement>(".facts")!;
-  const eyebrow = intro.querySelector<HTMLElement>(".eyebrow")!;
   const rail = root.querySelector<HTMLElement>(".rail")!;
+  const node = (tag: string, cls: string, text?: string) => { const n = document.createElement(tag); n.className = cls; if (text) n.textContent = text; return n; };
 
-  root.classList.add("home", "restored-home");
-  grid.className = "home-grid";
-  intro.classList.add("home-intro");
-  intro.querySelector("p")?.classList.add("home-description");
+  // the statement, centred, then the vault door itself: the open panel
+  const hero = node("section", "v-hero");
+  hero.append(...Array.from(intro.children).filter((c) => c !== facts));
   access.classList.add("access-panel");
-  access.querySelector(".eyebrow")?.classList.add("access-title");
-  access.querySelector("#go")?.classList.add("wide", "arrow");
+  access.querySelector("#go")?.classList.add("wide");
+  const stage = node("section", "v-stage");
+  stage.append(access);
 
-  const masthead = document.createElement("div");
-  masthead.className = "masthead";
-  const meta = document.createElement("div");
-  meta.className = "masthead-meta";
-  meta.append(eyebrow);
-  // Brand typography is decorative; the original heading remains the page's h1.
-  const wordmark = document.createElement("div");
-  wordmark.className = "restored-wordmark";
-  wordmark.setAttribute("aria-hidden", "true");
-  wordmark.append("VAULT");
-  const period = document.createElement("span");
-  period.className = "title-period";
-  period.textContent = ".";
-  wordmark.append(period);
-  masthead.append(meta, wordmark);
+  // what makes it post-quantum, shown as the meter every vault page carries
+  const keys = node("section", "v-keys");
+  const head = node("div", "v-keys-head");
+  head.append(node("h2", "", "1,024 one-time keys. The chain counts every one."),
+    node("p", "", "Each signature spends exactly one key, and the program refuses a key it has seen before. When the keys run low you rotate to the next set from the same 24 words, at the same address."));
+  const strip = node("div", "v-strip");
+  strip.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 64; i++) { const b = document.createElement("i"); b.style.setProperty("--n", String(i)); strip.append(b); }
+  const legend = node("div", "v-legend");
+  legend.append(node("span", "", "Each bar is sixteen keys"), node("span", "spent", "Spent"), node("span", "free", "Unused"));
+  keys.append(head, strip, legend);
 
-  const strips = document.createElement("div");
-  strips.className = "key-strips restored-strips";
-  strips.setAttribute("aria-hidden", "true");
-  for (let i = 0; i < 64; i++) {
-    const bar = document.createElement("i");
-    bar.style.setProperty("--n", String(i));
-    strips.append(bar);
-  }
-  intro.append(strips);
-  root.prepend(masthead);
-  root.insertBefore(facts, rail);
+  const how = node("section", "v-how");
+  const howHead = node("div", "v-how-head");
+  const more = document.createElement("a"); more.className = "link arrow"; more.href = "/how-it-works"; more.textContent = "How it works";
+  howHead.append(node("h2", "", "Three steps, and the words never go online."), more);
+  how.append(howHead, rail);
+
+  root.replaceChildren(hero, stage, facts, keys, how);
+  root.classList.add("home");
+
+  const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.35 });
+  io.observe(strip);
   return root;
 }

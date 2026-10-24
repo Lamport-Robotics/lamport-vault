@@ -993,8 +993,13 @@ describe("lamport-vault", () => {
     const used = (await fetchVault(vaultS)).used;
     expect([0, 1, 2, 3, 4].map((q) => leafUsed(used, q))).to.deep.eq([true, true, true, true, false]);
 
-    // Fresh object, same key, nothing remembered: it reads 0..3 as spent and picks 4.
-    const restored = signer();
+    // Fresh object, same key, nothing remembered: the chain shows spent leaves and there is no record of
+    // them, so it starts stale (a lost record may cover an unsubmitted signature).
+    const blind = signer();
+    expect(await blind.nextQ()).to.eq(4);
+    await expectRejects(blind.execute(transfer), /no journal exists/);
+    // The operator who knows every earlier signature landed adopts the chain's count: 0..3 spent, 4 next.
+    const restored = new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed", adoptChainState: true });
     expect(await restored.nextQ()).to.eq(4);
     await expectRejects(restored.sign(transfer, { q: 2 }), /already spent on chain/);
     const res = await restored.execute(transfer);
@@ -1105,7 +1110,7 @@ describe("lamport-vault", () => {
     const r0 = await live.execute(transfer);
     expect(r0.q).to.eq(0);
     expect(r0.action.issuedSlot).to.be.a("bigint");
-    expect(Number(r0.action.expirySlot - r0.action.issuedSlot)).to.eq(300); // the default window
+    expect(Number(r0.action.expirySlot - r0.action.issuedSlot)).to.eq(600); // the staged default: four transactions need more than one's worth of slots
     const backup = fs.readFileSync(journalPath, "utf8");
     expect(JSON.parse(backup)).to.deep.eq(record(0, 0, [0]));
     const r1 = await live.execute(transfer);

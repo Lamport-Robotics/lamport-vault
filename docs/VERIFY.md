@@ -70,31 +70,31 @@ Not deployed. The plan, in order:
 
 ## Record
 
-devnet (`anchor build`, platform-tools v1.56):
+devnet, tag `devnet-1`, commit `63176dc`, both programs deployed from the `verify.yml` artifacts of that
+commit (solana-verify 0.5.2 in `solanafoundation/solana-verifiable-build@sha256:0cf72459…`, platform-tools
+v1.56). The tag's CI job and `scripts/verify-deploy.sh … --no-build` on the same artifacts print `MATCH`.
 
 ```
 lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-  hash       4dd776964d179c5827c8533953cd0026d82344f928e0e2b70678986fa1982f98
-  size       330 880 bytes (330 865 hashed, trailing zeros trimmed; allocation 350 000,
-             extended from 310 000 with `solana program extend … 40000` before this deployment)
-  slot       510317125
+  hash       3f9a9bc3e385026fb9ac4ee3f29601712537f96cb36914683fab9402354b6698
+  size       339 896 bytes (339 881 hashed; allocation 350 000)
+  slot       514635841
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
-  source     commit `16b7fe8`: the last-leaf Close / sweep_closed change on
-             top of commit `b97fed9` (deployed from the working tree; the commit that lands it is
-             the one to verify from)
 
 pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
-  hash       3480ae2de802671ee6231c3a191b07b45cc462b5999ee20e29d3ad14ba00bd9f
-  slot       510277271
+  hash       95af8d50f1167c4ae55d7cf68ce85870682486bc9110862e5040d4c3dd22a118
+  size       262 000 bytes (261 985 hashed; allocation 272 000)
+  slot       514636087
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
-  source     commit `17c7880` (unchanged since)
 ```
 
-earlier: commit `e8b3446`, vault `71e4dde1…4348` at slot 510305889 (308 928 bytes, allocation 310 000);
-commit `17c7880`, vault `d7481e24…8f85` at slot 510277112; commit `c596d0a`, vault `4d492d9e…d8c1`
-at slot 510255069, registry `ad3beeab…de81` at slot 510250792.
+A laptop `anchor build` of the same source gives another ELF than the Docker build (the registry's
+earlier `3480ae2d…` hash was one); from this tag on, what is on chain is always the CI artifact, so
+`solana-verify verify-from-repo` at the tagged commit is the check that counts.
 
-Devnet is redeployed as the code changes; this block is updated with each deployment and the script
-is the source of truth in between.
+earlier: commit `16b7fe8`, vault `4dd77696…2f98` at slot 510317125 (anchor build); commit `17c7880`,
+registry `3480ae2d…bd9f` at slot 510277271; commit `e8b3446`, vault `71e4dde1…4348` at slot 510305889;
+commit `17c7880`, vault `d7481e24…8f85` at slot 510277112; commit `c596d0a`, vault `4d492d9e…d8c1` at slot
+510255069, registry `ad3beeab…de81` at slot 510250792.
 
 mainnet: nothing yet.

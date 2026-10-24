@@ -266,6 +266,10 @@ fn verify_and_act<'info>(
             let to_ai = remaining.first().ok_or(VaultError::MissingAccount)?;
             require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
             require_keys_neq!(to, vault_key, VaultError::SelfTransfer);
+            // lamports sent to the signature buffer would go to the buffer's payer when it closes
+            if let RentSource::Buffer(buf_ai) = rent_source {
+                require_keys_neq!(to, buf_ai.key(), VaultError::SelfTransfer);
+            }
             let vault_ai = vault.to_account_info();
             let min = Rent::get()?.minimum_balance(vault_ai.data_len());
             let available = vault_ai.lamports().saturating_sub(min);

@@ -21,6 +21,8 @@ let vault: VaultAccount | null = null;
 let vaultLamports = 0;
 let vaultTokens: Holding[] = [];
 let closed = false;   // the address holds a closed vault's tombstone
+let rpcDown = false;      // the RPC refused or failed the lookup: nothing about the address is known
+let tokensUnknown = false; // the vault loaded but its token accounts could not be read
 let heir: PublicKey | null = null;   // with it: where sweep_closed sends what the vault still holds
 let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mode in this tab
 let hotMaster: Uint8Array | null = null;   // with it: the seed the next key (a Rotate target) is derived from
@@ -107,21 +109,42 @@ async function load() {
   const next = isPubkey(h) ? new PublicKey(h) : null;
   if (!next || !vaultAddr || !next.equals(vaultAddr)) dropHot();   // a key loaded for one vault never outlives a switch
   vaultAddr = next;
-  vault = null; vaultLamports = 0; closed = false; heir = null;
+  vault = null; vaultLamports = 0; closed = false; heir = null; rpcDown = false; tokensUnknown = false; vaultTokens = [];
   if (vaultAddr) {
-    const info = await rpc.getAccountInfo(vaultAddr, "confirmed").catch(() => null);
+    const want = vaultAddr;
+    render(true);
+    // a failed lookup is not an empty address: the page must never say "no vault" because the RPC said 429
+    let info: Awaited<ReturnType<typeof rpc.getAccountInfo>> = null;
+    try { info = await rpc.getAccountInfo(vaultAddr, "confirmed"); } catch (e) { console.warn("rpc", e); rpcDown = true; }
+    if (vaultAddr !== want) return; // the hash moved on while we waited
     if (info && info.owner.equals(LAMPORT_VAULT_PROGRAM_ID)) {
       try { vault = decodeVault(info.data); } catch (e) { closed = isTombstone(info.data); if (closed) heir = decodeTombstone(info.data).heir; else console.warn("vault account not readable", e); vault = null; }
       vaultLamports = info.lamports;
-      try { vaultTokens = await holdings(vaultAddr); } catch (e) { console.error("holdings", e); vaultTokens = []; }
+      try { vaultTokens = await holdings(vaultAddr); } catch (e) { console.warn("holdings", e); vaultTokens = []; tokensUnknown = true; }
+      if (vaultAddr !== want) return;
     }
   }
   render();
 }
 
-function render() {
+function looking() {
+  return el("div", { class: "page" }, el("div", {}, el("h2", {}, "Looking up the vault"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""), el("p", { class: "quiet" }, "Reading the account from the chain.")));
+}
+
+function unreachable() {
+  const s = el("div", { class: "page" }, el("div", {}, el("h2", {}, "The network did not answer"), el("p", { class: "quiet mono" }, vaultAddr?.toBase58() ?? ""),
+    el("p", { class: "quiet" }, "The RPC behind this page refused or failed the request. Nothing about this address is known until it answers; the vault itself is unaffected."),
+    el("div", { class: "actions" }, el("button", { class: "btn", id: "retry" }, "Try again"), el("button", { class: "link arrow", id: "back" }, "Back"))));
+  $("#retry", s).addEventListener("click", () => void load());
+  $("#back", s).addEventListener("click", () => (location.hash = ""));
+  return s;
+}
+
+function render(loading = false) {
   main.innerHTML = "";
   if (!vaultAddr) return main.append(home());
+  if (loading) return main.append(looking());
+  if (rpcDown) return main.append(unreachable());
   if (!vault) return main.append(notFound());
   main.append(vaultView());
 }
@@ -219,6 +242,7 @@ function vaultView() {
     el("div", { class: "meta" }, el("button", { class: "link quiet", id: "cp" }, "Copy address"), el("a", { class: "link quiet", href: EXPLORER_ADDR(addr), target: "_blank", rel: "noopener" }, "Explorer")),
     el("div", { class: "balance" }, sol(vaultLamports), el("small", {}, "SOL")),
     vaultTokens.length ? el("div", { class: "holdings" }, ...vaultTokens.map((t) => el("div", {}, el("span", {}, short(t.mint.toBase58(), 5)), el("span", {}, t.ui)))) : null,
+    tokensUnknown ? el("p", { class: "quiet" }, "Token balances could not be read; the network refused the request. Reload to try again.") : null,
     tape(leaves, v.used, v.spent, nextFree),
     el("dl", { class: "spec" },
       el("dt", {}, "Scheme"), el("dd", {}, `LMS-SHA256 H${h} / W4`),

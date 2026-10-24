@@ -8,8 +8,9 @@ export interface Holding { mint: PublicKey; amount: bigint; decimals: number; ui
 export async function holdings(owner: PublicKey): Promise<Holding[]> {
   const out: Holding[] = [];
   for (const tokenProgram of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-    const r = await rpc.getParsedTokenAccountsByOwner(owner, { programId: tokenProgram }, "confirmed").catch(() => null);
-    for (const a of r?.value ?? []) {
+    // a failed read must surface: an empty list would read as "no tokens" and hide a balance
+    const r = await rpc.getParsedTokenAccountsByOwner(owner, { programId: tokenProgram }, "confirmed");
+    for (const a of r.value) {
       const info = (a.account.data as any).parsed?.info;
       if (!info) continue;
       const amount = BigInt(info.tokenAmount.amount);

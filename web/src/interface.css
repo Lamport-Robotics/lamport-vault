@@ -45,6 +45,7 @@ h1 { font-weight: 300; letter-spacing: -0.05em; }
 h2, h3 { font-weight: 400; letter-spacing: -0.03em; }
 p { color: var(--ink-2); }
 p.quiet { color: var(--mute); font-size: 14.5px; }
+p.quiet.mono { overflow-wrap: anywhere; }
 .eyebrow { font-family: var(--sans); font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--mute); }
 .link { font-weight: 500; font-size: 14px; color: var(--ink); border-bottom: 1px solid rgba(242, 238, 227, 0.3); padding-bottom: 2px; transition: border-color .25s; }
 .link:hover { border-color: var(--ink); }

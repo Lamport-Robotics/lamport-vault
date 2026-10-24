@@ -184,7 +184,7 @@ describe("FileLeafJournal across processes", () => {
     const payer = Keypair.generate();
     const path = join(dir, "cross.json");
     const theirs = new FileLeafJournal(key.publicKey, { path });
-    const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { path }) });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { path }) });
     rpc.accounts.set(signer.vault.toBase58(), freshVault());
     // "Another process" is inside its critical section (its lock file is on disk, its pid alive).
     await theirs.acquireLock();
@@ -214,7 +214,7 @@ describe("FileLeafJournal across processes", () => {
     const payer = Keypair.generate();
     const path = join(dir, "crashed.json");
     writeFileSync(path, JSON.stringify(rec(0, 0, [0])));
-    const signer = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { path }) });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { path }) });
     rpc.accounts.set(signer.vault.toBase58(), freshVault());
     plantLock(path, { pid: deadPid(), time: Date.now() - STALE_LOCK_MS - 5_000 }, STALE_LOCK_MS + 5_000);
     expect((await signer.sign(transfer)).q).toBe(1);
@@ -232,15 +232,15 @@ describe("VaultSigner journal option", () => {
     const rpc = new MockChain();
     const payer = Keypair.generate();
     expect(() => new VaultSigner({ rpc, key, payer } as never)).toThrow(/journal is required/);
-    expect(() => new VaultSigner({ rpc, key, payer, journal: undefined as never })).toThrow(/"ephemeral"/);
+    expect(() => new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: undefined as never })).toThrow(/"ephemeral"/);
   });
 
   it("is one journal per key: a journal built for another key is refused", () => {
     const rpc = new MockChain();
     const payer = Keypair.generate();
-    expect(() => new VaultSigner({ rpc, key, payer, journal: new MemoryLeafJournal(keyB.publicKey) })).toThrow(/one journal per LMS key/);
-    expect(() => new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(KEY_B, { dir }) })).toThrow(new RegExp(`journal is for key ${KEY_B}`));
-    const signer = new VaultSigner({ rpc, key, payer, journal: new MemoryLeafJournal(KEY) });
+    expect(() => new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new MemoryLeafJournal(keyB.publicKey) })).toThrow(/one journal per LMS key/);
+    expect(() => new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(KEY_B, { dir }) })).toThrow(new RegExp(`journal is for key ${KEY_B}`));
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new MemoryLeafJournal(KEY) });
     expect(signer.keyId).toBe(KEY);
     expect(signer.journal.key).toBe(KEY);
   });
@@ -248,7 +248,7 @@ describe("VaultSigner journal option", () => {
   it('"ephemeral" opts in to a memory journal, warns once on first signature and flags every result', async () => {
     const rpc = new MockChain();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     expect(signer.ephemeral).toBe(true);
     expect(signer.journal).toBeInstanceOf(MemoryLeafJournal);
     expect(signer.journal.key).toBe(KEY);
@@ -266,10 +266,10 @@ describe("VaultSigner journal option", () => {
     expect(r.q).toBe(1);
     expect(warn).toHaveBeenCalledTimes(1); // once per signer, not per signature
     // Another ephemeral signer warns for itself; one with a real journal never does.
-    const again = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    const again = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     await again.sign(transfer);
     expect(warn).toHaveBeenCalledTimes(2);
-    const durable = new VaultSigner({ rpc, key, payer, journal: new MemoryLeafJournal(key.publicKey) });
+    const durable = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new MemoryLeafJournal(key.publicKey) });
     expect(durable.ephemeral).toBe(false);
     expect((await durable.sign(transfer)).ephemeral).toBe(false);
     expect((await durable.execute(transfer)).ephemeral).toBe(false);
@@ -297,13 +297,13 @@ describe("VaultSigner with a journal", () => {
     const payer = Keypair.generate();
     const path = join(dir, "crash.json");
     const journal = () => new FileLeafJournal(key.publicKey, { path });
-    const first = new VaultSigner({ rpc, key, payer, journal: journal() });
+    const first = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: journal() });
     rpc.accounts.set(first.vault.toBase58(), freshVault());
     const a = await first.sign(transfer);
     expect(a.q).toBe(0);
     expect(await journal().load()).toEqual(st(0, 0, [0]));
     // "crash": a new process with the same journal; the chain still shows leaf 0 free
-    const second = new VaultSigner({ rpc, key, payer, journal: journal() });
+    const second = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: journal() });
     expect(await second.nextQ()).toBe(1);
     await expect(second.sign(transfer, { q: 0 })).rejects.toThrow(/journal/);
     const b = await second.sign(transfer);
@@ -343,7 +343,7 @@ describe("VaultSigner with a journal", () => {
     const home = join(dir, "backup");
     mkdirSync(home);
     const path = join(home, `${KEY}.json`);
-    const live = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { dir: home }) });
+    const live = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { dir: home }) });
     rpc.accounts.set(live.vault.toBase58(), freshVault());
 
     // Day 1: one transfer executed, then the journal is backed up.
@@ -361,7 +361,7 @@ describe("VaultSigner with a journal", () => {
 
     // Day 3: the device is restored from the day-1 backup.
     writeFileSync(path, backup);
-    const restored = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { dir: home }) });
+    const restored = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { dir: home }) });
     // The chain shows 2 spent leaves in the lane; the backup accounts for 1 (its reserved leaf 0).
     let err: unknown;
     await restored.sign(transfer).catch((e: unknown) => (err = e));
@@ -446,8 +446,8 @@ describe("VaultSigner with a journal", () => {
     const rpc = new MockChain();
     const payer = Keypair.generate();
     const path = join(dir, "shared.json");
-    const a = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { path }) });
-    const b = new VaultSigner({ rpc, key, payer, journal: new FileLeafJournal(key.publicKey, { path }) });
+    const a = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { path }) });
+    const b = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: new FileLeafJournal(key.publicKey, { path }) });
     rpc.accounts.set(a.vault.toBase58(), freshVault());
     expect((await a.sign(transfer)).q).toBe(0);
     expect((await b.sign(transfer)).q).toBe(1);

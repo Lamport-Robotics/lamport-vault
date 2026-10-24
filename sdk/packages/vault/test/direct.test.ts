@@ -24,6 +24,7 @@ import {
   DirectV1Error,
   executeDirectInstruction,
   isV1Rejection,
+  DirectV1LandedError,
   keypairV1Signer,
   V1_MAX_TRANSACTION_BYTES,
   V1_VERSION_BYTE,
@@ -216,7 +217,7 @@ describe("VaultSigner modes", () => {
   it("direct-v1: one v1 transaction whose LMS signature verifies over the bound message", async () => {
     const rpc = new MockRpc();
     rpc.accounts.set(vault.toBase58(), vaultAccount([0, 1]));
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "direct-v1", v1Config: { priorityFeeLamports: 1_000n } });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "direct-v1", v1Config: { priorityFeeLamports: 1_000n } });
     const seen: number[] = [];
     const res = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { onTransaction: (i) => seen.push(i) });
     expect(res.mode).toBe("direct-v1");
@@ -242,7 +243,7 @@ describe("VaultSigner modes", () => {
     const rpc = new MockRpc();
     rpc.acceptV1 = false;
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto" });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "auto" });
     const fallbacks: unknown[] = [];
     const res = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { nonce: 5n, onFallback: (e) => fallbacks.push(e) });
     expect(res.mode).toBe("staged");
@@ -258,11 +259,24 @@ describe("VaultSigner modes", () => {
     expect(await signer.nextQ()).toBe(1);
   });
 
+  it("auto: an RPC rejection after which the leaf shows up spent means the direct transaction landed; nothing is re-staged", async () => {
+    const rpc = new MockRpc();
+    rpc.acceptV1 = false; // the node says "cannot deserialize" but, in this story, had already relayed the bytes
+    rpc.accounts.set(vault.toBase58(), vaultAccount([]));
+    const inner = keypairV1Signer(payer.secretKey);
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "auto", landedPollMs: [0, 0], v1Signer: async (m) => { rpc.accounts.set(vault.toBase58(), vaultAccount([0])); return inner(m); } });
+    let err: unknown;
+    await signer.execute({ kind: "TransferSol", to, lamports: 7n }).catch((e: unknown) => (err = e));
+    expect(err).toBeInstanceOf(DirectV1LandedError);
+    expect((err as DirectV1LandedError).q).toBe(0);
+    expect(rpc.sent).toHaveLength(0); // no staged transactions behind it
+  });
+
   it("auto: a transaction that ran and failed is not a v1 rejection; it propagates", async () => {
     const rpc = new MockRpc();
     rpc.v1SendError = "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x177c";
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto" });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "auto" });
     await expect(signer.execute({ kind: "TransferSol", to, lamports: 7n })).rejects.toThrow(/0x177c/);
     expect(rpc.sent).toHaveLength(0);
   });
@@ -271,11 +285,11 @@ describe("VaultSigner modes", () => {
     const rpc = new MockRpc();
     rpc.acceptV1 = false;
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const strict = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "direct-v1" });
+    const strict = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "direct-v1" });
     await expect(strict.execute({ kind: "TransferSol", to, lamports: 7n })).rejects.toBeInstanceOf(DirectV1Error);
     expect(rpc.sent).toHaveLength(0);
 
-    const refusing = new VaultSigner({ rpc, key, payer, journal: "ephemeral", mode: "auto", v1Signer: async () => { throw new Error("wallet: unsupported transaction version"); } });
+    const refusing = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", mode: "auto", v1Signer: async () => { throw new Error("wallet: unsupported transaction version"); } });
     const res = await refusing.execute({ kind: "TransferSol", to, lamports: 7n });
     expect(res.mode).toBe("staged");
     expect(rpc.sent).toHaveLength(4);
@@ -284,7 +298,7 @@ describe("VaultSigner modes", () => {
   it("default mode is staged; a per-call mode overrides the signer's", async () => {
     const rpc = new MockRpc();
     rpc.accounts.set(vault.toBase58(), vaultAccount([]));
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     const staged = await signer.execute({ kind: "TransferSol", to, lamports: 7n });
     expect(staged.mode).toBe("staged");
     const direct = await signer.execute({ kind: "TransferSol", to, lamports: 7n }, { mode: "direct-v1" });

@@ -62,6 +62,8 @@ export interface LeafJournalState {
   reserved: number[];
   /** Leaves this signer signed that the chain has since shown as spent. Kept for good: a leaf once signed is never picked again, whatever an RPC says later. Absent in records written before this field existed. */
   settled?: number[];
+  /** Genesis hash (base58) of the cluster the vault lives on, when the signer knows it. A record from another cluster is refused. */
+  cluster?: string;
 }
 
 /**
@@ -180,7 +182,7 @@ export class FileLeafJournal implements LeafJournal {
   async acquireLock(): Promise<void> {
     if (this.held) throw new Error(`journal lock ${this.lockPath} is already held by this object`);
     const [fs] = await this.modules();
-    const body = JSON.stringify({ pid: process.pid, time: Date.now() }) + "\n";
+    const body = JSON.stringify({ pid: process.pid, time: Date.now(), host: hostName() }) + "\n";
     for (let attempt = 0; ; attempt++) {
       try {
         const fh = await fs.open(this.lockPath, "wx", 0o600);
@@ -195,7 +197,9 @@ export class FileLeafJournal implements LeafJournal {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 2) throw e;
       }
       const holder = await this.readLock();
-      if (holder.alive || holder.age < STALE_LOCK_MS) throw new JournalLockedError(this.lockPath, holder);
+      // A lock from another host (shared or synced directory) is never broken: its pid cannot be checked
+      // from here and its clock is not ours. Clear it by hand once the other side is known to be down.
+      if (holder.foreign || holder.alive || holder.age < STALE_LOCK_MS) throw new JournalLockedError(this.lockPath, holder);
       // Dead owner, old lock: break it. Someone else may break it at the same moment; the retry sorts that out.
       await fs.rm(this.lockPath, { force: true });
     }
@@ -211,7 +215,7 @@ export class FileLeafJournal implements LeafJournal {
   }
 
   /** What the lock file says, with the owner's liveness and the lock's age in ms (0 if it vanished). */
-  private async readLock(): Promise<{ pid?: number; time?: number; alive: boolean; age: number }> {
+  private async readLock(): Promise<{ pid?: number; time?: number; host?: string; alive: boolean; age: number; foreign: boolean }> {
     const [fs] = await this.modules();
     let text = "";
     let mtime: number | undefined;
@@ -220,25 +224,34 @@ export class FileLeafJournal implements LeafJournal {
       mtime = (await fs.stat(this.lockPath)).mtimeMs;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      return { alive: false, age: 0 };
+      return { alive: false, age: 0, foreign: false };
     }
     let pid: number | undefined;
     let time: number | undefined;
+    let host: string | undefined;
     try {
       const o = JSON.parse(text) as Record<string, unknown>;
       if (Number.isInteger(o.pid) && (o.pid as number) > 0) pid = o.pid as number;
       if (typeof o.time === "number" && Number.isFinite(o.time)) time = o.time;
+      if (typeof o.host === "string") host = o.host;
     } catch {
       // empty or half-written: the owner may still be writing it; age decides below
     }
-    const age = Date.now() - (time ?? mtime ?? Date.now());
+    // age by the file's mtime (this machine's clock), not by the time the holder wrote into it
+    const age = Date.now() - (mtime ?? time ?? Date.now());
+    const foreign = host !== undefined && host !== hostName();
     return {
       ...(pid !== undefined ? { pid } : {}),
       ...(time !== undefined ? { time } : {}),
-      alive: pid !== undefined && isProcessAlive(pid),
+      ...(host !== undefined ? { host } : {}),
+      alive: !foreign && pid !== undefined && isProcessAlive(pid),
       age,
+      foreign,
     };
   }
+
+  /** What the file held when this object last read it; `save` refuses to overwrite anything else. */
+  private loadedText: string | null | undefined;
 
   async load(): Promise<LeafJournalState | null> {
     const [fs] = await this.modules();
@@ -246,15 +259,23 @@ export class FileLeafJournal implements LeafJournal {
     try {
       text = await fs.readFile(this.path, "utf8");
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") { this.loadedText = null; return null; }
       throw e;
     }
+    this.loadedText = text;
     return parseJournalFile(text, this.path, this.key);
   }
 
   async save(state: LeafJournalState): Promise<void> {
     checkKey(validateState(state), this.key, this.path);
     const [fs, nodePath] = await this.modules();
+    // Compare-and-swap: another process that broke our lock (or a sync client) may have written the
+    // file since we read it. Writing over that would drop its reservations, so refuse instead.
+    if (this.loadedText !== undefined) {
+      let now: string | null;
+      try { now = await fs.readFile(this.path, "utf8"); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; now = null; }
+      if (now !== this.loadedText) throw new JournalConflictError(this.path);
+    }
     const dir = nodePath.dirname(this.path);
     const tmp = nodePath.join(dir, `.${nodePath.basename(this.path)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
     const text = JSON.stringify(toRecord(state));
@@ -267,6 +288,7 @@ export class FileLeafJournal implements LeafJournal {
     }
     try {
       await fs.rename(tmp, this.path);
+      this.loadedText = text;
     } catch (e) {
       await fs.rm(tmp, { force: true });
       throw e;
@@ -289,6 +311,26 @@ export class FileLeafJournal implements LeafJournal {
 
 /** A `.lock` file left by a dead process is broken once it is this old. */
 export const STALE_LOCK_MS = 30_000;
+
+/** The journal file changed between this object's `load` and its `save`: someone else wrote it. Reload and retry. */
+export class JournalConflictError extends Error {
+  readonly path: string;
+  constructor(path: string) {
+    super(`journal ${path} changed since it was read; another signer wrote it (reload, then retry)`);
+    this.name = "JournalConflictError";
+    this.path = path;
+  }
+}
+
+let cachedHost: string | undefined;
+function hostName(): string {
+  if (cachedHost) return cachedHost;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    cachedHost = (process.versions?.node ? (globalThis as unknown as { require?: (m: string) => { hostname(): string } }).require?.("node:os")?.hostname() : undefined) ?? "";
+  } catch { cachedHost = ""; }
+  return cachedHost || "?";
+}
 
 /** IndexedDB database and object store of {@link BrowserLeafJournal}. */
 export const BROWSER_JOURNAL_DB = "lamport-vault-journal";
@@ -459,7 +501,7 @@ export function parseJournalFile(text: string, source = "journal", key?: string)
 
 /** The stored form of a state. */
 function toRecord(state: LeafJournalState): Record<string, unknown> {
-  return { v: FILE_FORMAT_VERSION, key: state.key, vault: state.vault, generation: state.generation, spent: state.spent, reserved: [...state.reserved], settled: [...(state.settled ?? [])] };
+  return { v: FILE_FORMAT_VERSION, key: state.key, vault: state.vault, generation: state.generation, spent: state.spent, reserved: [...state.reserved], settled: [...(state.settled ?? [])], ...(state.cluster ? { cluster: state.cluster } : {}) };
 }
 
 function fromRecord(raw: unknown, source: string, key?: string): LeafJournalState {
@@ -467,7 +509,7 @@ function fromRecord(raw: unknown, source: string, key?: string): LeafJournalStat
   const o = raw as Record<string, unknown>;
   if (o.v !== FILE_FORMAT_VERSION) throw new Error(`${source}: journal format ${String(o.v)} is not supported (want ${FILE_FORMAT_VERSION})`);
   if (!Array.isArray(o.reserved)) throw new Error(`${source}: reserved must be an array`);
-  const state = validateState({ key: o.key as string, vault: o.vault as string, generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])], settled: Array.isArray(o.settled) ? [...(o.settled as number[])] : [] });
+  const state = validateState({ key: o.key as string, vault: o.vault as string, generation: o.generation as number, spent: o.spent as number, reserved: [...(o.reserved as number[])], settled: Array.isArray(o.settled) ? [...(o.settled as number[])] : [], ...(typeof o.cluster === "string" ? { cluster: o.cluster } : {}) });
   return key === undefined ? state : checkKey(state, key, source);
 }
 
@@ -531,6 +573,8 @@ export interface StaleSignerDetail {
   journal: LeafJournalState;
   /** Chain leaves in this lane that are spent but neither counted in `journal.spent` nor listed in `journal.reserved`. */
   unaccounted: number[];
+  /** True when there was no journal at all for a key that has history on chain: a lost record, or a second signer. */
+  missingRecord?: boolean;
 }
 
 /**
@@ -544,8 +588,9 @@ export interface StaleSignerDetail {
 export class StaleSignerError extends Error {
   readonly detail: StaleSignerDetail;
   constructor(detail: StaleSignerDetail) {
-    const why =
-      detail.chain.generation !== detail.journal.generation
+    const why = detail.missingRecord
+      ? `no journal exists for this key, but the key has history on chain (generation ${detail.chain.generation}, ${detail.chain.spentInLane} spent leaves in lane ${detail.lane}/${detail.lanes}); a lost record may cover a signature that was never submitted`
+      : detail.chain.generation !== detail.journal.generation
         ? `the chain is at key generation ${detail.chain.generation}, the journal at ${detail.journal.generation}`
         : `the chain shows ${detail.chain.spentInLane} spent leaves in lane ${detail.lane}/${detail.lanes}, the journal accounts for ${detail.chain.spentInLane - detail.unaccounted.length} (leaves ${detail.unaccounted.join(", ")} were spent by a signer state this journal never saw)`;
     super(`stale signer state for vault ${detail.vault}: ${why}. Only Rotate is allowed until a rotation by this signer lands (or acknowledgeStale(), which is unsafe).`);

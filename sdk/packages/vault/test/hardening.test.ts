@@ -7,7 +7,9 @@ import { IX } from "../src/discriminator.ts";
 import { executeRemainingAccounts, sweepClosedSolInstruction } from "../src/instructions.ts";
 import { findVaultPdaForKey, vaultId } from "../src/pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID } from "../src/programIds.ts";
-import { ChainBehindJournalError, nextFreshKeyIndex, StaleSignerError, VaultSigner } from "../src/signer.ts";
+import { ChainBehindJournalError, isUserRejection, JournalConflictError, JournalVaultMismatchError, nextFreshKeyIndex, resetInFlightLeaves, StaleSignerError, VaultSigner } from "../src/signer.ts";
+import { FileLeafJournal, JournalLockedError, keyFingerprint, MemoryLeafJournal } from "../src/journal.ts";
+import { DirectV1Error, isV1Rejection } from "../src/direct.ts";
 import { MockChain } from "./mock.ts";
 
 const rnd = () => LmsPrivateKey.generate(randomKeyMaterial(LMS_SHA256_M32_H5, 3));
@@ -47,7 +49,7 @@ describe("a signer that cannot trust its record", () => {
   it("refuses to sign on an RPC view that is behind its own record", async () => {
     const rpc = new MockChain();
     const key = rnd(), payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral", adoptChainState: true });
     const before = freshVault(key);
     rpc.accounts.set(signer.vault.toBase58(), before);
     rpc.spend(signer.vault, [0, 1, 2]);
@@ -114,5 +116,100 @@ describe("instructions", () => {
     const keys = executeRemainingAccounts(vault, { kind: "TransferToken", mint, to, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, undefined, [], undefined, [{ pubkey: hook, isSigner: false, isWritable: false }]);
     expect(keys.length).toBe(5);
     expect(keys[4]!.pubkey.equals(hook)).toBe(true);
+  });
+});
+
+describe("audit 2026-10-24 follow-ups", () => {
+  it("no record for a key with spent leaves: stale (Rotate only, top leaf) unless the operator adopts the chain", async () => {
+    const rpc = new MockChain();
+    const key = rnd(), next = rnd(), payer = Keypair.generate();
+    const owner = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    rpc.accounts.set(owner.vault.toBase58(), freshVault(key));
+    rpc.spend(owner.vault, [0, 1]); // this key has signed before, by someone, somewhere
+    const lost = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    let err: unknown;
+    await lost.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n }).catch((e: unknown) => (err = e));
+    expect(err).toBeInstanceOf(StaleSignerError);
+    expect((err as StaleSignerError).detail.missingRecord).toBe(true);
+    expect((err as StaleSignerError).detail.unaccounted).toEqual([0, 1]);
+    expect(String(err)).toMatch(/no journal exists/);
+    const rot = await lost.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
+    expect(rot.q).toBe(31);
+    // the explicit, documented-unsafe opt-in adopts the chain's count and signs from the bottom
+    resetInFlightLeaves(rpc);
+    const adopting = new VaultSigner({ rpc, key, payer, journal: "ephemeral", adoptChainState: true });
+    expect((await adopting.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).q).toBe(2);
+    // a key with nothing spent has no history to lose: fresh is fresh
+    const virgin = rnd();
+    const v = new VaultSigner({ rpc, key: virgin, payer, journal: "ephemeral" });
+    rpc.accounts.set(v.vault.toBase58(), freshVault(virgin, { generation: 3 })); // rotated into, bitmap reset
+    expect((await v.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).q).toBe(0);
+  });
+
+  it("createVault refuses a key that is live in another vault, and a journal that names another vault", async () => {
+    const rpc = new MockChain() as MockChain & { getProgramAccounts: (p: PublicKey, c: any) => Promise<{ pubkey: PublicKey; account: any }[]> };
+    const key = rnd(), payer = Keypair.generate();
+    const elsewhere = Keypair.generate().publicKey;
+    rpc.getProgramAccounts = async (_p, c) => (c.filters[0].memcmp.bytes === Buffer.from(key.publicKey).toString("base64") ? [{ pubkey: elsewhere, account: {} }] : []);
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    await expect(signer.createVault()).rejects.toThrow(new RegExp(`current key of vault ${elsewhere.toBase58()}`));
+    rpc.getProgramAccounts = async () => [];
+    const journal = new MemoryLeafJournal(key.publicKey);
+    await journal.save({ key: keyFingerprint(key.publicKey), vault: elsewhere.toBase58(), generation: 0, spent: 0, reserved: [], settled: [] });
+    await expect(new VaultSigner({ rpc, key, payer, journal }).createVault()).rejects.toThrow(JournalVaultMismatchError);
+  });
+
+  it("an explicit leaf must sit in the signer's lane", async () => {
+    const rpc = new MockChain();
+    const key = rnd(), payer = Keypair.generate();
+    const laneOne = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2, journal: "ephemeral" });
+    rpc.accounts.set(laneOne.vault.toBase58(), freshVault(key));
+    await expect(laneOne.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n }, { q: 4 })).rejects.toThrow(RangeError);
+    expect((await laneOne.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n }, { q: 5 })).q).toBe(5);
+  });
+
+  it("SOL is never sent to a token account", async () => {
+    const rpc = new MockChain();
+    const key = rnd(), payer = Keypair.generate();
+    const signer = new VaultSigner({ rpc, key, payer, journal: "ephemeral" });
+    rpc.accounts.set(signer.vault.toBase58(), freshVault(key));
+    const tokenAccount = Keypair.generate().publicKey;
+    const plain = rpc.getAccountInfo.bind(rpc);
+    rpc.getAccountInfo = async (pk: PublicKey) => (pk.equals(tokenAccount) ? { data: Buffer.alloc(165), executable: false, lamports: 1, owner: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") } : plain(pk));
+    await expect(signer.sign({ kind: "TransferSol", to: tokenAccount, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/token account/);
+    await expect(signer.sign({ kind: "Close", to: tokenAccount, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/token account/);
+    expect(await signer.nextQ()).toBe(0); // nothing reserved
+  });
+
+  it("file journal: a save over a file someone else rewrote is refused, a lock from another host is never broken", async () => {
+    const { mkdtempSync, writeFileSync, utimesSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const key = rnd();
+    const dir = mkdtempSync(join(tmpdir(), "lv-cas-"));
+    const path = join(dir, "j.json");
+    const a = new FileLeafJournal(key.publicKey, { path });
+    const b = new FileLeafJournal(key.publicKey, { path });
+    const fp = keyFingerprint(key.publicKey);
+    const vault = Keypair.generate().publicKey.toBase58();
+    await a.save({ key: fp, vault, generation: 0, spent: 0, reserved: [], settled: [] });
+    await b.load();
+    await a.save({ key: fp, vault, generation: 0, spent: 0, reserved: [0], settled: [] }); // a moves on
+    await expect(b.save({ key: fp, vault, generation: 0, spent: 0, reserved: [1], settled: [] })).rejects.toThrow(JournalConflictError); // b would have dropped a's leaf 0
+    expect((await b.load())?.reserved).toEqual([0]);
+    await b.save({ key: fp, vault, generation: 0, spent: 0, reserved: [0, 1], settled: [] }); // after a reload it goes through
+    // a lock written on another machine, however old and whatever its pid, stays
+    writeFileSync(`${path}.lock`, JSON.stringify({ pid: 1, time: 0, host: "another-machine" }));
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(`${path}.lock`, old, old);
+    await expect(a.acquireLock()).rejects.toThrow(JournalLockedError);
+  });
+
+  it("auto: a wallet's user saying no is final, not a format rejection", () => {
+    expect(isUserRejection({ code: 4001 })).toBe(true);
+    expect(isUserRejection(new Error("User rejected the request."))).toBe(true);
+    expect(isUserRejection(new Error("unsupported transaction version"))).toBe(false);
+    expect(isV1Rejection(new DirectV1Error("sign", { code: 4001 }))).toBe(false);
+    expect(isV1Rejection(new DirectV1Error("sign", new Error("unsupported transaction version")))).toBe(true);
   });
 });

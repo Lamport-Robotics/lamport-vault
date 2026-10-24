@@ -52,6 +52,7 @@ import { MAX_CHUNK_BYTES } from "./chunk.ts";
 import { isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
 import { cloneState, JournalVaultMismatchError, keyFingerprint, type LeafJournal, type LeafJournalState, MemoryLeafJournal, type StaleSignerDetail, StaleSignerError } from "./journal.ts";
+export { StaleSignerError, JournalVaultMismatchError } from "./journal.ts";
 import { registryMessage, vaultMessage } from "./message.ts";
 import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "./programIds.ts";

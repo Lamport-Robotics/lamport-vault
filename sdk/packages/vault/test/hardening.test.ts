@@ -11,7 +11,7 @@ import { ChainBehindJournalError, nextFreshKeyIndex, StaleSignerError, VaultSign
 import { MockChain } from "./mock.ts";
 
 const rnd = () => LmsPrivateKey.generate(randomKeyMaterial(LMS_SHA256_M32_H5, 3));
-const used = (bits: number[], bytes = 4) => { const u = new Uint8Array(bytes); for (const q of bits) u[q >> 3] |= 1 << (q & 7); return u; };
+const used = (bits: number[], bytes = 4) => { const u = new Uint8Array(bytes); for (const q of bits) u[q >> 3] = (u[q >> 3] ?? 0) | (1 << (q & 7)); return u; };
 const freshVault = (key: { publicKey: Uint8Array }, extra: Partial<Parameters<typeof encodeVault>[0]> = {}) =>
   encodeVault({ version: 2, bump: 0, vaultId: vaultId(key.publicKey), lmsPubkey: key.publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [], ...extra });
 

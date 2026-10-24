@@ -35,10 +35,10 @@
 <section class="prose reveal">
   <h2>The round trip</h2>
   <dl class="ledger">
-    <dt>1 · Download</dt><dd>Get <a class="link" href="/signer.html" download="lamport-vault-signer.html">lamport-vault-signer.html</a> once and keep it. It does not change between withdrawals.</dd>
+    <dt>1 · Download</dt><dd>Get <a class="link" href="/signer.html" download="lamport-vault-signer.html">lamport-vault-signer.html</a> and keep it. Its footer shows the commit it was built from; the <i>test</i> workflow for that commit prints the file's sha256, so you can check the copy you hold against it. A new build changes the hash, nothing else about the round trip.</dd>
     <dt>2 · Prepare</dt><dd>On the vault page, choose the action and amount, then <i>Prepare request</i>. Copy it, or show it as a QR code.</dd>
     <dt>3 · Go offline</dt><dd>Open the file on a machine with Wi-Fi and cables off. The page shows a red pill while it still sees a network; wait for it to turn.</dd>
-    <dt>4 · Sign</dt><dd>Paste or scan the request, check that the destination and amount are what you meant, type the 24 words, press <i>Sign</i>. The signer records the key number it used before it signs, so the same key can never be used twice from that machine.</dd>
+    <dt>4 · Sign</dt><dd>Paste or scan the request, check that the destination and amount are what you meant, type the 24 words, press <i>Sign</i>. The signer records the key number it used before it signs, so the same key is never offered twice from that browser profile. Use one dedicated profile for it and open nothing else there: on a Chrome <code>file://</code> page every local file shares that record.</dd>
     <dt>5 · Carry back</dt><dd>Copy the signature, save it as a file, or show it as QR frames. Paste it into the vault page and press <i>Verify and execute</i>.</dd>
   </dl>
   <h3>Rules worth keeping</h3>

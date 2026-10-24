@@ -48,7 +48,7 @@
     <dt>A quantum computer and every past signature</dt><dd>Hash preimages that are already public. Nothing that helps sign a new message.</dd>
     <dt>A stolen, unexecuted signature</dt><dd>The right to submit exactly what you signed, before it expires. The message binds program, vault, key generation, action and a validity window of at most a day.</dd>
     <dt>The fee-paying wallet's private key</dt><dd>The rent refund. The fee payer has no authority over the vault.</dd>
-    <dt>A reused key number on another device</dt><dd>Refused by the bitmap once the first is executed. Before that, only the signer's journal stands in the way, which is why signers reserve before they sign and devices sharing a key use separate lanes.</dd>
+    <dt>A reused key number on another device</dt><dd>Refused by the bitmap once the first is executed. Before that, only the signer's journal stands in the way, which is why signers reserve before they sign and a signer that finds no record for a key with history asks before it signs. Devices sharing one key should use the SDK's lanes; this page and the cold signer use lane 0 of 1.</dd>
     <dt>Rotating back to an old key, or closing and reopening a vault</dt><dd>Refused. Every past key is remembered, and a closed vault leaves a permanent marker at its address.</dd>
     <dt>Your 24 words</dt><dd>Everything. This is the limit of any wallet, and the reason the same keys can live inside a hardware signer instead.</dd>
   </dl>

@@ -47,3 +47,7 @@ None yet. Reports will be linked here when they exist.
 ## Bounty
 
 Terms will be published here before the mainnet deployment.
+
+One LMS key serves one vault. The message domains stop a signature from being replayed between the vault,
+the registry or another vault, but two signatures by one leaf over two messages are a forgery oracle the chain
+cannot see; the SDK and the cold signer refuse to point a key at a second vault for that reason.

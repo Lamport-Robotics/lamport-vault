@@ -39,6 +39,13 @@ solana-verify verify-from-repo --url <rpc> --program-id <id> --library-name lamp
 
 `scripts/build-verifiable.sh` is the same build for a machine that has Docker.
 
+## The web build
+
+The `web` job of `.github/workflows/test.yml` builds the vault page and the single-file cold signer
+with `npm ci` and prints `sha256(dist/signer.html)` in the job summary; the signer's footer shows the
+commit it was built from. A downloaded `lamport-vault-signer.html` is checked by hashing it and
+comparing with the summary of that commit's run.
+
 ## Upgrade authority
 
 `solana program show <id> --url <cluster>` prints it; `scripts/verify-deploy.sh` prints it too. On
@@ -51,7 +58,9 @@ Not deployed. The plan, in order:
 
 1. Tag the release commit; let `verify.yml` build it and keep the artifact.
 2. `solana program deploy` each `.so` from that artifact with the deployer key as upgrade authority,
-   same program ids as devnet (the ids are in the source).
+   under **new program ids** (fresh keypairs; the ids are compiled in, so this is a commit of its own).
+   The signed message binds the program id and nothing else about the cluster: with the devnet ids a
+   devnet signature by a raw or hardware key would replay on mainnet.
 3. `scripts/verify-deploy.sh <program> <id> --url mainnet-beta` from the tagged commit: `MATCH`.
 4. `scripts/burn-upgrade-authority.sh <id> --url mainnet-beta --yes` for both programs, right away.
    After this nobody can change the code; a bug means a new program id and vaults moving over by

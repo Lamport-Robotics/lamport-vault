@@ -39,16 +39,17 @@ lmsVerify(key.publicKey, message, sig); // true
 // 2. A key from 24 words (what a wallet does)
 const words  = generateMnemonic();                   // 24 words
 const master = mnemonicToMaster(words);              // 64-byte BIP-39 seed, optional passphrase
-const k0     = LmsPrivateKey.generate(deriveKeyMaterial(master, 0)); // vault key index 0, H10/W4
+const scope  = { genesisHash: CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+const k0     = LmsPrivateKey.generate(deriveKeyMaterial(master, 0, scope)); // vault key index 0, H10/W4
 
 // 3. In a browser, build the tree without freezing the UI
-const k = await LmsPrivateKey.generateAsync(deriveKeyMaterial(master, 0), {
+const k = await LmsPrivateKey.generateAsync(deriveKeyMaterial(master, 0, scope), {
   onProgress: (done, total) => render(done / total),
 });
 
 // 4. Keep the tree between sessions instead of rebuilding it (interior nodes are public data)
 localStorage.setItem("tree", toBase64(k.tree));
-const again = LmsPrivateKey.fromTree(deriveKeyMaterial(master, 0), fromBase64(localStorage.getItem("tree")));
+const again = LmsPrivateKey.fromTree(deriveKeyMaterial(master, 0, scope), fromBase64(localStorage.getItem("tree")));
 ```
 
 `sign(q, message, { C })` with an explicit `C` gives deterministic signatures for test vectors; without it
@@ -66,21 +67,23 @@ is ~0.25s in node, H15 ~7s. `npm run bench`.
 The contract is [`docs/SPEC-DERIVATION.md`](../docs/SPEC-DERIVATION.md). In code:
 
 ```
-master  = BIP-39 seed (64 bytes)
-SEED_k  = HMAC-SHA256(key = "lamport-vault/lms-seed/v1", msg = master || u32be(k))
-I_k     = HMAC-SHA256(key = "lamport-vault/lms-id/v1",   msg = master || u32be(k))[0..16]
+master  = BIP-39 seed (64 bytes, optional passphrase)
+info_k  = genesis_hash || program_id || u32be(k)
+SEED_k  = HKDF-SHA256(master, salt = "lamport-vault/lms-seed/v2", info = info_k || "seed")
+I_k     = HKDF-SHA256(master, salt = "lamport-vault/lms-id/v2",   info = info_k || "id")[0..16]
 ```
 
-`deriveLmsInputs(master, k)` returns `(SEED_k, I_k)`; `deriveKeyMaterial` adds the typecodes;
-`deriveRegistryKeyMaterial` uses the reserved index `k = 0xFFFFFFFF` for the pq-registry commitment key.
-`issued_slot` and the v2 derivation are described in [`docs/DESIGN.md`](../docs/DESIGN.md).
+Every key is bound to a cluster (its genesis hash) and a program id: the same words give other keys on
+mainnet, or under another deployment. `deriveLmsInputs(master, k, scope)` returns `(SEED_k, I_k)`;
+`deriveKeyMaterial` adds the typecodes; `deriveRegistryKeyMaterial` uses the reserved index
+`k = 0xFFFFFFFF` for the pq-registry commitment key. `CLUSTERS` has the genesis hashes.
 
 Recovery:
 
 1. Read the vault account (`decodeVault`): it holds the current `lms_pubkey` (56 bytes, with the
    typecodes), the used-leaf bitmap and the key `generation`.
 2. Compute `master` from the words (and passphrase, if one was used).
-3. `recoverKey(master, lmsPubkey)` walks `k = 0, 1, 2, …` (up to 64 by default). For each `k` it derives
+3. `recoverKey(master, lmsPubkey, scope)` walks `k = 0, 1, 2, …` (up to `RECOVERY_MAX_INDEX`, 4096). For each `k` it derives
    `I_k` and compares it with the `I` inside the public key; only a match is expanded into a full tree and
    confirmed against the root. One `Rotate` moves to `k + 1`, so a vault rotated three times is found at
    `k = 3`.
@@ -205,7 +208,8 @@ A W4/H10 signature is 2 508 bytes and a legacy Solana transaction carries 1 232,
    `sha256("lamport-vault/v1" || program_id || vault || u32le(generation) || action_bytes)`
    (`vaultMessage`), sets bit `q` of the bitmap, performs the action, and refunds the buffer rent to
    `payer`. `registryMessage` is `sha256("pq-registry/v1" || program_id || owner || u32le(generation) ||
-   new_pq_pubkey)`; `MESSAGE_VERSION` is the `1` in both domain strings.
+   new_pq_pubkey || u64le(issued_slot) || u64le(expiry_slot))`; `MESSAGE_VERSION` is the `1` in both domain
+   strings.
 
 `buildStagedExecution` returns these instructions grouped per transaction without sending anything;
 `closeSigBufferInstruction` abandons a half-written buffer and refunds it.

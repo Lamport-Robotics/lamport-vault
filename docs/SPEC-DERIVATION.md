@@ -88,7 +88,7 @@ binding is what makes each signature single-purpose.
 2. Know the cluster (its genesis hash) and the vault program id.
 3. Read the vault account: `lms_pubkey` (56 bytes: typecodes, `I`, root), `generation` and the used-leaf
    bitmap `used`.
-4. For `k = 0, 1, 2, …` (stop at 64): derive `I_k`; if it differs from the `I` in `lms_pubkey`, next `k`.
+4. For `k = 0, 1, 2, …` (stop at `RECOVERY_MAX_INDEX`, 4096): derive `I_k`; if it differs from the `I` in `lms_pubkey`, next `k`.
    Otherwise derive `SEED_k`, build the tree with the account's typecodes and compare the public key with
    `lms_pubkey`. The first match is the current key. (`I_k` is 16 bytes; comparing it first means one tree
    build in the normal case.)

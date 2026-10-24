@@ -1,6 +1,6 @@
 # web
 
-vault.lamportrobotics.com. Vite, no framework, no backend; talks to devnet from the browser.
+vault.lamportrobotics.com. Vite, no framework. The page talks to devnet from the browser; on the hosted site JSON-RPC goes through a same-origin `/rpc` that the server forwards to a provider (Origin-checked), elsewhere straight to the public devnet endpoint.
 
 ```sh
 npm i
@@ -12,7 +12,7 @@ npm run build   # dist/ + dist/signer.html (single file, works offline)
 vault page gives you, type the words, bring the signature back. The main page only ever sees the
 signature.
 
-Deploy: rsync `dist/` to `/opt/lamportvault/site` on the box, Caddy serves it.
+Build in CI: the `web` job of `.github/workflows/test.yml` runs `npm ci` and `npm run build` and prints `sha256(dist/signer.html)` in its summary; a deploy is that artifact. Deploy: rsync `dist/` to `/opt/lamportvault/site` on the box, Caddy serves it.
 
 ## Interface
 

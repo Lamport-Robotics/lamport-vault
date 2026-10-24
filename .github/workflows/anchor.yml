@@ -18,6 +18,7 @@ permissions:
 
 env:
   AGAVE_VERSION: "2.3.13"
+  AGAVE_INSTALL_SHA256: "44f37013c80bf1122067b250da38339a0b061dafde1f4162f037b4ce0008afa5"
   ANCHOR_VERSION: "0.32.1"
   # cargo-build-sbf reads tools-version from programs/*/Cargo.toml and fetches
   # this into ~/.cache/solana on first use; the cache below keeps it.
@@ -33,19 +34,23 @@ jobs:
       matrix:
         features: ["", "small-history"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+
+        toolchain: stable
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # One key per feature set: the program builds differ.
           key: anchor-${{ matrix.features || 'default' }}
           cache-targets: true
 
       - name: Cache platform-tools and the SBF toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/solana
           key: platform-tools-${{ env.PLATFORM_TOOLS }}-${{ runner.os }}
@@ -54,21 +59,24 @@ jobs:
 
       - name: Cache agave ${{ env.AGAVE_VERSION }}
         id: agave-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.local/share/solana/install
           key: agave-${{ env.AGAVE_VERSION }}-${{ runner.os }}
 
       - name: Install agave ${{ env.AGAVE_VERSION }}
         if: steps.agave-cache.outputs.cache-hit != 'true'
-        run: sh -c "$(curl -sSfL https://release.anza.xyz/v${AGAVE_VERSION}/install)"
+        run: |
+          curl -sSfL "https://release.anza.xyz/v${AGAVE_VERSION}/install" -o /tmp/agave-install.sh
+          echo "${AGAVE_INSTALL_SHA256}  /tmp/agave-install.sh" | sha256sum -c -
+          sh /tmp/agave-install.sh
 
       - name: Add agave to PATH
         run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Cache anchor-cli ${{ env.ANCHOR_VERSION }}
         id: anchor-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/bin/anchor
           key: anchor-cli-${{ env.ANCHOR_VERSION }}-${{ runner.os }}
@@ -79,7 +87,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libudev-dev libssl-dev
           cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: yarn

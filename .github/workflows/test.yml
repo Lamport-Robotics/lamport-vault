@@ -9,13 +9,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --workspace --features lamport-lms/sign --locked
 
   sdk:
@@ -24,8 +29,8 @@ jobs:
       run:
         working-directory: sdk
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -33,3 +38,36 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  web:
+    # The vault page and the single-file cold signer. The signer's sha256 printed here is the
+    # number docs/VERIFY.md asks you to compare with the file you downloaded.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts && npm run build
+        working-directory: sdk
+      - run: npm ci --ignore-scripts && npm run typecheck && npm run build
+        working-directory: web
+      - name: Signer hash
+        working-directory: web
+        run: |
+          hash=$(sha256sum dist/signer.html | cut -d" " -f1)
+          {
+            echo "### cold signer"
+            echo
+            echo '```'
+            echo "commit   $GITHUB_SHA"
+            echo "sha256   $hash"
+            echo "size     $(wc -c < dist/signer.html) bytes"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "signer.html $hash"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-${{ github.sha }}
+          path: web/dist
+          if-no-files-found: error

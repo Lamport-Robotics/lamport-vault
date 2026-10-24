@@ -16,11 +16,15 @@ on:
     tags: ["devnet-*", "mainnet-*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   SOLANA_VERIFY_VERSION: "0.5.2"
   # Agave 2.3.13 image; cargo-build-sbf inside it reads tools-version from
   # the program's Cargo.toml and fetches platform-tools v1.56.
-  BASE_IMAGE: solanafoundation/solana-verifiable-build:2.3.13
+  # 2.3.13, pinned by digest so a re-tagged image cannot change the build.
+  BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:0cf72459e089f3a928efd48b718d81817a8c1c380229edee2099dd651aaef3b9
   PLATFORM_TOOLS: v1.56
   # The anchor CLI behind `anchor build` and scripts/verify-deploy.sh; the
   # crate versions are fixed by Cargo.lock.
@@ -41,7 +45,7 @@ jobs:
             lib: pq_registry
             program_id: 48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check the toolchain pins
         run: |
@@ -50,11 +54,15 @@ jobs:
           grep -A1 'name = "anchor-lang"' Cargo.lock | grep -q 'version = "0.32.' \
             || { echo "Cargo.lock must resolve anchor-lang 0.32.x"; exit 1; }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+
+        toolchain: stable
 
       - name: Cache solana-verify
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/bin/solana-verify
           key: solana-verify-${{ env.SOLANA_VERIFY_VERSION }}-${{ runner.os }}
@@ -84,7 +92,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "${{ matrix.lib }} $hash"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.lib }}-${{ github.sha }}
           path: target/deploy/${{ matrix.lib }}.so

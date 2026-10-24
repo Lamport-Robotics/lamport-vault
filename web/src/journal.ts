@@ -21,7 +21,12 @@ const LOCK = "lamport-vault-journal";
 
 export const keyFingerprint = (lmsPubkey: Uint8Array) => Array.from(sha256(lmsPubkey)).map((b) => b.toString(16).padStart(2, "0")).join("");
 
+/** whether the browser agreed to keep this origin's storage out of eviction; unknown until asked */
+export let storagePersistent: boolean | undefined;
+
 export async function openJournal(): Promise<Journal | null> {
+  // evicted storage is indistinguishable from a fresh key; ask the browser to keep it, and remember the answer
+  try { storagePersistent = (await navigator.storage?.persisted?.()) || (await navigator.storage?.persist?.()); } catch { storagePersistent = undefined; }
   const ls = (() => { try { localStorage.setItem("__probe", "1"); localStorage.removeItem("__probe"); return true; } catch { return false; } })();
   const idb = "indexedDB" in globalThis;
   if (!ls && !idb) return null;

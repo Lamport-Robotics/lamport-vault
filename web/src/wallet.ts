@@ -2,7 +2,8 @@
 import { Keypair, PublicKey, Transaction, VersionedTransaction, type TransactionInstruction } from "@solana/web3.js";
 import { getWallets } from "@wallet-standard/app";
 import type { Wallet as StdWallet, WalletAccount } from "@wallet-standard/base";
-import { CLUSTER, rpc } from "./common.ts";
+import { CLUSTER } from "./common.ts";
+import { rpc } from "./rpc.ts";
 import { registerMwa, createDefaultAuthorizationCache, createDefaultChainSelector, createDefaultWalletNotFoundHandler } from "@solana-mobile/wallet-standard-mobile";
 
 // Android: wallets that speak Mobile Wallet Adapter (Phantom, Solflare, Backpack, …) show up as one

@@ -1,4 +1,4 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 
 export const CLUSTER = "devnet" as const;
 // on the hosted site json-rpc goes through the same origin (/rpc), which the server forwards to a
@@ -12,8 +12,6 @@ export const EXPLORER_ADDR = (a: string) => `https://explorer.solana.com/address
 /** a transaction signature as the rpc or a wallet returns it: base58, 64 bytes. anything else is not linked */
 export const isTxSig = (s: unknown): s is string => typeof s === "string" && /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(s);
 export const txLink = (sig: string, n = 6): HTMLElement => isTxSig(sig) ? el("a", { href: EXPLORER(sig), target: "_blank", rel: "noopener" }, short(sig, n)) : el("span", { class: "quiet" }, "unreadable signature");
-
-export const rpc = new Connection(RPC_URL, "confirmed");
 
 export const short = (s: string, n = 4) => (s.length > n * 2 + 1 ? `${s.slice(0, n)}…${s.slice(-n)}` : s);
 export const sol = (lamports: number | bigint) => (Number(lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 4 });

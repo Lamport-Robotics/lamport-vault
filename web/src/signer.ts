@@ -6,11 +6,11 @@ import "./polyfill.ts";
 import "./style.css";
 import { PublicKey } from "@solana/web3.js";
 import { LmsPrivateKey, isValidMnemonic, mnemonicToMaster, recoverKey, parseLmsPublicKey, deriveKeyMaterial, lmsParams, equalBytes, CLUSTERS, RECOVERY_MAX_INDEX } from "@lamport-robotics/lms";
-import { LAMPORT_VAULT_PROGRAM_ID, MAX_VALIDITY_SLOTS, associatedTokenAddress, nextKeyMaterial } from "@lamport-robotics/vault";
+import { LAMPORT_VAULT_PROGRAM_ID, MAX_VALIDITY_SLOTS, associatedTokenAddress, findVaultPdaForKey, nextKeyMaterial } from "@lamport-robotics/vault";
 import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault";
 import { $, b64, el, isPubkey, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
-import { openJournal, keyFingerprint } from "./journal.ts";
+import { openJournal, keyFingerprint, storagePersistent } from "./journal.ts";
 
 const app = $("#app");
 app.className = "shell";
@@ -26,7 +26,7 @@ app.append(
         el("div", { id: "reqview" })),
       el("div", { class: "panel" },
         el("div", { class: "eyebrow" }, "2 · Words"),
-        el("label", { class: "field" }, el("span", {}, "24 words"), el("textarea", { class: "mono", id: "words", rows: "2", autocomplete: "off", spellcheck: "false" })),
+        el("label", { class: "field" }, el("span", {}, "24 words"), el("textarea", { class: "mono", id: "words", rows: "2", autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false" })),
         el("label", { class: "field" }, el("span", {}, "Passphrase, if you set one"), el("input", { class: "mono", id: "pass", type: "password", autocomplete: "off" })),
         el("div", { class: "actions" }, el("button", { class: "btn primary", id: "sign" }, "Sign")),
         el("div", { class: "err hidden", id: "err" })),
@@ -162,6 +162,13 @@ $("#sign").addEventListener("click", async () => {
     if (!journal) throw new Error("this browser gives the signer no durable storage, so it cannot remember which one-time keys it used; open the file in Chrome or Firefox, or use a hardware signer");
     const jk = keyFingerprint(pub);
     const rec = await journal.get(jk);
+    // the key belongs to one vault. a record names it; without a record, a generation-0 vault must be the
+    // address this very key derives, and anything else is asked about below. a vault anyone created with
+    // this key at another address would otherwise cost a leaf and publish a signature for a foreign account.
+    if (rec?.vault && rec.vault !== req.vault) throw new Error(`this key's record names vault ${rec.vault}; the request names ${req.vault}. A one-time key serves one vault; refusing`);
+    if (req.generation === 0 && findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, pub).address.toBase58() !== req.vault) throw new Error("the vault in the request is not the address this key derives; refusing");
+    // a request may not march this signer past the chain: every skipped leaf is lost to this profile
+    if (req.nextQ > checked.spentOnChain + 16) throw new Error(`the request asks for key ${req.nextQ} while the chain shows ${checked.spentOnChain} spent; refusing (the vault page hands out the next free key)`);
     const mine = (x: number) => !!rec && (x <= rec.maxQ || rec.used.includes(x));
     const chainUsed = (x: number) => !!used && ((used[x >> 3] >> (x & 7)) & 1) === 1;
     const free = (x: number) => !chainUsed(x) && !mine(x);
@@ -180,7 +187,9 @@ $("#sign").addEventListener("click", async () => {
     } else for (let x = floor; x < total; x++) if (free(x)) { q = x; break; }
     if (q === undefined) throw new Error("no one-time key is left that this signer can use");
     if (freeNow <= 1 && req.action.kind !== "Rotate" && req.action.kind !== "Close") throw new Error("this is the last one-time key of the vault; it may only be spent on a rotation or on closing the vault");
-    if (!rec && checked.spentOnChain > 0) { if (!(await confirmBox(UNSEEN))) throw new Error("cancelled; nothing was signed"); }
+    // no record for this key: the request's own numbers cannot clear it (a hostile page can send a blank
+    // bitmap), and evicted storage looks exactly like a fresh key. always ask.
+    if (!rec) { if (!(await confirmBox(`${UNSEEN} The request says ${checked.spentOnChain} key${checked.spentOnChain === 1 ? "" : "s"} of this vault ${req.generation > 0 ? `(generation ${req.generation}) ` : ""}are spent; compare with the vault page before continuing.${storagePersistent === false ? " This browser may evict the signer's record; prefer a dedicated profile." : ""}`))) throw new Error("cancelled; nothing was signed"); }
     else if (req.action.kind === "Rotate" && behind && !used) { if (!(await confirmBox(`this signer's record stops at key ${rec!.maxQ} but the request says the chain is at ${req.nextQ}, and it carries no bitmap to pick a safer key from. ${UNSEEN}`))) throw new Error("cancelled; nothing was signed"); }
     if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}; this signer used key ${q} instead`);
     btn.disabled = true; btn.classList.add("spin"); btn.textContent = "deriving key";

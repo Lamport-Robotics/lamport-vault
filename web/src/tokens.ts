@@ -1,7 +1,7 @@
 /** spl tokens held by a vault, and the destination token account a transfer needs */
 import { PublicKey, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress } from "@lamport-robotics/vault";
-import { rpc } from "./common.ts";
+import { rpc } from "./rpc.ts";
 
 export interface Holding { mint: PublicKey; amount: bigint; decimals: number; ui: string; tokenProgram: PublicKey; account: PublicKey }
 

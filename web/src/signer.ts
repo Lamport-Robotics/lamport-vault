@@ -12,6 +12,8 @@ import { $, b64, el, isPubkey, short, unb64, copy, type SignRequest, type Signed
 import * as qr from "./qr.ts";
 import { openJournal, keyFingerprint, storagePersistent } from "./journal.ts";
 
+declare const __SIGNER_BUILD__: string | undefined;
+
 const app = $("#app");
 app.className = "shell";
 app.append(
@@ -36,7 +38,7 @@ app.append(
         el("div", { class: "actions" }, el("button", { id: "copy", class: "link" }, "Copy"), el("button", { id: "dl", class: "link" }, "Download .json"), el("button", { id: "qrsig", class: "link" }, "Show QR")),
         el("div", { id: "qrbox", class: "qr", style: "margin-top:14px" }),
         el("div", { class: "notice", style: "margin-top:18px" }, "One one-time key is now spent. If this signature is lost, the next one must use a higher key number; the vault page reads it from the chain.")))),
-  el("footer", {}, el("span", {}, "nothing on this page talks to the network"), el("span", {}, "lamportrobotics.com")),
+  el("footer", {}, el("span", {}, "nothing on this page talks to the network"), el("span", { class: "mono" }, `build ${typeof __SIGNER_BUILD__ === "string" ? __SIGNER_BUILD__ : "dev"}`), el("span", {}, "lamportrobotics.com")),
 );
 
 const net = $("#net");

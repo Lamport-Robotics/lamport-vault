@@ -63,7 +63,7 @@ async function confirm(sig: string, blockhash: string, lastValidBlockHeight: num
     const v = st?.value?.[0];
     if (v && !v.err) return sig;
     if (v?.err) throw new Error(`transaction failed: ${JSON.stringify(v.err)}`);
-    throw new Error("the network did not pick up the transaction before its blockhash expired (about a minute). nothing was charged; try again, and approve it in the wallet promptly");
+    throw new Error("the network did not pick up the transaction before its blockhash expired (about a minute). The transfer did not happen and no fee was paid. A signed action keeps its one-time key: this page will not offer that key again, the next attempt takes the next one. Approve the wallet prompt promptly when you retry");
   } finally { stop = true; await rebroadcast.catch(() => undefined); }
 }
 

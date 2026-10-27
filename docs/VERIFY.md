@@ -70,15 +70,17 @@ Not deployed. The plan, in order:
 
 ## Record
 
-devnet, tag `devnet-1`, commit `63176dc`, both programs deployed from the `verify.yml` artifacts of that
-commit (solana-verify 0.5.2 in `solanafoundation/solana-verifiable-build@sha256:0cf72459…`, platform-tools
-v1.56). The tag's CI job and `scripts/verify-deploy.sh … --no-build` on the same artifacts print `MATCH`.
+devnet, tag `devnet-2`, commit `8558973`, vault redeployed from the `verify.yml` artifact of that commit
+(solana-verify 0.5.2 in `solanafoundation/solana-verifiable-build@sha256:0cf72459…`, platform-tools v1.56);
+the registry is unchanged since `devnet-1`. `scripts/verify-deploy.sh … --no-build` on the artifacts prints
+`MATCH` for both. What changed on chain: the `TransferTokenFrom` action (variant 4) and error 6037
+`WrongSource`; every earlier action encodes and executes as before.
 
 ```
 lamport_vault  B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-  hash       3f9a9bc3e385026fb9ac4ee3f29601712537f96cb36914683fab9402354b6698
-  size       339 896 bytes (339 881 hashed; allocation 350 000)
-  slot       514635841
+  hash       b9c055c3ba267849970076a5689e068a19f05dd4045f8f49f16f05cf2e2a563b
+  size       341 968 bytes (341 953 hashed; allocation 350 000)
+  slot       515785357
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
 
 pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
@@ -87,6 +89,8 @@ pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
   slot       514636087
   authority  5QrJ7MW6Ez7P6cYCwbYbiy8aeHn1NoYEFBXqGtKdyNNR
 ```
+
+Earlier: tag `devnet-1`, commit `63176dc`, vault hash `3f9a9bc3…` at slot 514635841 (same registry).
 
 A laptop `anchor build` of the same source gives another ELF than the Docker build (the registry's
 earlier `3480ae2d…` hash was one); from this tag on, what is on chain is always the CI artifact, so

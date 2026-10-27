@@ -111,10 +111,10 @@ describe("v1 transaction builder", () => {
     expect(r.u32()).toBe(1 << 20);
   });
 
-  it("every parameter set and action fits: the largest (H15 TransferToken) stays under 4096", () => {
+  it("every parameter set and action fits: the largest (H15 TransferTokenFrom) stays under 4096", () => {
     const sizes: Record<string, number> = {};
     for (const [label, sigLen] of [["H5", 2348], ["H10", 2508], ["H15", 2668]] as const) {
-      const token = { kind: "TransferToken" as const, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 9n };
+      const token = { kind: "TransferTokenFrom" as const, from: PK_11, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 9n };
       sizes[label] = buildDirectV1Transaction({ ...base, action: token, signature: bogusSig(sigLen) }).size;
       expect(sizes[label]).toBeLessThan(V1_MAX_TRANSACTION_BYTES);
     }

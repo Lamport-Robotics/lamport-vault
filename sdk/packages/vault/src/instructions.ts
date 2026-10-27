@@ -188,6 +188,10 @@ export function executeRemainingAccounts(
       return [];
     case "Close":
       return [w(action.to), ...closeTokenAccounts.flatMap((t) => [w(t.account), r(t.tokenProgram ?? TOKEN_PROGRAM_ID)])];
+    case "TransferTokenFrom":
+      // the signature names the source; a different `source` here would only fail on chain (WrongSource)
+      if (source && !source.equals(action.from)) throw new Error(`source ${source.toBase58()} differs from the signed action's from ${action.from.toBase58()}`);
+      return [w(action.from), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
   }
 }
 

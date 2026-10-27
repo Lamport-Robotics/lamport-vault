@@ -21,7 +21,7 @@ import {
 } from "../src/instructions.ts";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, associatedTokenAddress, findSigBufferPda, findVaultPdaForKey, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, vaultId } from "../src/pda.ts";
 import { buildStagedRotatePq, closePqBufferInstruction, commitInstruction, openPqBufferInstruction, writePqSigInstruction } from "../src/registry.ts";
-import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22, PK_33, REGISTRY_PROGRAM_ID, VAULT_PROGRAM_ID } from "./fixtures.ts";
+import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22, PK_33, PK_44, REGISTRY_PROGRAM_ID, VAULT_PROGRAM_ID } from "./fixtures.ts";
 
 const keysOf = (ix: { keys: { pubkey: { toBase58(): string }; isSigner: boolean; isWritable: boolean }[] }) =>
   ix.keys.map((k) => [k.pubkey.toBase58(), k.isSigner, k.isWritable]);
@@ -161,6 +161,16 @@ describe("vault instruction data and accounts", () => {
     const aux = executeRemainingAccounts(vault, { kind: "TransferToken", mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_PROGRAM_ID, [], PK_11);
     expect(aux[0]!.pubkey.equals(PK_11)).toBe(true);
     expect(aux[0]!.isWritable).toBe(true);
+    // TransferTokenFrom: the signed `from` is the source, no default and no override
+    const from = executeRemainingAccounts(vault, { kind: "TransferTokenFrom", from: PK_11, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_2022_PROGRAM_ID);
+    expect(from.map((k) => [k.pubkey.toBase58(), k.isWritable])).toEqual([
+      [PK_11.toBase58(), true],
+      [PK_33.toBase58(), true],
+      [PK_22.toBase58(), false],
+      [TOKEN_2022_PROGRAM_ID.toBase58(), false],
+    ]);
+    expect(executeRemainingAccounts(vault, { kind: "TransferTokenFrom", from: PK_11, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_PROGRAM_ID, [], PK_11)[0]!.pubkey.equals(PK_11)).toBe(true);
+    expect(() => executeRemainingAccounts(vault, { kind: "TransferTokenFrom", from: PK_11, mint: PK_22, to: PK_33, amount: 1n, issuedSlot: 0n, expirySlot: 1n }, TOKEN_PROGRAM_ID, [], PK_44)).toThrow(/differs/);
   });
 
   it("sweep_closed: payer, tombstone, heir, heir ATA, vault token account, mint, token program, system, ATA program; only the discriminator", () => {

@@ -88,7 +88,8 @@
       "TransferSol": 57,
       "TransferToken": 89,
       "Rotate": 73,
-      "Close": 49
+      "Close": 49,
+      "TransferTokenFrom": 121
     }
   },
   "actions": {
@@ -134,6 +135,19 @@
       },
       "action_hex": "03111111111111111111111111111111111111111111111111111111111111111100003412000000007856341200000000",
       "message_hex": "f6ee390ed3b77fd1338b75684c00ea55cc8915eaff705f5ac81b56d52ced5805"
+    },
+    "transfer_token_from": {
+      "action": {
+        "kind": "TransferTokenFrom",
+        "from": "4Ss5JMkXAD9Z7cktFEdrqeMuT6jGMF1pVozTyPHZ6zT4",
+        "mint": "3JF3sEqM796hk5WFqA6EtmEwJQ9quALszsfJyvXNQKy3",
+        "to": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "amount": "123456789012",
+        "issuedSlot": "305397760",
+        "expirySlot": "305419896"
+      },
+      "action_hex": "04333333333333333333333333333333333333333333333333333333333333333322222222222222222222222222222222222222222222222222222222222222221111111111111111111111111111111111111111111111111111111111111111141a99be1c00000000003412000000007856341200000000",
+      "message_hex": "c62d1f9e57831c93c2549f92429d72e49db334db7a76a4d20fd697efc2555c04"
     }
   },
   "messages": {

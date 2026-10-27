@@ -5,6 +5,7 @@
  *   1 TransferToken { mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }
  *   2 Rotate        { new_lms_pubkey: [u8;56], issued_slot: u64, expiry_slot: u64 }
  *   3 Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }
+ *   4 TransferTokenFrom { from: Pubkey, mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }
  *
  * The variant index is one byte, integers are little-endian, Pubkeys and the 56-byte key are raw.
  * Every variant ends in its validity window: the program refuses an action issued after the
@@ -49,7 +50,9 @@ export type Action =
   | ({ kind: "TransferSol"; to: PublicKey; lamports: bigint } & ValidityWindow)
   | ({ kind: "TransferToken"; mint: PublicKey; to: PublicKey; amount: bigint } & ValidityWindow)
   | ({ kind: "Rotate"; newLmsPubkey: Uint8Array } & ValidityWindow)
-  | ({ kind: "Close"; to: PublicKey } & ValidityWindow);
+  | ({ kind: "Close"; to: PublicKey } & ValidityWindow)
+  /** TransferToken with the source token account bound by the signature. */
+  | ({ kind: "TransferTokenFrom"; from: PublicKey; mint: PublicKey; to: PublicKey; amount: bigint } & ValidityWindow);
 
 export type ActionKind = Action["kind"];
 
@@ -58,6 +61,7 @@ export const ACTION_INDEX: Readonly<Record<ActionKind, number>> = {
   TransferToken: 1,
   Rotate: 2,
   Close: 3,
+  TransferTokenFrom: 4,
 };
 
 /** The SigBuffer stores at most this many action bytes. */
@@ -77,6 +81,9 @@ export function encodeAction(a: Action): Uint8Array {
       break;
     case "Close":
       w.pubkey(a.to);
+      break;
+    case "TransferTokenFrom":
+      w.pubkey(a.from).pubkey(a.mint).pubkey(a.to).u64(a.amount);
       break;
   }
   w.u64(a.issuedSlot).u64(a.expirySlot);
@@ -102,6 +109,9 @@ export function decodeAction(bytes: Uint8Array): Action {
     case 3:
       a = { kind: "Close", to: r.pubkey(), issuedSlot: r.u64(), expirySlot: r.u64() };
       break;
+    case 4:
+      a = { kind: "TransferTokenFrom", from: r.pubkey(), mint: r.pubkey(), to: r.pubkey(), amount: r.u64(), issuedSlot: r.u64(), expirySlot: r.u64() };
+      break;
     default:
       throw new Error(`unknown Action variant ${idx}`);
   }
@@ -115,4 +125,5 @@ export const ACTION_SIZES: Readonly<Record<ActionKind, number>> = {
   TransferToken: 1 + 32 + 32 + 8 + 8 + 8,
   Rotate: 1 + 56 + 8 + 8,
   Close: 1 + 32 + 8 + 8,
+  TransferTokenFrom: 1 + 32 + 32 + 32 + 8 + 8 + 8,
 };

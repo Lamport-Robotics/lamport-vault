@@ -123,6 +123,8 @@ res.mode;         // "staged" (default): [open_sig_buffer, write_sig, write_sig,
 
 // Other actions
 await signer.execute({ kind: "TransferToken", mint, to: destinationTokenAccount, amount: 5_000n });
+// the same with the source account bound by the signature (execute is permissionless; this pins which account pays)
+await signer.execute({ kind: "TransferTokenFrom", from: vaultTokenAccount, mint, to: destinationTokenAccount, amount: 5_000n });
 await signer.execute({ kind: "Rotate", newLmsPubkey: nextKey.publicKey });  // bitmap cleared, generation + 1, address unchanged
 await signer.execute({ kind: "Close", to });                                  // all lamports to `to`; a Tombstone keeps the address
 

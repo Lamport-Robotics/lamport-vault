@@ -1,7 +1,7 @@
 import { toHex } from "@lamport-robotics/lms";
 import { describe, expect, it } from "vitest";
 import { ACTION_SIZES, type Action, checkValidityWindow, decodeAction, encodeAction, MAX_ACTION_BYTES, MAX_VALIDITY_SLOTS } from "../src/action.ts";
-import { KAT_H5_PUBKEY, PK_11, PK_22 } from "./fixtures.ts";
+import { KAT_H5_PUBKEY, PK_11, PK_22, PK_33 } from "./fixtures.ts";
 
 const hex11 = "11".repeat(32);
 const hex22 = "22".repeat(32);
@@ -50,12 +50,22 @@ describe("Action Borsh encoding", () => {
     expect(toHex(bytes)).toBe("03" + hex11 + WINDOW_LE);
   });
 
+  it("TransferTokenFrom is 04 || from || mint || to || amount_le || issued_le || expiry_le", () => {
+    const a: Action = { kind: "TransferTokenFrom", from: PK_33, mint: PK_22, to: PK_11, amount: AMOUNT, ...WINDOW };
+    const bytes = encodeAction(a);
+    expect(bytes.length).toBe(ACTION_SIZES.TransferTokenFrom);
+    expect(ACTION_SIZES.TransferTokenFrom).toBe(121);
+    expect(toHex(bytes)).toBe("04" + "33".repeat(32) + hex22 + hex11 + AMOUNT_LE + WINDOW_LE);
+    expect(JSON.stringify(decodeAction(bytes), bigintAware)).toBe(JSON.stringify(a, bigintAware));
+  });
+
   it("the window is the last 16 bytes of every variant, issued before expiry", () => {
     const actions: Action[] = [
       { kind: "TransferSol", to: PK_11, lamports: 1n, ...WINDOW },
       { kind: "TransferToken", mint: PK_22, to: PK_11, amount: 1n, ...WINDOW },
       { kind: "Rotate", newLmsPubkey: KAT_H5_PUBKEY, ...WINDOW },
       { kind: "Close", to: PK_22, ...WINDOW },
+      { kind: "TransferTokenFrom", from: PK_33, mint: PK_22, to: PK_11, amount: 1n, ...WINDOW },
     ];
     for (const a of actions) {
       const bytes = encodeAction(a);
@@ -70,6 +80,7 @@ describe("Action Borsh encoding", () => {
       { kind: "TransferToken", mint: PK_22, to: PK_11, amount: 1n, issuedSlot: max, expirySlot: max },
       { kind: "Rotate", newLmsPubkey: KAT_H5_PUBKEY, issuedSlot: 6n, expirySlot: 7n },
       { kind: "Close", to: PK_22, issuedSlot: 8n, expirySlot: 9n },
+      { kind: "TransferTokenFrom", from: PK_33, mint: PK_22, to: PK_11, amount: max, issuedSlot: 1n, expirySlot: max },
     ];
     for (const a of actions) {
       const back = decodeAction(encodeAction(a));
@@ -86,7 +97,8 @@ describe("Action Borsh encoding", () => {
   });
 
   it("rejects unknown variants, trailing bytes and short input", () => {
-    expect(() => decodeAction(new Uint8Array([4, ...new Uint8Array(48)]))).toThrow(/unknown/);
+    expect(() => decodeAction(new Uint8Array([5, ...new Uint8Array(48)]))).toThrow(/unknown/);
+    expect(() => decodeAction(new Uint8Array([4, ...new Uint8Array(88)]))).toThrow(); // TransferTokenFrom short by a pubkey
     expect(() => decodeAction(new Uint8Array([...encodeAction({ kind: "Close", to: PK_11, issuedSlot: 0n, expirySlot: 1n }), 0]))).toThrow(/trailing/);
     expect(() => decodeAction(new Uint8Array([3, 1, 2]))).toThrow();
     // the old 41-byte Close (no issued_slot) is short by 8 bytes now

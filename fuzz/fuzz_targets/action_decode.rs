@@ -15,6 +15,7 @@ enum Spec {
     TransferToken { mint: [u8; 32], to: [u8; 32], amount: u64, issued_slot: u64, expiry_slot: u64 },
     Rotate { new_lms_pubkey: [u8; 56], issued_slot: u64, expiry_slot: u64 },
     Close { to: [u8; 32], issued_slot: u64, expiry_slot: u64 },
+    TransferTokenFrom { from: [u8; 32], mint: [u8; 32], to: [u8; 32], amount: u64, issued_slot: u64, expiry_slot: u64 },
 }
 
 fn check_raw(bytes: &[u8]) {
@@ -24,7 +25,7 @@ fn check_raw(bytes: &[u8]) {
         assert_eq!(Action::decode(&enc).unwrap(), a);
         assert!(enc.len() <= lamport_vault::MAX_ACTION_LEN);
         assert_eq!(a.window(), (a.issued_slot(), a.expiry_slot()));
-        assert!(matches!(enc[0], 0..=3));
+        assert!(matches!(enc[0], 0..=4));
     }
 }
 
@@ -54,6 +55,17 @@ fuzz_target!(|spec: Spec| {
         Spec::Close { to, issued_slot, expiry_slot } => {
             (Action::Close { to: Pubkey::new_from_array(to), issued_slot, expiry_slot }, 49)
         }
+        Spec::TransferTokenFrom { from, mint, to, amount, issued_slot, expiry_slot } => (
+            Action::TransferTokenFrom {
+                from: Pubkey::new_from_array(from),
+                mint: Pubkey::new_from_array(mint),
+                to: Pubkey::new_from_array(to),
+                amount,
+                issued_slot,
+                expiry_slot,
+            },
+            121,
+        ),
     };
     let enc = action.encode();
     assert_eq!(enc.len(), expected_len);

@@ -23,6 +23,7 @@ const out = fileURLToPath(new URL("../../../../kat/vault_encoding.json", import.
 
 const PK_11 = new PublicKey(new Uint8Array(32).fill(0x11));
 const PK_22 = new PublicKey(new Uint8Array(32).fill(0x22));
+const PK_33 = new PublicKey(new Uint8Array(32).fill(0x33));
 const H5_PUBKEY = fromHex("000000050000000300112233445566778899aabbccddeeffcd079a17aad0d1f9554c1812f20a4d465dd0503acd83608f890a58d715e20253");
 const H10_PUBKEY = fromHex("00000006000000034c616d706f727420526f626f7469637363aa0e1c3a5949b62fc83d2506d79688f5116d25fbd201c70a63bf3bec9a8521");
 const NONCE = 0x0102030405060708n;
@@ -41,6 +42,7 @@ const actions: Record<string, Action> = {
   transfer_token: { kind: "TransferToken", mint: PK_22, to: PK_11, amount: 123_456_789_012n, ...WINDOW },
   rotate: { kind: "Rotate", newLmsPubkey: H10_PUBKEY, ...WINDOW },
   close: { kind: "Close", to: PK_11, ...WINDOW },
+  transfer_token_from: { kind: "TransferTokenFrom", from: PK_33, mint: PK_22, to: PK_11, amount: 123_456_789_012n, ...WINDOW },
 };
 
 const id = vaultId(H5_PUBKEY);

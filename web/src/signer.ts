@@ -120,7 +120,8 @@ $("#req").addEventListener("input", () => {
       el("dt", {}, "action"), el("dd", {}, `send ${a.amount} base units of token ${a.mint}`),
       el("dt", {}, "as decimal"), el("dd", {}, a.decimals == null ? "unknown, the online page gave no decimals" : `${ui(a.amount, a.decimals)} with ${a.decimals} decimals, as reported by the online page`),
       el("dt", {}, "to owner"), el("dd", {}, a.toOwner!),
-      el("dt", {}, "token account"), el("dd", {}, `${a.to} (derived here from the owner, matches)`));
+      el("dt", {}, "token account"), el("dd", {}, `${a.to} (derived here from the owner, matches)`),
+      ...(a.source ? [el("dt", {}, "from token account"), el("dd", {}, `${a.source} (bound by the signature; the transfer can draw from no other account)`)] : []));
     else if (a.kind === "Rotate") rows.push(el("dt", {}, "action"), el("dd", {}, "rotate the vault to the next key from your words"));
     else rows.push(el("dt", {}, "action"), el("dd", {}, `close the vault, everything to ${a.to}`));
     rows.push(
@@ -245,7 +246,11 @@ function toAction(r: SignRequest): Action {
   const issuedSlot = BigInt(r.issuedSlot);
   const a = r.action;
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
-  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
+  if (a.kind === "TransferToken") {
+    const mint = new PublicKey(a.mint), to = new PublicKey(a.to), amount = BigInt(a.amount);
+    if (a.source) return { kind: "TransferTokenFrom", from: new PublicKey(a.source), mint, to, amount, issuedSlot, expirySlot };
+    return { kind: "TransferToken", mint, to, amount, issuedSlot, expirySlot };
+  }
   if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("rotation target not derived"); const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, issuedSlot, expirySlot }; }
   return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
 }

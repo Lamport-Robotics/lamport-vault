@@ -376,13 +376,18 @@ function describe(a: SignRequest["action"]): string {
 
 function toAction(a: SignRequest["action"], issuedSlot: bigint, expirySlot: bigint): Action {
   if (a.kind === "TransferSol") return { kind: "TransferSol", to: new PublicKey(a.to), lamports: BigInt(a.lamports), issuedSlot, expirySlot };
-  if (a.kind === "TransferToken") return { kind: "TransferToken", mint: new PublicKey(a.mint), to: new PublicKey(a.to), amount: BigInt(a.amount), issuedSlot, expirySlot };
+  if (a.kind === "TransferToken") {
+    const mint = new PublicKey(a.mint), to = new PublicKey(a.to), amount = BigInt(a.amount);
+    // a named source is part of what gets signed: the transfer can only draw from that account
+    if (a.source) return { kind: "TransferTokenFrom", from: new PublicKey(a.source), mint, to, amount, issuedSlot, expirySlot };
+    return { kind: "TransferToken", mint, to, amount, issuedSlot, expirySlot };
+  }
   if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("The rotation target is missing; the signer derives it from the words."); return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), issuedSlot, expirySlot }; }
   return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
 }
 
 /** the token account a TransferToken draws from: the one the form picked, else any vault account of that mint that covers the amount */
-function sourceFor(a: Action & { kind: "TransferToken" }, picked?: string): Holding {
+function sourceFor(a: Action & { kind: "TransferToken" | "TransferTokenFrom" }, picked?: string): Holding {
   const byAccount = picked ? vaultTokens.find((t) => t.account.toBase58() === picked) : undefined;
   if (byAccount) return byAccount;
   const h = vaultTokens.filter((t) => t.mint.equals(a.mint) && t.amount >= a.amount).sort((x, y) => Number(y.account.equals(associatedTokenAddress(vaultAddr!, y.mint, y.tokenProgram))) - Number(x.account.equals(associatedTokenAddress(vaultAddr!, x.mint, x.tokenProgram))))[0];
@@ -522,8 +527,9 @@ async function stageAndExecute(action: Action, signature: Uint8Array, q: number,
   let tokenProgram = TOKEN_PROGRAM_ID;
   let source: PublicKey | undefined;
   const pre: { name: string; ixs: TransactionInstruction[] }[] = [];
-  if (action.kind === "TransferToken") {
-    const h = sourceFor(action, picked);
+  if (action.kind === "TransferToken" || action.kind === "TransferTokenFrom") {
+    const h = sourceFor(action, action.kind === "TransferTokenFrom" ? action.from.toBase58() : picked);
+    if (action.kind === "TransferTokenFrom" && !h.account.equals(action.from)) throw new Error("The vault no longer holds the token account this signature names. Prepare a new request.");
     tokenProgram = h.tokenProgram; source = h.account;
     const info = await rpc.getAccountInfo(action.to, "confirmed");
     if (!info) {

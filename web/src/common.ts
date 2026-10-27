@@ -47,6 +47,7 @@ export interface SignRequest {
   action:
     | { kind: "TransferSol"; to: string; lamports: string }
     // `to` is the receiver's associated token account; `toOwner` the address the user typed. the signer re-derives `to` from it.
+    // `source` is the vault token account the page picked; when present the signed action is `TransferTokenFrom`, bound to it.
     | { kind: "TransferToken"; mint: string; to: string; toOwner?: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number; source?: string }
     // the signer derives the target itself: the next key of the same words. a target given here must match it.
     | { kind: "Rotate"; newLmsPubkey?: string }

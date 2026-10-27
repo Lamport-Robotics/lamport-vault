@@ -129,6 +129,16 @@ export const Action = {
       windowBytes(w),
     ]);
   },
+  transferTokenFrom(from: PublicKey, mint: PublicKey, to: PublicKey, amount: BN | number, w: Window): Buffer {
+    return Buffer.concat([
+      Buffer.from([4]),
+      from.toBuffer(),
+      mint.toBuffer(),
+      to.toBuffer(),
+      new BN(amount).toArrayLike(Buffer, "le", 8),
+      windowBytes(w),
+    ]);
+  },
   rotate(newLmsPubkey: Buffer, w: Window): Buffer {
     expect(newLmsPubkey.length).to.eq(56);
     return Buffer.concat([Buffer.from([2]), newLmsPubkey, windowBytes(w)]);

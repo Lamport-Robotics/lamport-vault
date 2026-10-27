@@ -470,6 +470,28 @@ describe("lamport-vault", () => {
       await expectError(execute(vault, buf2, [meta(vaultAta, true), meta(destAta, true), meta(mint, false), meta(SystemProgram.programId, false)]), "InvalidTokenProgram");
       await program.methods.closeSigBuffer().accounts({ payer: payer.publicKey, sigBuffer: buf2 }).signers([payer]).rpc();
     });
+
+    it(`executes TransferTokenFrom with ${label}: the named source pays, any other account is WrongSource`, async () => {
+      const wallet = (provider.wallet as anchor.Wallet).payer;
+      const mint = await spl.createMint(connection, wallet, wallet.publicKey, null, 6, undefined, { commitment: "confirmed" }, tokenProgram);
+      const vaultAta = await spl.createAssociatedTokenAccount(connection, wallet, mint, vault, { commitment: "confirmed" }, tokenProgram, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+      // a second vault-owned account of the same mint, not the associated one
+      const aux = await spl.createAccount(connection, wallet, mint, vault, Keypair.generate(), { commitment: "confirmed" }, tokenProgram);
+      const destAta = await spl.createAssociatedTokenAccount(connection, wallet, mint, recipient.publicKey, { commitment: "confirmed" }, tokenProgram);
+      await spl.mintTo(connection, wallet, mint, vaultAta, wallet, 500_000, [], { commitment: "confirmed" }, tokenProgram);
+      await spl.mintTo(connection, wallet, mint, aux, wallet, 500_000, [], { commitment: "confirmed" }, tokenProgram);
+
+      const q = await freeLeaf(vault);
+      const action = Action.transferTokenFrom(aux, mint, destAta, 120_000, await FAR());
+      const buf = await stage(vault, keyA, q, action);
+      // the associated account holds enough, but the signature names `aux`
+      await expectError(execute(vault, buf, [meta(vaultAta, true), meta(destAta, true), meta(mint, false), meta(tokenProgram, false)]), "WrongSource");
+      expect(await isUsed(vault, q)).to.eq(false);
+      await execute(vault, buf, [meta(aux, true), meta(destAta, true), meta(mint, false), meta(tokenProgram, false)]);
+      expect(Number((await spl.getAccount(connection, destAta, "confirmed", tokenProgram)).amount)).to.eq(120_000);
+      expect(Number((await spl.getAccount(connection, aux, "confirmed", tokenProgram)).amount)).to.eq(380_000);
+      expect(Number((await spl.getAccount(connection, vaultAta, "confirmed", tokenProgram)).amount)).to.eq(500_000);
+    });
   }
 
   it("rotate: fresh bitmap, generation + 1, old key in history, buffer payer pays the 16 bytes", async () => {

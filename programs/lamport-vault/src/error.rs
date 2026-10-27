@@ -79,4 +79,6 @@ pub enum VaultError {
     NotHeirTokenAccount, // 6035
     #[msg("token account is not owned by the closed vault")]
     NotVaultTokenAccount, // 6036
+    #[msg("source token account does not match the signed action")]
+    WrongSource, // 6037
 }

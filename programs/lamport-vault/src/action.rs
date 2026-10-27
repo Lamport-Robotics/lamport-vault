@@ -9,6 +9,7 @@
 //! 1 TransferToken { mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }  89 bytes
 //! 2 Rotate        { new_lms_pubkey: [u8; 56], issued_slot: u64, expiry_slot: u64 }          73 bytes
 //! 3 Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                        49 bytes
+//! 4 TransferTokenFrom { from: Pubkey, mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }  121 bytes
 //! ```
 
 use anchor_lang::prelude::*;
@@ -63,6 +64,23 @@ pub enum Action {
         /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
     },
+    /// `TransferToken` with the source account named: the transfer draws from
+    /// `from` and nothing else. Added after variant 3; the older variants keep
+    /// their index and encoding.
+    TransferTokenFrom {
+        /// Source token account (owned by the vault, or delegated to it).
+        from: Pubkey,
+        /// The token mint.
+        mint: Pubkey,
+        /// Destination token account.
+        to: Pubkey,
+        /// Amount in base units.
+        amount: u64,
+        /// Slot the action was signed at; must not be in the future.
+        issued_slot: u64,
+        /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
+        expiry_slot: u64,
+    },
 }
 
 impl Action {
@@ -87,7 +105,8 @@ impl Action {
             Action::TransferSol { issued_slot, expiry_slot, .. }
             | Action::TransferToken { issued_slot, expiry_slot, .. }
             | Action::Rotate { issued_slot, expiry_slot, .. }
-            | Action::Close { issued_slot, expiry_slot, .. } => (*issued_slot, *expiry_slot),
+            | Action::Close { issued_slot, expiry_slot, .. }
+            | Action::TransferTokenFrom { issued_slot, expiry_slot, .. } => (*issued_slot, *expiry_slot),
         }
     }
 
@@ -130,6 +149,20 @@ mod tests {
             expiry_slot: 2,
         };
         assert_eq!(t.encode().len(), 89);
+        let f = Action::TransferTokenFrom {
+            from: Pubkey::new_unique(),
+            mint: Pubkey::new_unique(),
+            to: Pubkey::new_unique(),
+            amount: 3,
+            issued_slot: 4,
+            expiry_slot: 5,
+        };
+        let fb = f.encode();
+        assert_eq!(fb.len(), 121);
+        assert_eq!(fb[0], 4);
+        assert_eq!(&fb[105..113], &4u64.to_le_bytes());
+        assert_eq!(Action::decode(&fb).unwrap(), f);
+        assert_eq!(f.window(), (4, 5));
         let r = Action::Rotate {
             new_lms_pubkey: [7; 56],
             issued_slot: 2,

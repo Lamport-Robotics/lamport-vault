@@ -260,6 +260,11 @@ fn verify_and_act<'info>(
     let vault_id = vault.vault_id;
     let bump = vault.bump;
     let signer_seeds: &[&[u8]] = &[VAULT_SEED, &vault_id, &[bump]];
+    // TransferTokenFrom names its source; TransferToken takes whichever vault account is passed.
+    let bound_from = match &action {
+        Action::TransferTokenFrom { from, .. } => Some(*from),
+        _ => None,
+    };
 
     match action {
         Action::TransferSol { to, lamports, .. } => {
@@ -277,9 +282,12 @@ fn verify_and_act<'info>(
             vault_ai.sub_lamports(lamports)?;
             to_ai.add_lamports(lamports)?;
         }
-        Action::TransferToken { mint, to, amount, .. } => {
+        Action::TransferToken { mint, to, amount, .. } | Action::TransferTokenFrom { mint, to, amount, .. } => {
             require!(remaining.len() >= 4, VaultError::MissingAccount);
             let from_ai = &remaining[0];
+            if let Some(from) = bound_from {
+                require_keys_eq!(from_ai.key(), from, VaultError::WrongSource);
+            }
             let to_ai = &remaining[1];
             let mint_ai = &remaining[2];
             let token_program = &remaining[3];
@@ -500,6 +508,7 @@ pub mod lamport_vault {
     /// Remaining accounts, by action:
     /// * `TransferSol`: `[to (writable)]`
     /// * `TransferToken`: `[vault token account (w), destination token account (w), mint, token program]`
+    /// * `TransferTokenFrom`: the same four; the first must be the action's `from`
     /// * `Rotate`: none
     /// * `Close`: `[to (w)]`, then any number of `[token account (w), token program]` pairs,
     ///   each an empty token account owned by the vault; they are closed to `to`.
@@ -962,6 +971,9 @@ mod tests {
         assert_eq!(code(check_action(&transfer, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
         let token = Action::TransferToken { mint: Pubkey::new_unique(), to: Pubkey::new_unique(), amount: 1, issued_slot: 0, expiry_slot: 100 }.encode();
         assert_eq!(code(check_action(&token, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
+        let token_from = Action::TransferTokenFrom { from: Pubkey::new_unique(), mint: Pubkey::new_unique(), to: Pubkey::new_unique(), amount: 1, issued_slot: 0, expiry_slot: 100 }.encode();
+        assert!(matches!(check_action(&token_from, 100, false).unwrap(), Action::TransferTokenFrom { .. }));
+        assert_eq!(code(check_action(&token_from, 50, true)), vault_err(VaultError::LastLeafReservedForRotate));
         let rotate = Action::Rotate { new_lms_pubkey: [1; 56], issued_slot: 0, expiry_slot: 100 }.encode();
         assert!(matches!(check_action(&rotate, 100, true).unwrap(), Action::Rotate { .. }));
         // The exit is always open: Close may spend the last leaf too (a full key history makes Rotate fail).

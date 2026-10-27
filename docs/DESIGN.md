@@ -123,7 +123,8 @@ sig        Vec<u8>    allocated to sig_len at open (Borsh: u32 length prefix), z
 
 `execute` takes the accounts `vault`, `sig_buffer`, `payer` (unsigned, must equal the buffer's payer) and, as
 remaining accounts: `TransferSol` → `[to]`; `TransferToken` → `[vault token account, destination token
-account, mint, token program]`; `Rotate` → none; `Close` → `[to]` followed by any number of
+account, mint, token program]`; `TransferTokenFrom` → the same four, the first must equal `from`
+(`WrongSource` otherwise); `Rotate` → none; `Close` → `[to]` followed by any number of
 `[token account, token program]` pairs, each an empty token account owned by the vault that is closed to `to`.
 Every instruction that reads the vault (`open_sig_buffer`, `execute`, `execute_direct`) fails with
 `VaultClosed` on a tombstone.
@@ -174,7 +175,13 @@ TransferSol   { to: Pubkey, lamports: u64, issued_slot: u64, expiry_slot: u64 } 
 TransferToken { mint: Pubkey, to: Pubkey /* token account */, amount: u64, issued_slot: u64, expiry_slot: u64 }  89 bytes
 Rotate        { new_lms_pubkey: [u8;56], issued_slot: u64, expiry_slot: u64 }   // bitmap cleared, spent = 0, generation += 1   73 bytes
 Close         { to: Pubkey, issued_slot: u64, expiry_slot: u64 }                 // all lamports but the tombstone's rent to `to`; empty token accounts passed in are closed, any other balance is swept to `to` later by `sweep_closed`  49 bytes
+TransferTokenFrom { from: Pubkey /* token account */, mint: Pubkey, to: Pubkey, amount: u64, issued_slot: u64, expiry_slot: u64 }  121 bytes
 ```
+
+`TransferTokenFrom` is `TransferToken` with the source account inside the signed bytes: `execute` is
+permissionless, so without it the submitter picks which vault-owned account of that mint pays. Variant 4
+was added after the first deployment; indices 0–3 and their encodings did not change, so earlier
+signatures and signers stay valid.
 
 **Validity window.** Every variant ends in `issued_slot || expiry_slot` (u64 little-endian each). With
 `slot` the current slot, `execute` and `execute_direct` require, in this order:
@@ -194,7 +201,7 @@ otherwise, and refuses a request whose window the chain would refuse before any 
 
 `TransferSol` leaves the rent-exempt minimum in place. `TransferToken` signs a `transfer_checked` with the
 vault PDA; remaining accounts: vault token account, destination token account, mint, token program (Token
-and Token-2022).
+and Token-2022). `TransferTokenFrom` is the same CPI with the vault token account required to be `from`.
 
 **Close.** Every vault token account passed in must be empty (`TokenAccountNotEmpty`) and is closed to
 `to`; token accounts not passed in stay owned by the PDA and are recovered afterwards with
@@ -394,11 +401,11 @@ complements the per-message binding of program, account and generation, it does 
 | `Vault` account | H5 126, H10 250, H15 4 218 bytes, plus 16 per rotation (at most 128) |
 | `Tombstone` account | 81 bytes, left at the address by `Close`, holding its rent-exempt minimum (1 454 640 lamports) |
 | `Commitment` account | 127 bytes, plus 16 per rotation (at most 32) |
-| `Action` | TransferSol 57, TransferToken 89, Rotate 73, Close 49 bytes (16 of each are the validity window) |
+| `Action` | TransferSol 57, TransferToken 89, Rotate 73, Close 49, TransferTokenFrom 121 bytes (16 of each are the validity window) |
 | verify, hash calls | ≤ 67×15 chain steps + 1 (Q) + 1 (K) + h (path) ≈ 1 010–1 030 |
 | `execute` compute | ~115-145k CU measured for H10, worst case ~210k; client requests 400k |
 | staging | `open_sig_buffer` with a 708-byte first chunk plus `write_sig` chunks of 900 bytes: H5 and H10 take 3 transactions in total, H15 and H20 take 4 |
-| `execute_direct` transaction v1 | H10: TransferSol 2 871 bytes, TransferToken 3 002, Rotate 2 854, Close 2 897; H15 adds 160; the largest (H15 TransferToken) stays under 3 200 of the 4 096 allowed |
+| `execute_direct` transaction v1 | H10: TransferSol 2 871 bytes, TransferToken 3 002, TransferTokenFrom 3 034, Rotate 2 854, Close 2 897; H15 adds 160; the largest (H15 TransferTokenFrom) stays under 3 200 of the 4 096 allowed |
 | program binaries | `lamport_vault.so` 330 880 bytes (devnet allocation 350 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
 
 ### Direct (transaction v1) against staged, measured on devnet

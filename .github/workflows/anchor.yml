@@ -115,3 +115,73 @@ jobs:
       - name: Validator log on failure
         if: failure()
         run: tail -n 200 .anchor/test-ledger/validator.log || true
+
+  execute-direct-svm:
+    # `execute_direct` on chain: the whole LMS signature rides in the instruction
+    # data, 2.3 KB and more, which no wire transaction of the test validator can
+    # carry. LiteSVM runs the built program against the SVM directly, so all four
+    # actions take that path here (tests/svm).
+    name: execute_direct in litesvm
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: execute-direct-svm
+          workspaces: |
+            . -> target
+            tests/svm -> target
+          cache-targets: true
+
+      - name: Cache platform-tools and the SBF toolchain
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/solana
+          key: platform-tools-${{ env.PLATFORM_TOOLS }}-${{ runner.os }}
+          restore-keys: |
+            platform-tools-${{ env.PLATFORM_TOOLS }}-
+
+      - name: Cache agave ${{ env.AGAVE_VERSION }}
+        id: agave-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/solana/install
+          key: agave-${{ env.AGAVE_VERSION }}-${{ runner.os }}
+
+      - name: Install agave ${{ env.AGAVE_VERSION }}
+        if: steps.agave-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://release.anza.xyz/v${AGAVE_VERSION}/install" -o /tmp/agave-install.sh
+          echo "${AGAVE_INSTALL_SHA256}  /tmp/agave-install.sh" | sha256sum -c -
+          sh /tmp/agave-install.sh
+
+      - name: Add agave to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Cache anchor-cli ${{ env.ANCHOR_VERSION }}
+        id: anchor-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/anchor
+          key: anchor-cli-${{ env.ANCHOR_VERSION }}-${{ runner.os }}
+
+      - name: Install anchor-cli ${{ env.ANCHOR_VERSION }}
+        if: steps.anchor-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libudev-dev libssl-dev
+          cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+
+      - name: anchor build
+        run: anchor build
+
+      # run from inside the crate: its rust-toolchain.toml pins the toolchain litesvm's agave crates need, rustup fetches it
+      - name: cargo test (tests/svm)
+        working-directory: tests/svm
+        run: cargo test --locked

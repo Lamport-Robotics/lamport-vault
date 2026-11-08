@@ -43,11 +43,11 @@ export function padSingleBlock(block: Uint8Array, len: number): void {
 }
 
 /**
- * SHA-256 compression of one already-padded block with the standard IV; the digest is
- * written to `out[outOffset..outOffset+32)`. `out` may alias `block`: the block is read
- * into the schedule before anything is written.
+ * SHA-256 compression of one already-padded block with the standard IV; the first `outLen`
+ * digest bytes (32, or 24 for SHA-256/192) are written to `out[outOffset..outOffset+outLen)`.
+ * `out` may alias `block`: the block is read into the schedule before anything is written.
  */
-export function sha256SingleBlock(block: Uint8Array, out: Uint8Array, outOffset = 0): void {
+export function sha256SingleBlock(block: Uint8Array, out: Uint8Array, outOffset = 0, outLen = 32): void {
   for (let i = 0; i < 16; i++) {
     const j = i * 4;
     W[i] = (block[j]! << 24) | (block[j + 1]! << 16) | (block[j + 2]! << 8) | block[j + 3]!;
@@ -91,6 +91,12 @@ export function sha256SingleBlock(block: Uint8Array, out: Uint8Array, outOffset 
   f = (f + 0x9b05688c) | 0;
   g = (g + 0x1f83d9ab) | 0;
   h = (h + 0x5be0cd19) | 0;
+  if (outLen !== 32) {
+    // Truncated output (RFC 9858 SHA-256/192): never write past outLen, which may be padding.
+    const words = [a, b, c, d, e, f, g, h];
+    for (let i = 0; i < outLen; i++) out[outOffset + i] = words[i >> 2]! >>> (24 - 8 * (i & 3));
+    return;
+  }
   const o = outOffset;
   out[o] = a >>> 24; out[o + 1] = a >>> 16; out[o + 2] = a >>> 8; out[o + 3] = a;
   out[o + 4] = b >>> 24; out[o + 5] = b >>> 16; out[o + 6] = b >>> 8; out[o + 7] = b;

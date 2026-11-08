@@ -3,27 +3,28 @@
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::hash::{chain_step, h, message_hash, Digest, D_PBLC};
+use crate::hash::{h, h_n, message_hash, Digest, D_PBLC};
 use crate::params::{LmotsType, N};
 
 /// A parsed LM-OTS signature, borrowing the caller's bytes.
 ///
-/// Layout: `u32 typecode || C[32] || y[0] || ... || y[p-1]`.
+/// Layout: `u32 typecode || C[n] || y[0] || ... || y[p-1]`, each `y[i]` `n` bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct LmotsSignature<'a> {
     /// Parameter set, equal to the public key's.
     pub lmots_type: LmotsType,
-    /// The randomizer `C`.
-    pub c: &'a [u8; N],
-    /// The `p` chain values, `p * 32` bytes.
+    /// The randomizer `C`, `n` bytes.
+    pub c: &'a [u8],
+    /// The `p` chain values, `p * n` bytes.
     pub y: &'a [u8],
 }
 
 impl<'a> LmotsSignature<'a> {
-    /// Chain value `y[i]`.
+    /// Chain value `y[i]`, `n` bytes.
     #[inline(always)]
-    pub fn y(&self, i: usize) -> &'a [u8; N] {
-        self.y[i * N..(i + 1) * N].try_into().expect("32-byte slice")
+    pub fn y(&self, i: usize) -> &'a [u8] {
+        let n = self.lmots_type.n();
+        &self.y[i * n..(i + 1) * n]
     }
 }
 
@@ -45,11 +46,11 @@ pub fn parse_lmots_signature(
     if bytes.len() != expected.signature_len() {
         return Err(Error::SignatureLength);
     }
-    let c: &[u8; N] = bytes[4..4 + N].try_into().expect("32 bytes");
+    let n = expected.n();
     Ok(LmotsSignature {
         lmots_type: expected,
-        c,
-        y: &bytes[4 + N..],
+        c: &bytes[4..4 + n],
+        y: &bytes[4 + n..],
     })
 }
 
@@ -81,9 +82,10 @@ pub fn checksum(q: &Digest, t: LmotsType) -> u16 {
 /// Returns a `Vec` because `p` depends on the parameter set; the allocation
 /// is a few dozen bytes.
 pub fn digits(q: &Digest, t: LmotsType) -> Vec<u8> {
+    let n = t.n();
     let mut buf = [0u8; N + 2];
-    buf[..N].copy_from_slice(q);
-    buf[N..].copy_from_slice(&checksum(q, t).to_be_bytes());
+    buf[..n].copy_from_slice(&q[..n]);
+    buf[n..n + 2].copy_from_slice(&checksum(q, t).to_be_bytes());
     let w = t.w();
     (0..t.p()).map(|i| coef(&buf, i, w) as u8).collect()
 }
@@ -100,33 +102,54 @@ pub fn lmots_public_key_candidate(
     q: u32,
     message: &[u8],
 ) -> Digest {
+    // Monomorphized on n so the hot loop has fixed-size slices, exactly as
+    // before RFC 9858 support: a runtime n costs ~10% more compute on chain.
+    match sig.lmots_type.n() {
+        #[cfg(feature = "sha256-192")]
+        24 => candidate::<24>(sig, i_id, q, message),
+        _ => candidate::<32>(sig, i_id, q, message),
+    }
+}
+
+fn candidate<const NN: usize>(sig: &LmotsSignature<'_>, i_id: &[u8; 16], q: u32, message: &[u8]) -> Digest {
     let t = sig.lmots_type;
-    let qh = message_hash(i_id, q, sig.c, message);
+    let qh = message_hash(i_id, q, sig.c, message, NN);
     let a = digits(&qh, t);
     let chain_len = t.chain_len() as u8;
+    let qb = q.to_be_bytes();
 
     // z[i] = chain y[i] from step a[i] up to 2^w - 1.
     let mut z: Vec<Digest> = Vec::with_capacity(t.p());
     for (i, &ai) in a.iter().enumerate() {
-        let mut tmp: Digest = *sig.y(i);
+        let yi = &sig.y[i * NN..(i + 1) * NN];
+        // For n = 32 this is the plain 32-byte array copy the verifier always did; the branch
+        // is resolved at compile time.
+        let mut tmp: Digest = if NN == N {
+            yi.try_into().expect("32-byte slice")
+        } else {
+            let mut d = [0u8; N];
+            d[..NN].copy_from_slice(yi);
+            d
+        };
         let mut j = ai;
+        let ib = (i as u16).to_be_bytes();
         while j < chain_len {
-            tmp = chain_step(i_id, q, i as u16, j, &tmp);
+            // chain_step, written out so every slice length is a compile-time constant.
+            tmp = h(&[i_id, &qb, &ib, &[j], &tmp[..NN]]);
             j += 1;
         }
         z.push(tmp);
     }
 
     // Kc = H(I || u32str(q) || u16str(D_PBLC) || z[0] || ... || z[p-1])
-    let qb = q.to_be_bytes();
     let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + t.p());
     parts.push(i_id);
     parts.push(&qb);
     parts.push(&D_PBLC);
     for zi in &z {
-        parts.push(zi);
+        parts.push(&zi[..NN]);
     }
-    h(&parts)
+    h_n(&parts, NN)
 }
 
 #[cfg(test)]
@@ -160,5 +183,20 @@ mod tests {
         assert_eq!(d.len(), 67);
         // 15360 = 0x3C00 -> digits 3, 12, 0
         assert_eq!(&d[64..], &[3, 12, 0]);
+    }
+
+    #[test]
+    #[cfg(feature = "sha256-192")]
+    fn checksum_bounds_n24() {
+        // W4: 48 digits of 0 -> sum 48 * 15 = 720, << 4 = 11520 = 0x2D00 -> digits 2, 13, 0
+        let t = LmotsType::Sha256N24W4;
+        let d = digits(&[0u8; 32], t);
+        assert_eq!(d.len(), 51);
+        assert_eq!(&d[48..], &[2, 13, 0]);
+        // W8: 24 digits of 0 -> sum 24 * 255 = 6120 = 0x17E8, ls 0 -> digits 0x17, 0xE8
+        let t = LmotsType::Sha256N24W8;
+        let d = digits(&[0u8; 32], t);
+        assert_eq!(d.len(), 26);
+        assert_eq!(&d[24..], &[0x17, 0xe8]);
     }
 }

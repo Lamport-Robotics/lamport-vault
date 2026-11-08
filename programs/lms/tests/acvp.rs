@@ -15,10 +15,17 @@
 //!    reason, and the keyGen public keys are reproduced from (SEED, I) with
 //!    the Appendix A derivation. This exercises the shared arithmetic and the
 //!    reading of the specification, not the production verifier.
+//! 3. With the `sha256-192` feature (on with `sign`) the crate implements
+//!    n = m = 24 itself: the same vectors then go through the production
+//!    parser (`parse_any`), verifier (`lms_verify`) and key generator
+//!    (`LmsPrivateKey`), while the program's parser (`parse`, W4 only) still
+//!    refuses every key.
 
 use lamport_lms::hash::{h, D_INTR, D_LEAF, D_MESG, D_PBLC};
 use lamport_lms::lmots::coef;
 use lamport_lms::{lms_verify, Error, LmsPublicKey};
+#[cfg(feature = "sha256-192")]
+use lamport_lms::{LmotsType, LmsPrivateKey, LmsType};
 use serde::Deserialize;
 
 const ACVP_JSON: &str = include_str!("../../../kat/acvp_lms.json");
@@ -118,6 +125,7 @@ fn acvp_file_is_what_vectors_md_says() {
 ///    to the 56 bytes it expects, and the verifier never panics on their
 ///    signatures.
 #[test]
+#[cfg(not(feature = "sha256-192"))]
 fn acvp_m24_keys_are_rejected_by_the_m32_verifier() {
     let a = acvp();
     let keys = a
@@ -347,5 +355,64 @@ fn acvp_key_gen_public_keys_reproduce_from_seed_and_i() {
         pk.extend_from_slice(&i_id);
         pk.extend_from_slice(&nodes[1]);
         assert_eq!(hex::encode(&pk), k.public_key_hex, "{}", k.id);
+    }
+}
+
+// ------------------------------------- the production n = 24 code (sha256-192)
+
+/// 3a. The program's parser still refuses every ACVP key; `parse_any` takes them.
+#[test]
+#[cfg(feature = "sha256-192")]
+fn acvp_m24_keys_parse_for_tooling_only() {
+    let a = acvp();
+    let keys = a.sig_ver.iter().map(|s| s.public_key_hex.as_str()).chain(a.sig_gen.iter().map(|s| s.public_key_hex.as_str()));
+    for pk_hex in keys {
+        let pk = hx(pk_hex);
+        assert_eq!(LmsPublicKey::parse(&pk), Err(Error::UnknownLmotsType));
+        let parsed = LmsPublicKey::parse_any(&pk).unwrap();
+        assert_eq!((parsed.lms_type.m(), parsed.lmots_type.n()), (24, 24));
+        assert_eq!(parsed.encode(), pk);
+    }
+}
+
+/// 3b. sigVer through `lms_verify`: the valid cases verify, the broken ones fail.
+#[test]
+#[cfg(feature = "sha256-192")]
+fn acvp_sig_ver_expectations_hold_under_the_production_verifier() {
+    let a = acvp();
+    for s in &a.sig_ver {
+        let pk = LmsPublicKey::parse_any(&hx(&s.public_key_hex)).unwrap();
+        let r = lms_verify(&pk, &hx(&s.message_hex), &hx(&s.signature_hex));
+        assert_eq!(r.is_ok(), s.expected_valid, "{} ({}): {r:?}", s.id, s.reason);
+    }
+}
+
+/// 3c. sigGen through `lms_verify`: NIST's signatures verify at their q and fail on a changed message.
+#[test]
+#[cfg(feature = "sha256-192")]
+fn acvp_sig_gen_signatures_verify_under_the_production_verifier() {
+    let a = acvp();
+    for s in &a.sig_gen {
+        let pk = LmsPublicKey::parse_any(&hx(&s.public_key_hex)).unwrap();
+        let msg = hx(&s.message_hex);
+        assert_eq!(lms_verify(&pk, &msg, &hx(&s.signature_hex)), Ok(s.q), "{}", s.id);
+        let mut bad = msg.clone();
+        bad[0] ^= 1;
+        assert!(lms_verify(&pk, &bad, &hx(&s.signature_hex)).is_err(), "{}", s.id);
+    }
+}
+
+/// 3d. keyGen through `LmsPrivateKey`: the public keys reproduce from (SEED, I).
+#[test]
+#[cfg(feature = "sha256-192")]
+fn acvp_key_gen_public_keys_reproduce_with_the_production_signer() {
+    let a = acvp();
+    for k in &a.key_gen {
+        let st = sets(&a, &k.lms_mode, &k.lmots_mode);
+        let lms_type = LmsType::from_typecode(st.lms.typecode).unwrap();
+        let lmots_type = LmotsType::from_typecode_in(st.ots.typecode, LmotsType::ALL).unwrap();
+        let i: [u8; 16] = hx(&k.i_hex).try_into().unwrap();
+        let sk = LmsPrivateKey::from_seed_slice(lms_type, lmots_type, i, &hx(&k.seed_hex));
+        assert_eq!(hex::encode(sk.public_key().encode()), k.public_key_hex, "{}", k.id);
     }
 }

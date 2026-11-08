@@ -5,8 +5,8 @@
 use lamport_vault_fuzz::fixtures;
 use libfuzzer_sys::fuzz_target;
 use lamport_lms::{
-    lms_signature_len, parse_lmots_signature, parse_lms_signature, peek_q, LmotsType, LmsPublicKey,
-    N,
+    lms_signature_len, parse_lmots_signature, parse_lms_signature, peek_q, public_key_len, LmotsType,
+    LmsPublicKey,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -19,8 +19,10 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(any, Ok(pk));
     }
     if let Ok(pk) = any {
-        assert_eq!(data.len(), 56);
-        assert_eq!(pk.to_bytes(), data);
+        // 56 bytes for a SHA-256 key, 48 for a SHA-256/192 one (`sign` turns `sha256-192` on here)
+        assert_eq!(data.len(), public_key_len(pk.lms_type));
+        assert_eq!(pk.lms_type.m(), pk.lmots_type.n());
+        assert_eq!(pk.encode(), data);
         assert_eq!(pk.signature_len(), lms_signature_len(pk.lms_type, pk.lmots_type));
         assert!(LmotsType::ALL.contains(&pk.lmots_type));
         // A signature of exactly the right length made of these same bytes
@@ -36,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(s) = parse_lmots_signature(data, *t) {
             assert_eq!(s.lmots_type, *t);
             assert_eq!(data.len(), t.signature_len());
-            assert_eq!(s.y.len(), N * t.p());
+            assert_eq!(s.y.len(), t.n() * t.p());
             let _ = s.y(t.p() - 1);
         }
     }
@@ -52,8 +54,8 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(sig.lmots.lmots_type, f.pk.lmots_type);
                 assert!(sig.q < f.pk.lms_type.leaf_count());
                 assert_eq!(Some(sig.q), peek_q(rest));
-                assert_eq!(sig.lmots.y.len(), N * f.pk.lmots_type.p());
-                assert_eq!(sig.path.len(), N * f.pk.lms_type.height() as usize);
+                assert_eq!(sig.lmots.y.len(), f.pk.lmots_type.n() * f.pk.lmots_type.p());
+                assert_eq!(sig.path.len(), f.pk.lms_type.m() * f.pk.lms_type.height() as usize);
                 let _ = sig.path(f.pk.lms_type.height() as usize - 1);
                 let _ = sig.lmots.y(f.pk.lmots_type.p() - 1);
             }

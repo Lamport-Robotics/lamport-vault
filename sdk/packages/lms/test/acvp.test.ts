@@ -1,11 +1,11 @@
 /**
  * NIST ACVP LMS vectors (kat/acvp_lms.json). Every group ACVP-Server publishes is a SP 800-208
  * SHA-256/192 set (n = m = 24, typecodes 0x0A/0x0B and 0x05/0x06); there are no RFC 8554 n = 32
- * cases. This package implements n = 32 only, so:
+ * cases. The package implements those sets too (RFC 9858), so:
  *
- *  1. the shipped parser/verifier must reject every ACVP key cleanly;
+ *  1. the shipped parser, verifier and key generator take every ACVP key, signature and keyGen case;
  *  2. a test-only n = 24 instantiation of Algorithms 4b/6a, built on the package's `coef` and
- *     SHA-256, checks that the algorithm as implemented here agrees with NIST on all valid and
+ *     SHA-256, checks independently that the algorithm agrees with NIST on all valid and
  *     deliberately invalid cases, and reproduces the keyGen public keys via Appendix A.
  */
 import { readFileSync } from "node:fs";
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { concat, equalBytes, fromHex, toHex, u16str, u32str, u8str } from "../src/bytes.ts";
 import { coef } from "../src/lmots.ts";
-import { lmsVerify, parseLmsPublicKey } from "../src/lms.ts";
+import { LmsPrivateKey, lmsVerify, parseLmsPublicKey } from "../src/lms.ts";
 import { D_INTR, D_LEAF, D_MESG, D_PBLC, D_PRG } from "../src/params.ts";
 import { sha256 } from "../src/sha256.ts";
 
@@ -102,16 +102,38 @@ describe("NIST ACVP LMS vectors", () => {
     expect(Object.values(acvp.parameter_sets.lmots).every((s) => s.n === 24)).toBe(true);
   });
 
-  it("every M24 key is rejected by the shipped n = 32 verifier without throwing", () => {
+  it("every M24 key parses at 48 bytes and nowhere else", () => {
     for (const s of [...acvp.sig_ver, ...acvp.sig_gen]) {
       const pk = fromHex(s.public_key_hex);
       expect(pk.length).toBe(48);
-      expect(() => parseLmsPublicKey(pk)).toThrow();
-      expect(lmsVerify(pk, fromHex(s.message_hex), fromHex(s.signature_hex))).toBe(false);
+      const parts = parseLmsPublicKey(pk);
+      expect(parts.T1.length).toBe(24);
       const padded = new Uint8Array(56);
       padded.set(pk);
-      expect(() => parseLmsPublicKey(padded)).toThrow(/unknown LMS typecode/);
+      expect(() => parseLmsPublicKey(padded)).toThrow(/must be 48 bytes/);
       expect(lmsVerify(padded, fromHex(s.message_hex), fromHex(s.signature_hex))).toBe(false);
+    }
+  });
+
+  it.each(acvp.sig_ver)("sigVer $id ($reason) through lmsVerify -> valid=$expected_valid", (s) => {
+    expect(lmsVerify(fromHex(s.public_key_hex), fromHex(s.message_hex), fromHex(s.signature_hex))).toBe(s.expected_valid);
+  });
+
+  it("sigGen: all 62 NIST signatures verify through lmsVerify and fail on a changed message", () => {
+    for (const s of acvp.sig_gen) {
+      const msg = fromHex(s.message_hex);
+      expect(lmsVerify(fromHex(s.public_key_hex), msg, fromHex(s.signature_hex)), s.id).toBe(true);
+      const bad = msg.slice();
+      bad[0]! ^= 1;
+      expect(lmsVerify(fromHex(s.public_key_hex), bad, fromHex(s.signature_hex))).toBe(false);
+    }
+  });
+
+  it("keyGen: LmsPrivateKey reproduces every NIST public key from (SEED, I)", () => {
+    for (const k of acvp.key_gen) {
+      const [lms, ots] = sets(k.lms_mode, k.lmots_mode);
+      const key = LmsPrivateKey.generate({ lmsType: lms.typecode, lmotsType: ots.typecode, seed: fromHex(k.seed_hex), I: fromHex(k.I_hex) });
+      expect(toHex(key.publicKey), k.id).toBe(k.public_key_hex);
     }
   });
 

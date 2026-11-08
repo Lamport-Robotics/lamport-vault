@@ -65,7 +65,7 @@ describe("LM-OTS sign/verify", () => {
       expect(toHex(K1)).toBe(toHex(K2));
 
       const msg = randomBytes(100);
-      const C = randomBytes(32);
+      const C = randomBytes(params.n);
       const sig = lmotsSign(params, I, q, x, msg, C);
       expect(sig.length).toBe(params.sigLen);
       const Kc = publicKeyCandidate(params, I, q, msg, sig);

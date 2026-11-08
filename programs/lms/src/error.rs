@@ -11,7 +11,7 @@ pub enum Error {
     UnknownLmsType = 1,
     /// The LM-OTS typecode is not one this crate accepts (see [`crate::LmotsType`]).
     UnknownLmotsType = 2,
-    /// A public key was not exactly 56 bytes.
+    /// A public key was not exactly `24 + m` bytes (56 for SHA-256, 48 for SHA-256/192).
     PublicKeyLength = 3,
     /// A signature was shorter or longer than its typecodes require.
     SignatureLength = 4,
@@ -23,6 +23,8 @@ pub enum Error {
     LeafOutOfRange = 7,
     /// The recomputed root does not equal `T[1]` in the public key.
     InvalidSignature = 8,
+    /// The LMS and LM-OTS parameter sets use different hash lengths (`m != n`).
+    HashLengthMismatch = 9,
 }
 
 impl Error {
@@ -37,6 +39,7 @@ impl Error {
             Error::LmsTypeMismatch => "LmsTypeMismatch",
             Error::LeafOutOfRange => "LeafOutOfRange",
             Error::InvalidSignature => "InvalidSignature",
+            Error::HashLengthMismatch => "HashLengthMismatch",
         }
     }
 }

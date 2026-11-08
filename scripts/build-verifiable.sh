@@ -14,13 +14,19 @@
 #       --library-name lamport_vault https://github.com/Lamport-Robotics/lamport-vault
 #
 # The build runs inside the pinned solanafoundation/solana-verifiable-build
-# image, so the output does not depend on the host toolchain. The on-chain hash
-# is `solana-verify get-program-hash --url <rpc> <program-id>`; the local one is
-# printed below. They must be identical.
+# image (same one as .github/workflows/verify.yml; override with BASE_IMAGE),
+# so the output does not depend on the host toolchain. cargo-build-sbf in the
+# image reads tools-version from the program's Cargo.toml and fetches
+# platform-tools v1.56. The on-chain hash is
+# `solana-verify get-program-hash --url <rpc> <program-id>`; the local one is
+# printed below. They must be identical. Without Docker use
+# scripts/verify-deploy.sh instead.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+BASE_IMAGE="${BASE_IMAGE:-solanafoundation/solana-verifiable-build:2.3.13}"
 
 if ! command -v solana-verify >/dev/null 2>&1; then
   echo "solana-verify not found. Install it with: cargo install solana-verify" >&2
@@ -53,7 +59,7 @@ for crate in "${SELECTED[@]}"; do
   fi
   echo "== building $crate ($lib) reproducibly"
   # --library-name selects the crate; the workspace root is the build context.
-  solana-verify build --library-name "$lib"
+  solana-verify build --library-name "$lib" --base-image "$BASE_IMAGE"
   so="target/deploy/${lib}.so"
   echo "== $lib"
   echo "   size:  $(wc -c < "$so") bytes"

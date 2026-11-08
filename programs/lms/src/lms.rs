@@ -35,16 +35,36 @@ pub struct LmsPublicKey {
 }
 
 impl LmsPublicKey {
-    /// Parses the serialized form (Algorithm 6, steps 1 and 2): 56 bytes for
-    /// SHA-256 keys, 48 for SHA-256/192 keys. The LMS and LM-OTS parameter
-    /// sets must use the same hash length (RFC 9858 Section 5).
+    /// Parses the serialized form (Algorithm 6, steps 1 and 2) under the default
+    /// LM-OTS policy, [`LmotsType::ACCEPTED`] (W4 only). This is the parser
+    /// the vault program uses.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() < 8 {
+        Self::parse_with(bytes, LmotsType::ACCEPTED)
+    }
+
+    /// Parses the serialized form accepting every LM-OTS row in
+    /// [`LmotsType::ALL`]: W1, W2, W4 and W8, and with the `sha256-192`
+    /// feature the RFC 9858 rows. For tooling and interoperability tests; the
+    /// program never calls this.
+    pub fn parse_any(bytes: &[u8]) -> Result<Self, Error> {
+        Self::parse_with(bytes, LmotsType::ALL)
+    }
+
+    /// Parses the serialized form, 56 bytes for SHA-256 keys and 48 for
+    /// SHA-256/192 keys (`sha256-192` only), admitting only the LM-OTS
+    /// parameter sets in `lmots_accepted`. The LMS and LM-OTS sets must use the
+    /// same hash length (RFC 9858 Section 5). The signature parser and
+    /// verifier then follow the key: a signature's typecodes must equal the
+    /// key's.
+    pub fn parse_with(bytes: &[u8], lmots_accepted: &[LmotsType]) -> Result<Self, Error> {
+        if bytes.len() != LMS_PUBLIC_KEY_LEN && !(cfg!(feature = "sha256-192") && bytes.len() == 48) {
             return Err(Error::PublicKeyLength);
         }
         let lms_type = LmsType::from_typecode(u32::from_be_bytes(bytes[0..4].try_into().unwrap()))?;
-        let lmots_type =
-            LmotsType::from_typecode(u32::from_be_bytes(bytes[4..8].try_into().unwrap()))?;
+        let lmots_type = LmotsType::from_typecode_in(
+            u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+            lmots_accepted,
+        )?;
         if bytes.len() != public_key_len(lms_type) {
             return Err(Error::PublicKeyLength);
         }
@@ -252,12 +272,14 @@ mod tests {
         let mut bad = bytes;
         bad[7] = 4;
         assert_eq!(LmsPublicKey::parse(&bad), Err(Error::UnknownLmotsType));
-        // SHA-256 tree with a SHA-256/192 one-time signature
+        // SHA-256 tree with a SHA-256/192 one-time signature: not the program's policy, and a length
+        // mismatch for any parser that admits the row
         #[cfg(feature = "sha256-192")]
         {
             let mut bad = bytes;
             bad[7] = 7;
-            assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
+            assert_eq!(LmsPublicKey::parse(&bad), Err(Error::UnknownLmotsType));
+            assert_eq!(LmsPublicKey::parse_any(&bad), Err(Error::HashLengthMismatch));
         }
     }
 
@@ -270,14 +292,17 @@ mod tests {
         for (k, b) in bytes[8..].iter_mut().enumerate() {
             *b = k as u8 + 1;
         }
-        let pk = LmsPublicKey::parse(&bytes).unwrap();
+        // the program's parser (W4 only) refuses it; tooling parses it with parse_any
+        assert_eq!(LmsPublicKey::parse(&bytes), Err(Error::UnknownLmotsType));
+        let pk = LmsPublicKey::parse_any(&bytes).unwrap();
         assert_eq!(pk.lms_type, LmsType::Sha256M24H10);
         assert_eq!(pk.encode(), bytes.to_vec());
         assert_eq!(&pk.t1[24..], &[0u8; 8]);
         assert_eq!(pk.signature_len(), 4 + 1252 + 4 + 240);
-        assert_eq!(LmsPublicKey::parse(&[&bytes[..], &[0u8; 8]].concat()), Err(Error::PublicKeyLength));
+        assert_eq!(LmsPublicKey::parse_any(&[&bytes[..], &[0u8; 8]].concat()), Err(Error::PublicKeyLength));
         let mut bad = bytes;
         bad[7] = 3; // SHA-256/192 tree with a SHA-256 one-time signature
+        assert_eq!(LmsPublicKey::parse_any(&bad), Err(Error::HashLengthMismatch));
         assert_eq!(LmsPublicKey::parse(&bad), Err(Error::HashLengthMismatch));
     }
 

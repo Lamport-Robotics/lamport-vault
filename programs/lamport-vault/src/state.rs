@@ -1,5 +1,6 @@
 //! Account layouts.
 
+use anchor_lang::error::ErrorCode;
 use anchor_lang::prelude::*;
 use lamport_lms::{LmsType, LMS_PUBLIC_KEY_LEN};
 
@@ -19,8 +20,12 @@ pub const KEY_HASH_LEN: usize = 16;
 /// order, so several signers can own disjoint lanes of one key. The tree
 /// height is fixed at creation (the bitmap is sized for it); `Rotate` must keep
 /// the parameter set.
-#[account]
-#[derive(Debug)]
+///
+/// The Anchor account traits are written out below instead of `#[account]`
+/// (same discriminator, same Borsh layout) for one reason: a closed vault
+/// leaves a [`Tombstone`] at its address, and reading it as a `Vault` must
+/// fail with [`VaultError::VaultClosed`], not with a discriminator mismatch.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct Vault {
     /// Layout version, 2.
     pub version: u8,
@@ -43,6 +48,49 @@ pub struct Vault {
     /// refuses any key listed here and the current one; at most
     /// [`crate::MAX_KEY_HISTORY`] entries, after which the vault must `Close`.
     pub used_keys: Vec<[u8; KEY_HASH_LEN]>,
+}
+
+impl Discriminator for Vault {
+    /// `sha256("account:Vault")[..8]`, the value `#[account]` derives.
+    const DISCRIMINATOR: &'static [u8] = &[211, 8, 232, 43, 2, 152, 117, 119];
+}
+
+impl Owner for Vault {
+    fn owner() -> Pubkey {
+        crate::ID
+    }
+}
+
+impl AccountSerialize for Vault {
+    fn try_serialize<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
+        // `Close` rewrites the account as a `Tombstone` and marks the in-memory
+        // vault with the tombstone's version byte; Anchor's exit must then leave
+        // the account alone.
+        if self.version == Tombstone::VERSION {
+            return Ok(());
+        }
+        if writer.write_all(Self::DISCRIMINATOR).is_err() || AnchorSerialize::serialize(self, writer).is_err() {
+            return err!(ErrorCode::AccountDidNotSerialize);
+        }
+        Ok(())
+    }
+}
+
+impl AccountDeserialize for Vault {
+    fn try_deserialize(buf: &mut &[u8]) -> Result<Self> {
+        require!(buf.len() >= 8, ErrorCode::AccountDiscriminatorNotFound);
+        // A closed vault: say so, instead of "not a Vault".
+        require!(buf[..8] != *Tombstone::DISCRIMINATOR, VaultError::VaultClosed);
+        require!(buf[..8] == *Self::DISCRIMINATOR, ErrorCode::AccountDiscriminatorMismatch);
+        Self::try_deserialize_unchecked(buf)
+    }
+
+    fn try_deserialize_unchecked(buf: &mut &[u8]) -> Result<Self> {
+        let mut data: &[u8] = &buf[8..];
+        let vault: Vault = AnchorDeserialize::deserialize(&mut data).map_err(|_| error!(ErrorCode::AccountDidNotDeserialize))?;
+        require!(vault.version == Self::VERSION, ErrorCode::AccountDidNotDeserialize);
+        Ok(vault)
+    }
 }
 
 impl Vault {
@@ -94,6 +142,85 @@ impl Vault {
         *byte |= mask;
         self.spent = self.spent.checked_add(1).ok_or(VaultError::Overflow)?;
         Ok(())
+    }
+}
+
+/// What `Close` leaves at a vault's address. The PDA stays occupied for good:
+/// `create_vault` with the same initial key would otherwise recreate the vault
+/// at generation 0 with a clear bitmap, and any unexpired signature made before
+/// the close would verify again. Own discriminator (`sha256("account:Tombstone")`),
+/// so it is never read as a `Vault`; `version` is a value no `Vault` layout
+/// carries, so even the byte after the discriminator tells the two apart. The
+/// account holds exactly its rent-exempt minimum; `Close` sent the rest to `to`,
+/// recorded here as `heir`: the only destination `sweep_closed` will ever move a
+/// token balance the closed vault still owns to.
+///
+/// The Anchor account traits are written out (same discriminator and layout as
+/// `#[account]` derives) so that a live `Vault` where a tombstone is expected
+/// fails with [`VaultError::VaultNotClosed`] instead of a discriminator mismatch.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct Tombstone {
+    /// Layout version, [`Tombstone::VERSION`] (0xFE).
+    pub version: u8,
+    /// `vault_id` of the closed vault.
+    pub vault_id: [u8; 32],
+    /// Slot of the `Close`.
+    pub closed_slot: u64,
+    /// The `to` of the `Close`: where its lamports went, and where `sweep_closed`
+    /// sends any token balance found later.
+    pub heir: Pubkey,
+}
+
+impl Discriminator for Tombstone {
+    /// `sha256("account:Tombstone")[..8]`, the value `#[account]` derives.
+    const DISCRIMINATOR: &'static [u8] = &[45, 187, 252, 155, 232, 114, 36, 22];
+}
+
+impl Owner for Tombstone {
+    fn owner() -> Pubkey {
+        crate::ID
+    }
+}
+
+impl AccountSerialize for Tombstone {
+    fn try_serialize<W: std::io::Write>(&self, writer: &mut W) -> Result<()> {
+        if writer.write_all(Self::DISCRIMINATOR).is_err() || AnchorSerialize::serialize(self, writer).is_err() {
+            return err!(ErrorCode::AccountDidNotSerialize);
+        }
+        Ok(())
+    }
+}
+
+impl AccountDeserialize for Tombstone {
+    fn try_deserialize(buf: &mut &[u8]) -> Result<Self> {
+        require!(buf.len() >= 8, ErrorCode::AccountDiscriminatorNotFound);
+        // A live vault: say so, instead of "not a Tombstone".
+        require!(buf[..8] != *Vault::DISCRIMINATOR, VaultError::VaultNotClosed);
+        require!(buf[..8] == *Self::DISCRIMINATOR, ErrorCode::AccountDiscriminatorMismatch);
+        Self::try_deserialize_unchecked(buf)
+    }
+
+    fn try_deserialize_unchecked(buf: &mut &[u8]) -> Result<Self> {
+        let mut data: &[u8] = &buf[8..];
+        let tomb: Tombstone = AnchorDeserialize::deserialize(&mut data).map_err(|_| error!(ErrorCode::AccountDidNotDeserialize))?;
+        require!(tomb.version == Self::VERSION, ErrorCode::AccountDidNotDeserialize);
+        Ok(tomb)
+    }
+}
+
+impl Tombstone {
+    /// Layout version; reserved, no `Vault` ever has it.
+    pub const VERSION: u8 = 0xFE;
+    /// Account size including the discriminator: 81 bytes.
+    pub const SPACE: usize = 8 + 1 + 32 + 8 + 32;
+
+    /// True when `ai` is a tombstone written by this program.
+    pub fn is_at(ai: &AccountInfo) -> bool {
+        *ai.owner == crate::ID
+            && ai
+                .try_borrow_data()
+                .map(|d| d.len() >= 8 && d[..8] == *Self::DISCRIMINATOR)
+                .unwrap_or(false)
     }
 }
 

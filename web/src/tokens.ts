@@ -1,15 +1,16 @@
 /** spl tokens held by a vault, and the destination token account a transfer needs */
 import { PublicKey, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, associatedTokenAddress } from "@lamport-robotics/vault";
-import { rpc } from "./common.ts";
+import { rpc } from "./rpc.ts";
 
 export interface Holding { mint: PublicKey; amount: bigint; decimals: number; ui: string; tokenProgram: PublicKey; account: PublicKey }
 
 export async function holdings(owner: PublicKey): Promise<Holding[]> {
   const out: Holding[] = [];
   for (const tokenProgram of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-    const r = await rpc.getParsedTokenAccountsByOwner(owner, { programId: tokenProgram }, "confirmed").catch(() => null);
-    for (const a of r?.value ?? []) {
+    // a failed read must surface: an empty list would read as "no tokens" and hide a balance
+    const r = await rpc.getParsedTokenAccountsByOwner(owner, { programId: tokenProgram }, "confirmed");
+    for (const a of r.value) {
       const info = (a.account.data as any).parsed?.info;
       if (!info) continue;
       const amount = BigInt(info.tokenAmount.amount);

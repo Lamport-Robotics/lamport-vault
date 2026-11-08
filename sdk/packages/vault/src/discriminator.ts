@@ -19,6 +19,9 @@ export const IX = {
   closeSigBuffer: instructionDiscriminator("close_sig_buffer"),
   execute: instructionDiscriminator("execute"),
   executeDirect: instructionDiscriminator("execute_direct"),
+  /** Permissionless: moves a closed vault's stranded token balance to the tombstone's heir. */
+  sweepClosed: instructionDiscriminator("sweep_closed"),
+  sweepClosedSol: instructionDiscriminator("sweep_closed_sol"),
   // pq-registry
   commit: instructionDiscriminator("commit"),
   openPqBuffer: instructionDiscriminator("open_pq_buffer"),
@@ -29,6 +32,8 @@ export const IX = {
 
 export const ACCOUNT = {
   vault: accountDiscriminator("Vault"),
+  /** What `Close` leaves at a vault's address (see `decodeVaultOrTombstone`). */
+  tombstone: accountDiscriminator("Tombstone"),
   sigBuffer: accountDiscriminator("SigBuffer"),
   commitment: accountDiscriminator("Commitment"),
   pqSigBuffer: accountDiscriminator("PqSigBuffer"),

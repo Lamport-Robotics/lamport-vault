@@ -14,6 +14,9 @@
 //!   whose leaves were spent can never be committed again (`KeyReused`).
 //!   Leaves of the committed key are spent in increasing order (`next_q`):
 //!   a commitment signs once per rotation, so lanes are not needed here.
+//!   Every rotation carries a validity window (`issued_slot`, `expiry_slot`)
+//!   that the signature covers and that `rotate_pq` checks against the clock,
+//!   at most [`MAX_VALIDITY_SLOTS`] long.
 //!
 //! No admin, no authority: after `commit` only the post-quantum key can change
 //! the record, and nobody can delete it.
@@ -37,6 +40,10 @@ pub const MESSAGE_DOMAIN: &[u8] = b"pq-registry/v1";
 pub const SCHEME_LMS_SHA256: u8 = 1;
 /// Length of a `used_keys` entry: `sha256(pq_pubkey)[0..16]`.
 pub const KEY_HASH_LEN: usize = 16;
+/// Longest validity window of a rotation, in slots: `expiry_slot - issued_slot`
+/// must not exceed it (about one day at 400 ms). Same value as the vault's.
+#[constant]
+pub const MAX_VALIDITY_SLOTS: u64 = 216_000;
 /// Most past keys a commitment remembers; `rotate_pq` beyond it fails with `HistoryFull`.
 #[cfg(not(feature = "small-history"))]
 #[constant]
@@ -48,18 +55,34 @@ pub const MAX_KEY_HISTORY: u16 = 2;
 
 const _: () = assert!(LMS_PUBLIC_KEY_LEN == 56);
 
-/// `message = sha256("pq-registry/v1" || program_id || owner || u32le(generation) || new_pq_pubkey)`.
+/// `message = sha256("pq-registry/v1" || program_id || owner || u32le(generation) || new_pq_pubkey
+/// || u64le(issued_slot) || u64le(expiry_slot))`.
 ///
-/// `generation` is the commitment's key generation at signing time.
-pub fn signed_message(owner: &Pubkey, generation: u32, new_pq_pubkey: &[u8; 56]) -> [u8; 32] {
+/// `generation` is the commitment's key generation at signing time; the
+/// validity window is signed so nobody but the key holder chooses it.
+pub fn signed_message(owner: &Pubkey, generation: u32, new_pq_pubkey: &[u8; 56], issued_slot: u64, expiry_slot: u64) -> [u8; 32] {
     solana_sha256_hasher::hashv(&[
         MESSAGE_DOMAIN,
         ID.as_ref(),
         owner.as_ref(),
         &generation.to_le_bytes(),
         new_pq_pubkey,
+        &issued_slot.to_le_bytes(),
+        &expiry_slot.to_le_bytes(),
     ])
     .to_bytes()
+}
+
+/// The validity-window rule: not issued in the future, not expired,
+/// `issued_slot <= expiry_slot <= issued_slot + MAX_VALIDITY_SLOTS`.
+pub fn check_validity_window(issued_slot: u64, expiry_slot: u64, slot: u64) -> Result<()> {
+    require!(issued_slot <= slot, RegistryError::IssuedInFuture);
+    require!(expiry_slot >= slot, RegistryError::RotationExpired);
+    require!(
+        expiry_slot >= issued_slot && expiry_slot - issued_slot <= MAX_VALIDITY_SLOTS,
+        RegistryError::InvalidValidityWindow
+    );
+    Ok(())
 }
 
 fn parse_key(bytes: &[u8; 56]) -> Result<LmsPublicKey> {
@@ -92,10 +115,19 @@ pub mod pq_registry {
         Ok(())
     }
 
-    /// Allocates a staging buffer for one rotation to `new_pq_pubkey`.
+    /// Allocates a staging buffer for one rotation to `new_pq_pubkey` with
+    /// the validity window `issued_slot..=expiry_slot` the signature covers.
     /// `sig_len` must be the exact signature length of the committed key's
     /// parameter set. The signature itself arrives through `write_pq_sig`.
-    pub fn open_pq_buffer(ctx: Context<OpenPqBuffer>, nonce: u64, new_pq_pubkey: [u8; 56], sig_len: u16) -> Result<()> {
+    /// The window is only checked against the clock in `rotate_pq`.
+    pub fn open_pq_buffer(
+        ctx: Context<OpenPqBuffer>,
+        nonce: u64,
+        new_pq_pubkey: [u8; 56],
+        sig_len: u16,
+        issued_slot: u64,
+        expiry_slot: u64,
+    ) -> Result<()> {
         parse_key(&new_pq_pubkey)?;
         let pk = parse_key(&ctx.accounts.commitment.pq_pubkey)?;
         require!(sig_len as usize == pk.signature_len(), RegistryError::SignatureLengthMismatch);
@@ -106,6 +138,8 @@ pub mod pq_registry {
         b.payer = ctx.accounts.payer.key();
         b.nonce = nonce;
         b.new_pq_pubkey = new_pq_pubkey;
+        b.issued_slot = issued_slot;
+        b.expiry_slot = expiry_slot;
         b.sig_len = sig_len;
         b.filled = 0;
         b.sig = vec![0u8; sig_len as usize];
@@ -124,14 +158,15 @@ pub mod pq_registry {
         Ok(())
     }
 
-    /// Verifies the staged signature with the committed key and replaces it.
-    /// The rent for the commitment's extra `used_keys` entry (16 bytes) is
-    /// taken out of the buffer before the buffer is closed to its payer.
+    /// Verifies the staged signature with the committed key, checks the
+    /// signed validity window against the clock and replaces the key. The
+    /// rent for the commitment's extra `used_keys` entry (16 bytes) is taken
+    /// out of the buffer before the buffer is closed to its payer.
     pub fn rotate_pq(ctx: Context<RotatePq>) -> Result<()> {
         let b = &ctx.accounts.pq_sig_buffer;
         require!(b.filled == b.sig_len, RegistryError::SignatureIncomplete);
         let c = &mut ctx.accounts.commitment;
-        let message = signed_message(&c.owner, c.generation, &b.new_pq_pubkey);
+        let message = signed_message(&c.owner, c.generation, &b.new_pq_pubkey, b.issued_slot, b.expiry_slot);
         let pk = parse_key(&c.pq_pubkey)?;
         let sig = parse_lms_signature(&b.sig, &pk).map_err(|e| {
             msg!("lms parse: {}", e.name());
@@ -145,6 +180,8 @@ pub mod pq_registry {
         })?;
         require!(sig.q >= c.next_q, RegistryError::LeafAlreadyUsed);
         verify_parsed(&pk, &message, &sig).map_err(|_| error!(RegistryError::InvalidSignature))?;
+        let now = Clock::get()?.slot;
+        check_validity_window(b.issued_slot, b.expiry_slot, now)?;
         c.next_q = sig.q.checked_add(1).ok_or(RegistryError::LeafOutOfRange)?;
 
         let new_key = b.new_pq_pubkey;
@@ -170,7 +207,7 @@ pub mod pq_registry {
         c.pq_pubkey = new_key;
         c.next_q = 0;
         c.generation = c.generation.checked_add(1).ok_or(RegistryError::Overflow)?;
-        c.updated_slot = Clock::get()?.slot;
+        c.updated_slot = now;
         Ok(())
     }
 }
@@ -245,6 +282,10 @@ pub struct PqSigBuffer {
     pub nonce: u64,
     /// The key to rotate to.
     pub new_pq_pubkey: [u8; 56],
+    /// First slot of the signed validity window (must not be in the future at `rotate_pq`).
+    pub issued_slot: u64,
+    /// Last slot of the signed validity window; at most `issued_slot + MAX_VALIDITY_SLOTS`.
+    pub expiry_slot: u64,
     /// Exact signature length.
     pub sig_len: u16,
     /// Bytes written so far.
@@ -259,7 +300,7 @@ impl PqSigBuffer {
 
     /// Account size including the discriminator.
     pub const fn space(sig_len: usize) -> usize {
-        8 + 1 + 1 + 32 + 32 + 8 + 56 + 2 + 2 + (4 + sig_len)
+        8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + (4 + sig_len)
     }
 
     /// Copies `chunk` at `filled` and advances it.
@@ -291,7 +332,7 @@ pub struct Commit<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(nonce: u64, new_pq_pubkey: [u8; 56], sig_len: u16)]
+#[instruction(nonce: u64, new_pq_pubkey: [u8; 56], sig_len: u16, issued_slot: u64, expiry_slot: u64)]
 pub struct OpenPqBuffer<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -375,6 +416,12 @@ pub enum RegistryError {
     HistoryFull,
     #[msg("arithmetic overflow")]
     Overflow,
+    #[msg("rotation issued in the future: issued_slot is beyond the current slot")]
+    IssuedInFuture,
+    #[msg("rotation expired: expiry_slot is in the past")]
+    RotationExpired,
+    #[msg("validity window is inverted or longer than MAX_VALIDITY_SLOTS")]
+    InvalidValidityWindow,
 }
 
 #[cfg(test)]
@@ -382,7 +429,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn message_is_domain_owner_generation_le_key() {
+    fn message_is_domain_owner_generation_le_key_window() {
         let owner = Pubkey::new_unique();
         let key = [0x55u8; 56];
         let mut concat = Vec::new();
@@ -391,11 +438,38 @@ mod tests {
         concat.extend_from_slice(owner.as_ref());
         concat.extend_from_slice(&[0x02, 0x01, 0x00, 0x00]); // u32le(0x0102)
         concat.extend_from_slice(&key);
-        assert_eq!(signed_message(&owner, 0x0102, &key), solana_sha256_hasher::hash(&concat).to_bytes());
-        assert_ne!(signed_message(&owner, 0, &key), signed_message(&owner, 1, &key));
-        assert_ne!(signed_message(&owner, 0, &key), signed_message(&Pubkey::new_unique(), 0, &key));
-        assert_ne!(signed_message(&owner, 0, &key), signed_message(&owner, 0, &[0x56u8; 56]));
+        concat.extend_from_slice(&[0x10, 0, 0, 0, 0, 0, 0, 0]); // u64le(16)
+        concat.extend_from_slice(&[0x20, 0, 0, 0, 0, 0, 0, 0]); // u64le(32)
+        assert_eq!(signed_message(&owner, 0x0102, &key, 16, 32), solana_sha256_hasher::hash(&concat).to_bytes());
+        let base = signed_message(&owner, 0, &key, 16, 32);
+        assert_ne!(base, signed_message(&owner, 1, &key, 16, 32));
+        assert_ne!(base, signed_message(&Pubkey::new_unique(), 0, &key, 16, 32));
+        assert_ne!(base, signed_message(&owner, 0, &[0x56u8; 56], 16, 32));
+        assert_ne!(base, signed_message(&owner, 0, &key, 17, 32), "issued_slot binds");
+        assert_ne!(base, signed_message(&owner, 0, &key, 16, 33), "expiry_slot binds");
         assert!(MESSAGE_DOMAIN.ends_with(format!("/v{MESSAGE_VERSION}").as_bytes()));
+    }
+
+    fn code(r: Result<()>) -> u32 {
+        match r.expect_err("expected an error") {
+            anchor_lang::error::Error::AnchorError(a) => a.error_code_number,
+            _ => u32::MAX,
+        }
+    }
+
+    #[test]
+    fn validity_window_rules() {
+        let off = anchor_lang::error::ERROR_CODE_OFFSET;
+        assert_eq!(MAX_VALIDITY_SLOTS, 216_000);
+        let now = 500_000u64;
+        assert!(check_validity_window(now, now, now).is_ok());
+        assert!(check_validity_window(now - 10, now + 10, now).is_ok());
+        assert!(check_validity_window(now, now + MAX_VALIDITY_SLOTS, now).is_ok());
+        assert_eq!(code(check_validity_window(now, now + MAX_VALIDITY_SLOTS + 1, now)), RegistryError::InvalidValidityWindow as u32 + off);
+        assert_eq!(code(check_validity_window(now + 1, now + 2, now)), RegistryError::IssuedInFuture as u32 + off);
+        assert_eq!(code(check_validity_window(now - 2, now - 1, now)), RegistryError::RotationExpired as u32 + off);
+        assert_eq!(code(check_validity_window(0, u64::MAX, 0)), RegistryError::InvalidValidityWindow as u32 + off);
+        assert_eq!(PqSigBuffer::space(0), 8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + 4);
     }
 
     #[test]

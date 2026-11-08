@@ -20,6 +20,7 @@ import { createSolanaRpc, signature as asSignature } from "@solana/kit";
 import { createMint, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, type TransactionInstruction } from "@solana/web3.js";
 import { LMS_SHA256_M32_H10, LmsPrivateKey } from "../../lms/src/index.ts";
+import { decodeTombstone, isTombstone } from "../src/accounts.ts";
 import type { Action } from "../src/action.ts";
 import { keypairV1Signer, sendDirectV1 } from "../src/direct.ts";
 import { buildStagedExecution, type CloseTokenAccount } from "../src/instructions.ts";
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
   console.log("generating H10 keys A and B (tree construction)...");
   const keyA = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H10, lmotsType: 3, seed: Keypair.generate().secretKey.subarray(0, 32), I: Keypair.generate().secretKey.subarray(0, 16) });
   const keyB = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H10, lmotsType: 3, seed: Keypair.generate().secretKey.subarray(0, 32), I: Keypair.generate().secretKey.subarray(0, 16) });
-  const signerA = new VaultSigner({ rpc: connection, key: keyA, payer, commitment: COMMITMENT });
+  const signerA = new VaultSigner({ rpc: connection, key: keyA, payer, journal: "ephemeral", commitment: COMMITMENT });
   const { vault, signature: createSig } = await signerA.createVault();
   console.log(`vault ${vault.toBase58()} created in ${createSig}`);
 
@@ -132,7 +133,7 @@ async function main(): Promise<void> {
   const results: Measured[] = [];
 
   // 1. TransferSol, direct v1.
-  const transfer: Omit<Extract<Action, { kind: "TransferSol" }>, "expirySlot"> = { kind: "TransferSol", to: recipient, lamports: BigInt(0.002 * LAMPORTS_PER_SOL) };
+  const transfer: Omit<Extract<Action, { kind: "TransferSol" }>, "issuedSlot" | "expirySlot"> = { kind: "TransferSol", to: recipient, lamports: BigInt(0.002 * LAMPORTS_PER_SOL) };
   results.push(await measureDirect(signerA, "TransferSol", await signerA.sign(transfer)));
   console.log(row(results.at(-1)!));
 
@@ -152,19 +153,22 @@ async function main(): Promise<void> {
 
   // 4. Rotate to key B, direct v1 (payer pays the 16-byte rent delta).
   const vaultBefore = await connection.getBalance(vault, COMMITMENT);
-  results.push(await measureDirect(signerA, "Rotate", await signerA.sign({ kind: "Rotate", newLmsPubkey: keyB.publicKey })));
+  // Key B is random, not derived from any words, so the foreign-key guard needs the explicit opt-in.
+  results.push(await measureDirect(signerA, "Rotate", await signerA.sign({ kind: "Rotate", newLmsPubkey: keyB.publicKey }, { allowForeignKey: true })));
   console.log(row(results.at(-1)!));
   const vaultAfter = await connection.getBalance(vault, COMMITMENT);
-  const v = await new VaultSigner({ rpc: connection, key: keyB, payer, vault, commitment: COMMITMENT }).fetchVault();
+  const v = await new VaultSigner({ rpc: connection, key: keyB, payer, journal: "ephemeral", vault, commitment: COMMITMENT }).fetchVault();
   console.log(`after Rotate: generation ${v.generation}, spent ${v.spent}, history ${v.usedKeys.length}, vault lamports +${vaultAfter - vaultBefore} (rent for 16 bytes)`);
 
   // 5. Close, direct v1, with the now-empty token account; everything back to the payer.
-  const signerB = new VaultSigner({ rpc: connection, key: keyB, payer, vault, commitment: COMMITMENT });
+  const signerB = new VaultSigner({ rpc: connection, key: keyB, payer, journal: "ephemeral", vault, commitment: COMMITMENT });
   results.push(
     await measureDirect(signerB, "Close", await signerB.sign({ kind: "Close", to: payer.publicKey }), { closeTokenAccounts: [{ account: vaultAta.address }] }),
   );
   console.log(row(results.at(-1)!));
-  if (await connection.getAccountInfo(vault, COMMITMENT)) throw new Error("vault still exists after Close");
+  const after = await connection.getAccountInfo(vault, COMMITMENT);
+  if (!after || !isTombstone(after.data)) throw new Error("vault is not a tombstone after Close");
+  console.log(`after Close: tombstone at ${vault.toBase58()} (${after.data.length} bytes, ${after.lamports} lamports, closed at slot ${decodeTombstone(after.data).closedSlot})`);
 
   console.log("\n| path | action | transactions | bytes on the wire | compute units | fee (lamports) | wall-clock (ms) |");
   console.log("|---|---|---|---|---|---|---|");

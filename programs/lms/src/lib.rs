@@ -25,22 +25,29 @@
 //!
 //! ### LM-OTS typecodes (RFC 8554 Table 1)
 //!
-//! | name                  | typecode | w | p   | ls | signature bytes | accepted |
-//! |-----------------------|----------|---|-----|----|-----------------|----------|
-//! | `LMOTS_SHA256_N32_W1` | 1        | 1 | 265 | 7  | 8516            | no       |
-//! | `LMOTS_SHA256_N32_W2` | 2        | 2 | 133 | 6  | 4292            | no       |
-//! | `LMOTS_SHA256_N32_W4` | 3        | 4 | 67  | 4  | 2180            | **yes**  |
-//! | `LMOTS_SHA256_N32_W8` | 4        | 8 | 34  | 0  | 1124            | no       |
-//! | `LMOTS_SHA256_N24_W1` | 5        | 1 | 200 | 8  | 4828            | no       |
-//! | `LMOTS_SHA256_N24_W2` | 6        | 2 | 101 | 6  | 2452            | no       |
-//! | `LMOTS_SHA256_N24_W4` | 7        | 4 | 51  | 4  | 1252            | **yes**  |
-//! | `LMOTS_SHA256_N24_W8` | 8        | 8 | 26  | 0  | 652             | yes      |
+//! | name                  | typecode | w | p   | ls | signature bytes | `parse` (program) | `parse_any` |
+//! |-----------------------|----------|---|-----|----|-----------------|-------------------|-------------|
+//! | `LMOTS_SHA256_N32_W1` | 1        | 1 | 265 | 7  | 8516            | no                | yes         |
+//! | `LMOTS_SHA256_N32_W2` | 2        | 2 | 133 | 6  | 4292            | no                | yes         |
+//! | `LMOTS_SHA256_N32_W4` | 3        | 4 | 67  | 4  | 2180            | **yes**           | yes         |
+//! | `LMOTS_SHA256_N32_W8` | 4        | 8 | 34  | 0  | 1124            | no                | yes         |
+//! | `LMOTS_SHA256_N24_W1` | 5        | 1 | 200 | 8  | 4828            | no                | `sha256-192`|
+//! | `LMOTS_SHA256_N24_W2` | 6        | 2 | 101 | 6  | 2452            | no                | `sha256-192`|
+//! | `LMOTS_SHA256_N24_W4` | 7        | 4 | 51  | 4  | 1252            | no                | `sha256-192`|
+//! | `LMOTS_SHA256_N24_W8` | 8        | 8 | 26  | 0  | 652             | no                | `sha256-192`|
 //!
 //! The arithmetic (`coef`, checksum, chain lengths) is written for any `w` in
-//! `{1, 2, 4, 8}`; the table above carries all four rows. Only W4 is marked
-//! accepted because its 67 chains of 15 steps are the compute sweet spot on
-//! Solana. Accepting another row means adding it to [`LmotsType::ACCEPTED`] and
-//! raising [`MAX_P`] (the scratch space bound); nothing else changes.
+//! `{1, 2, 4, 8}` and the signer and verifier run all four rows: the RFC 8554
+//! Appendix F vectors (W8 and W4) and the Cisco hash-sigs vectors (W1, W2, W4,
+//! W8) in `kat/` pass through the same code. Which rows a *parser* admits is a
+//! policy chosen by the caller: [`LmsPublicKey::parse`] and
+//! [`LmotsType::from_typecode`] use [`LmotsType::ACCEPTED`] (W4 only), which is
+//! what the vault program calls and therefore what is accepted on chain; W4's
+//! 67 chains of 15 steps are the compute sweet spot on Solana.
+//! [`LmsPublicKey::parse_any`] / [`LmotsType::ALL`] admit every row for tooling
+//! and tests, the RFC 9858 rows only with the `sha256-192` feature (which
+//! `sign` turns on). Changing the on-chain policy means changing
+//! [`LmotsType::ACCEPTED`]; nothing else in the crate depends on it.
 //!
 //! ### LMS typecodes (RFC 8554 Table 2)
 //!
@@ -88,7 +95,7 @@
 //! | `D_LEAF`   | `0x8282` | leaf node of the Merkle tree              |
 //! | `D_INTR`   | `0x8383` | interior node of the Merkle tree          |
 //! | `j = 0xff` | Appendix A private-key derivation, `i < p`     |
-//! | `i = 0xfffd, j = 0xff` | this crate's deterministic randomizer C (signing only; verifiers never see it) |
+//! | `i = 0xfffd, j = 0xff` | deterministic randomizer C (signing only; verifiers never see it; same convention as hash-sigs and RFC 8554 Appendix F test case 2) |
 //!
 //! [RFC 8554]: https://www.rfc-editor.org/rfc/rfc8554
 //! [RFC 9858]: https://www.rfc-editor.org/rfc/rfc9858

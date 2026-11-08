@@ -2,15 +2,20 @@
 //! `lamport-lms` crate. Used by the Anchor tests and handy for manual checks.
 //!
 //! ```text
-//! lms-tool keygen --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 3]
+//! lms-tool keygen --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 1..4]
 //!     prints the 56-byte public key as hex
-//! lms-tool sign   --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 3] --q <n> --msg <hex>
+//! lms-tool sign   --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 1..4] --q <n> --msg <hex>
 //!     prints the LMS signature as hex
 //! lms-tool verify --pubkey <hex56> --msg <hex> --sig <hex>
 //!     prints "ok q=<n>" and exits 0, or the error name and exits 1
-//! lms-tool tree   --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 3]
+//! lms-tool tree   --seed <hex32> --i <hex16> --lms-type <5..8> [--lmots-type 1..4]
 //!     prints every node T[1..2^(h+1)) as hex, one per line (debugging aid)
 //! ```
+//!
+//! `--lmots-type` defaults to 3 (W4, the only set the vault program accepts).
+//! The tool itself takes every Table 1 row (1 = W1, 2 = W2, 3 = W4, 4 = W8)
+//! and `verify` accepts keys of any row, so it can check RFC 8554 Appendix F
+//! and hash-sigs output.
 //!
 //! The tool rebuilds the Merkle tree on every `sign`; for H10 that is about a
 //! quarter of a second in a release build.
@@ -69,7 +74,7 @@ fn private_key(m: &HashMap<String, String>) -> Result<LmsPrivateKey, String> {
     let i = hex_arg::<16>(m, "i")?;
     let lms_type = LmsType::from_typecode(u32_arg(m, "lms-type", None)?)
         .map_err(|e| format!("--lms-type: {e}"))?;
-    let lmots_type = LmotsType::from_typecode(u32_arg(m, "lmots-type", Some(3))?)
+    let lmots_type = LmotsType::from_typecode_in(u32_arg(m, "lmots-type", Some(3))?, LmotsType::ALL)
         .map_err(|e| format!("--lmots-type: {e}"))?;
     Ok(LmsPrivateKey::new(lms_type, lmots_type, i, seed))
 }
@@ -93,7 +98,7 @@ fn run(cmd: &str, m: &HashMap<String, String>) -> Result<ExitCode, String> {
         }
         "verify" => {
             let pk_bytes = hex_vec(m, "pubkey")?;
-            let pk = LmsPublicKey::parse(&pk_bytes).map_err(|e| format!("--pubkey: {e}"))?;
+            let pk = LmsPublicKey::parse_any(&pk_bytes).map_err(|e| format!("--pubkey: {e}"))?;
             let msg = hex_vec(m, "msg")?;
             let sig = hex_vec(m, "sig")?;
             match lms_verify(&pk, &msg, &sig) {

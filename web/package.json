@@ -4,13 +4,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build -c vite.signer.config.ts && cp dist-signer/signer.html dist/signer.html",
+    "build": "vite build && vite build -c vite.signer.config.ts && node csp-signer.mjs dist-signer/signer.html && cp dist-signer/signer.html dist/signer.html",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@lamport-robotics/lms": "file:../sdk/packages/lms",
     "@lamport-robotics/vault": "file:../sdk/packages/vault",
+    "@noble/hashes": "^1.8.0",
+    "@solana-mobile/wallet-standard-mobile": "^0.7.0",
     "@solana/web3.js": "^1.95.8",
     "@wallet-standard/app": "^1.1.0",
     "@wallet-standard/base": "^1.1.0",
@@ -23,5 +25,9 @@
     "typescript": "^5.6.3",
     "vite": "^6.0.11",
     "vite-plugin-singlefile": "^2.1.0"
+  },
+  "overrides": {
+    "uuid": ">=11.1.1",
+    "stream-json": ">=3.6.0"
   }
 }

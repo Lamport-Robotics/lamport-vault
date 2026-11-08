@@ -16,6 +16,7 @@ import {
   currentSlot,
   expectError,
   expectRejects,
+  expiredWindow,
   fund,
   keyHash,
   leafUsed,
@@ -27,7 +28,11 @@ import {
   sigBufferPda,
   vaultMessage,
   vaultPda,
+  window,
 } from "./helpers";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 describe("lamport-vault", () => {
   const provider = makeProvider();
@@ -45,8 +50,13 @@ describe("lamport-vault", () => {
 
   /** `MAX_KEY_HISTORY` of the deployed build (128, or 2 with `--features small-history`). */
   const MAX_KEY_HISTORY = Number(program.idl.constants.find((c) => c.name === "maxKeyHistory")!.value);
+  /** `MAX_VALIDITY_SLOTS`: the longest window the program accepts (216 000, about a day). */
+  const MAX_VALIDITY_SLOTS = Number(program.idl.constants.find((c) => c.name === "maxValiditySlots")!.value);
 
-  const FAR = () => currentSlot(provider).then((s) => s + 5000);
+  /** A window issued now, open for 5 000 slots. */
+  const FAR = () => window(provider);
+  /** What `Close` leaves behind: discriminator, version, vault_id, closed_slot, heir. */
+  const TOMBSTONE_SIZE = 8 + 1 + 32 + 8 + 32;
 
   async function createVault(key: LmsKey): Promise<PublicKey> {
     const [pda] = vaultPda(program.programId, key.pubkey());
@@ -321,10 +331,22 @@ describe("lamport-vault", () => {
   });
 
   it("expired", async () => {
-    const slot = await currentSlot(provider);
-    const action = Action.transferSol(recipient.publicKey, 1000, Math.max(0, slot - 1));
+    const action = Action.transferSol(recipient.publicKey, 1000, await expiredWindow(provider));
     const buf = await stage(vault, keyA, 10, action);
     await expectError(execute(vault, buf, [meta(recipient.publicKey, true)]), "ActionExpired");
+    expect(await isUsed(vault, 10)).to.eq(false);
+  });
+
+  it("issued in the future", async () => {
+    const slot = await currentSlot(provider);
+    const action = Action.transferSol(recipient.publicKey, 1000, { issued: slot + 1000, expiry: slot + 2000 });
+    const buf = await stage(vault, keyA, 10, action);
+    await expectError(execute(vault, buf, [meta(recipient.publicKey, true)]), "IssuedInFuture");
+    expect(await isUsed(vault, 10)).to.eq(false);
+    // a zero-length window ahead of the clock: still not issued (staging takes a few slots, so stay well ahead)
+    const far = Action.transferSol(recipient.publicKey, 1000, { issued: slot + 500, expiry: slot + 500 });
+    const buf2 = await stage(vault, keyA, 10, far);
+    await expectError(execute(vault, buf2, [meta(recipient.publicKey, true)]), "IssuedInFuture");
     expect(await isUsed(vault, 10)).to.eq(false);
   });
 
@@ -448,6 +470,28 @@ describe("lamport-vault", () => {
       await expectError(execute(vault, buf2, [meta(vaultAta, true), meta(destAta, true), meta(mint, false), meta(SystemProgram.programId, false)]), "InvalidTokenProgram");
       await program.methods.closeSigBuffer().accounts({ payer: payer.publicKey, sigBuffer: buf2 }).signers([payer]).rpc();
     });
+
+    it(`executes TransferTokenFrom with ${label}: the named source pays, any other account is WrongSource`, async () => {
+      const wallet = (provider.wallet as anchor.Wallet).payer;
+      const mint = await spl.createMint(connection, wallet, wallet.publicKey, null, 6, undefined, { commitment: "confirmed" }, tokenProgram);
+      const vaultAta = await spl.createAssociatedTokenAccount(connection, wallet, mint, vault, { commitment: "confirmed" }, tokenProgram, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+      // a second vault-owned account of the same mint, not the associated one
+      const aux = await spl.createAccount(connection, wallet, mint, vault, Keypair.generate(), { commitment: "confirmed" }, tokenProgram);
+      const destAta = await spl.createAssociatedTokenAccount(connection, wallet, mint, recipient.publicKey, { commitment: "confirmed" }, tokenProgram);
+      await spl.mintTo(connection, wallet, mint, vaultAta, wallet, 500_000, [], { commitment: "confirmed" }, tokenProgram);
+      await spl.mintTo(connection, wallet, mint, aux, wallet, 500_000, [], { commitment: "confirmed" }, tokenProgram);
+
+      const q = await freeLeaf(vault);
+      const action = Action.transferTokenFrom(aux, mint, destAta, 120_000, await FAR());
+      const buf = await stage(vault, keyA, q, action);
+      // the associated account holds enough, but the signature names `aux`
+      await expectError(execute(vault, buf, [meta(vaultAta, true), meta(destAta, true), meta(mint, false), meta(tokenProgram, false)]), "WrongSource");
+      expect(await isUsed(vault, q)).to.eq(false);
+      await execute(vault, buf, [meta(aux, true), meta(destAta, true), meta(mint, false), meta(tokenProgram, false)]);
+      expect(Number((await spl.getAccount(connection, destAta, "confirmed", tokenProgram)).amount)).to.eq(120_000);
+      expect(Number((await spl.getAccount(connection, aux, "confirmed", tokenProgram)).amount)).to.eq(380_000);
+      expect(Number((await spl.getAccount(connection, vaultAta, "confirmed", tokenProgram)).amount)).to.eq(500_000);
+    });
   }
 
   it("rotate: fresh bitmap, generation + 1, old key in history, buffer payer pays the 16 bytes", async () => {
@@ -569,10 +613,109 @@ describe("lamport-vault", () => {
     const vaultLamports = await connection.getBalance(vaultD, "confirmed");
     const ataLamports = await connection.getBalance(emptyAta, "confirmed");
     await execute(vaultD, bufClose, [meta(heir, true), meta(emptyAta, true), meta(spl.TOKEN_PROGRAM_ID, false)]);
-    expect(await connection.getAccountInfo(vaultD, "confirmed")).to.eq(null);
+    // The vault is a tombstone now (see "close leaves a tombstone" below); it keeps exactly its own rent.
+    const tomb = await connection.getAccountInfo(vaultD, "confirmed");
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(tomb!.lamports).to.eq(tombRent);
     expect(await connection.getAccountInfo(emptyAta, "confirmed")).to.eq(null);
     expect(await connection.getAccountInfo(bufClose, "confirmed")).to.eq(null);
-    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports + ataLamports);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent + ataLamports);
+  });
+
+  it("close leaves a tombstone: the address cannot be recreated, pre-close signatures cannot replay", async () => {
+    const { vault: sdk } = loadSdk();
+    const keyT = LmsKey.random(LMS_H5);
+    const vaultT = await createVault(keyT);
+    await fund(provider, vaultT, 0.2);
+    await spendLeaf(vaultT, keyT, 0);
+
+    // Signed and staged before the close, unexpired: a TransferSol at leaf 1, and a bare signature
+    // for execute_direct at leaf 2.
+    const spend = Action.transferSol(recipient.publicKey, 1000, await FAR());
+    const staged = await stage(vaultT, keyT, 1, spend);
+    const directSig = keyT.sign(2, vaultMessage(program.programId, vaultT, 0, spend));
+    // A non-empty token account still blocks the close.
+    const wallet = (provider.wallet as anchor.Wallet).payer;
+    const mint = await spl.createMint(connection, wallet, wallet.publicKey, null, 0, undefined, { commitment: "confirmed" });
+    const fullAta = await spl.createAssociatedTokenAccount(connection, wallet, mint, vaultT, { commitment: "confirmed" }, spl.TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+    await spl.mintTo(connection, wallet, mint, fullAta, wallet, 5, [], { commitment: "confirmed" });
+    const heir = Keypair.generate().publicKey;
+    const bufClose = await stage(vaultT, keyT, 3, Action.close(heir, await FAR()));
+    await expectError(execute(vaultT, bufClose, [meta(heir, true), meta(fullAta, true), meta(spl.TOKEN_PROGRAM_ID, false)]), "TokenAccountNotEmpty");
+    expect(await isUsed(vaultT, 3)).to.eq(false);
+
+    const vaultLamports = await connection.getBalance(vaultT, "confirmed");
+    const closeSig = await execute(vaultT, bufClose, [meta(heir, true)]);
+    const closedSlot = (await connection.getTransaction(closeSig, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }))!.slot;
+
+    // The tombstone: own discriminator, version 0xfe, the vault id, the slot of the close; it holds
+    // exactly its rent-exempt minimum and the heir got everything else.
+    const tomb = await connection.getAccountInfo(vaultT, "confirmed");
+    expect(tomb!.owner.equals(program.programId)).to.eq(true);
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    const closedSlotLe = Buffer.alloc(8);
+    closedSlotLe.writeBigUInt64LE(BigInt(closedSlot));
+    expect(tomb!.data).to.deep.eq(Buffer.concat([sha256(Buffer.from("account:Tombstone")).subarray(0, 8), Buffer.from([0xfe]), sha256(keyT.pubkey()), closedSlotLe, heir.toBuffer()]));
+    const fetched = await program.account.tombstone.fetch(vaultT);
+    expect(fetched.heir.equals(heir)).to.eq(true);
+    expect(fetched.closedSlot.toNumber()).to.eq(closedSlot);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(tomb!.lamports).to.eq(tombRent);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
+    // The SDK reads it as what it is.
+    const decoded = sdk.decodeVaultOrTombstone(new Uint8Array(tomb!.data));
+    expect(decoded.kind).to.eq("tombstone");
+    expect(decoded.tombstone.version).to.eq(0xfe);
+    expect(Buffer.from(decoded.tombstone.vaultId)).to.deep.eq(sha256(keyT.pubkey()));
+    expect(decoded.tombstone.closedSlot).to.eq(BigInt(closedSlot));
+    expect(decoded.tombstone.heir.equals(heir)).to.eq(true);
+    expect(() => sdk.decodeVault(new Uint8Array(tomb!.data))).to.throw(/vault is closed/);
+    expect(sdk.isTombstone(new Uint8Array(tomb!.data))).to.eq(true);
+
+    // create_vault with the same key: the PDA is taken by the tombstone, and the program says why.
+    await expectError(
+      program.methods
+        .createVault(Array.from(sha256(keyT.pubkey())), Array.from(keyT.pubkey()))
+        .accounts({ payer: provider.wallet.publicKey, vault: vaultT })
+        .rpc(),
+      "VaultClosed",
+    );
+    // The pre-close signatures: unexpired, leaves 1 and 2 never spent, generation 0 as signed. Dead anyway.
+    await expectError(execute(vaultT, staged, [meta(recipient.publicKey, true)]), "VaultClosed");
+    await expectError(
+      program.methods
+        .executeDirect(spend, directSig.subarray(0, 600))
+        .accounts({ vault: vaultT, payer: provider.wallet.publicKey })
+        .remainingAccounts([meta(recipient.publicKey, true)])
+        .preInstructions([COMPUTE_BUDGET_IX])
+        .rpc(),
+      "VaultClosed",
+    );
+    // Nothing can be staged against it either.
+    const nonce = randomNonce();
+    const [buf] = sigBufferPda(program.programId, vaultT, payer.publicKey, nonce);
+    await expectError(
+      program.methods
+        .openSigBuffer(nonce, spend, 2348, Buffer.alloc(0))
+        .accounts({ payer: payer.publicKey, vault: vaultT, sigBuffer: buf })
+        .signers([payer])
+        .rpc(),
+      "VaultClosed",
+    );
+    const after = await connection.getAccountInfo(vaultT, "confirmed");
+    expect(after!.data).to.deep.eq(tomb!.data);
+    expect(after!.lamports).to.eq(tombRent);
+    // The staged buffer is still the payer's to reclaim.
+    await program.methods.closeSigBuffer().accounts({ payer: payer.publicKey, sigBuffer: staged }).signers([payer]).rpc();
+    // The SDK's signer refuses to create a vault for this key again, and reads the closed vault as closed.
+    const { lms } = loadSdk();
+    const sdkKey = lms.LmsPrivateKey.generate({ lmsType: LMS_H5, lmotsType: 3, seed: keyT.seed, I: keyT.i });
+    expect(Buffer.from(sdkKey.publicKey)).to.deep.eq(keyT.pubkey());
+    const signerT = new sdk.VaultSigner({ rpc: connection, key: sdkKey, payer, journal: "ephemeral", commitment: "confirmed" });
+    await expectRejects(signerT.createVault(), /closed: a tombstone holds its address/);
+    await expectRejects(signerT.nextQ(), /vault is closed/);
+    expect(await sdk.vaultAddressState(connection, vaultT, "confirmed")).to.eq("tombstone");
   });
 
   it("history full: after MAX_KEY_HISTORY rotations only spending and Close remain", async function () {
@@ -603,13 +746,167 @@ describe("lamport-vault", () => {
     const bFull = await stage(vaultF, key, 0, Action.rotate(LmsKey.random(LMS_H5).pubkey(), await FAR()));
     await expectError(execute(vaultF, bFull, []), "HistoryFull");
     expect(await spent(vaultF)).to.eq(0);
-    // Funds still move, and the vault can be closed.
-    await spendLeaf(vaultF, key, 0);
-    expect(await spent(vaultF)).to.eq(1);
+    // Funds still move: spend down to exactly one free leaf (q = 31).
+    for (let q = 0; q <= 30; q++) await spendLeaf(vaultF, key, q);
+    expect(await spent(vaultF)).to.eq(31);
+    expect(await isUsed(vaultF, 31)).to.eq(false);
+    // The deadlock the exhaustion rule must not create: with the history full, Rotate on the last
+    // leaf fails HistoryFull and a transfer fails LastLeafReservedForRotate; Close is the exit.
+    const lastRotate = await stage(vaultF, key, 31, Action.rotate(LmsKey.random(LMS_H5).pubkey(), await FAR()));
+    await expectError(execute(vaultF, lastRotate, []), "HistoryFull");
+    const lastSpend = await stage(vaultF, key, 31, Action.transferSol(recipient.publicKey, 1000, await FAR()));
+    await expectError(execute(vaultF, lastSpend, [meta(recipient.publicKey, true)]), "LastLeafReservedForRotate");
+    expect(await spent(vaultF)).to.eq(31);
     const heir = Keypair.generate().publicKey;
-    const bufClose = await stage(vaultF, key, 1, Action.close(heir, await FAR()));
+    const vaultLamports = await connection.getBalance(vaultF, "confirmed");
+    const bufClose = await stage(vaultF, key, 31, Action.close(heir, await FAR()));
     await execute(vaultF, bufClose, [meta(heir, true)]);
-    expect(await connection.getAccountInfo(vaultF, "confirmed")).to.eq(null);
+    const tomb = await connection.getAccountInfo(vaultF, "confirmed");
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
+    expect((await program.account.tombstone.fetch(vaultF)).heir.equals(heir)).to.eq(true);
+  });
+
+  it("last free leaf: transfers refused, Close accepted (h5)", async () => {
+    const keyL = LmsKey.random(LMS_H5);
+    const vaultL = await createVault(keyL);
+    await fund(provider, vaultL, 0.2);
+    for (let q = 1; q <= 31; q++) await spendLeaf(vaultL, keyL, q);
+    expect(await spent(vaultL)).to.eq(31);
+    expect(await isUsed(vaultL, 0)).to.eq(false);
+    const spend = await stage(vaultL, keyL, 0, Action.transferSol(recipient.publicKey, 1000, await FAR()));
+    await expectError(execute(vaultL, spend, [meta(recipient.publicKey, true)]), "LastLeafReservedForRotate");
+    expect(await isUsed(vaultL, 0)).to.eq(false);
+    // Close on the last leaf: everything but the tombstone's rent to the heir, the heir on record.
+    const heir = Keypair.generate().publicKey;
+    const vaultLamports = await connection.getBalance(vaultL, "confirmed");
+    const close = await stage(vaultL, keyL, 0, Action.close(heir, await FAR()));
+    await execute(vaultL, close, [meta(heir, true)]);
+    const tombRent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(vaultLamports - tombRent);
+    const tomb = await program.account.tombstone.fetch(vaultL);
+    expect(tomb.heir.equals(heir)).to.eq(true);
+    expect(Buffer.from(tomb.vaultId)).to.deep.eq(sha256(keyL.pubkey()));
+    await expectError(execute(vaultL, spend, [meta(recipient.publicKey, true)]), "VaultClosed");
+  });
+
+  it("sweep_closed_sol: SOL that lands on a closed vault's address goes to the heir, and nowhere else", async () => {
+    const keyZ = LmsKey.random(LMS_H5);
+    const vaultZ = await createVault(keyZ);
+    await fund(provider, vaultZ, 0.2);
+    const heir = Keypair.generate().publicKey;
+    const other = Keypair.generate().publicKey;
+    const sweepSol = (to: PublicKey) => program.methods.sweepClosedSol().accounts({ tombstone: vaultZ, heir: to }).rpc({ commitment: "confirmed" });
+
+    // A live vault cannot be swept.
+    await expectError(sweepSol(heir), "VaultNotClosed");
+
+    const bufClose = await stage(vaultZ, keyZ, 0, Action.close(heir, await FAR()));
+    await execute(vaultZ, bufClose, [meta(heir, true)]);
+    const rent = await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE, "confirmed");
+    expect(await connection.getBalance(vaultZ, "confirmed")).to.eq(rent);
+    // Nothing above the rent yet: nothing to sweep.
+    await expectError(sweepSol(heir), "InsufficientFunds");
+
+    // A standing payment arrives after the Close.
+    await fund(provider, vaultZ, 0.05);
+    const heirBefore = await connection.getBalance(heir, "confirmed");
+    await expectError(sweepSol(other), "WrongHeir");
+    await sweepSol(heir);
+    expect(await connection.getBalance(vaultZ, "confirmed")).to.eq(rent);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(heirBefore + 0.05 * LAMPORTS_PER_SOL);
+    // The tombstone is intact: the address still cannot be recreated.
+    expect((await program.account.tombstone.fetch(vaultZ)).heir.equals(heir)).to.eq(true);
+  });
+
+  it("sweep_closed: tokens a Close left behind go to the heir, and nowhere else", async () => {
+    const { vault: sdk } = loadSdk();
+    const wallet = (provider.wallet as anchor.Wallet).payer;
+    const keyS = LmsKey.random(LMS_H5);
+    const vaultS = await createVault(keyS);
+    await fund(provider, vaultS, 0.2);
+    // Under Token: the vault's ATA with 700 units and a second, non-associated account with 300;
+    // under Token-2022: the vault's ATA with 11 units. None of them is passed to Close.
+    const mintA = await spl.createMint(connection, wallet, wallet.publicKey, null, 2, undefined, { commitment: "confirmed" });
+    const ataA = await spl.createAssociatedTokenAccount(connection, wallet, mintA, vaultS, { commitment: "confirmed" }, spl.TOKEN_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+    await spl.mintTo(connection, wallet, mintA, ataA, wallet, 700, [], { commitment: "confirmed" });
+    const auxA = await spl.createAccount(connection, wallet, mintA, vaultS, Keypair.generate(), { commitment: "confirmed" });
+    await spl.mintTo(connection, wallet, mintA, auxA, wallet, 300, [], { commitment: "confirmed" });
+    const mint22 = await spl.createMint(connection, wallet, wallet.publicKey, null, 0, undefined, { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID);
+    const ata22 = await spl.createAssociatedTokenAccount(connection, wallet, mint22, vaultS, { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID, spl.ASSOCIATED_TOKEN_PROGRAM_ID, true);
+    await spl.mintTo(connection, wallet, mint22, ata22, wallet, 11, [], { commitment: "confirmed" }, spl.TOKEN_2022_PROGRAM_ID);
+    const mintB = await spl.createMint(connection, wallet, wallet.publicKey, null, 0, undefined, { commitment: "confirmed" });
+
+    const heir = Keypair.generate().publicKey;
+    const other = Keypair.generate().publicKey;
+    const stranger = Keypair.generate();
+    await fund(provider, stranger.publicKey, 0.1);
+    const ataOf = (owner: PublicKey, mint: PublicKey, tokenProgram = spl.TOKEN_PROGRAM_ID) => spl.getAssociatedTokenAddressSync(mint, owner, true, tokenProgram);
+    const sweep = (a: { heir?: PublicKey; heirTokenAccount?: PublicKey; vaultTokenAccount?: PublicKey; mint?: PublicKey; tokenProgram?: PublicKey } = {}) =>
+      program.methods
+        .sweepClosed()
+        .accounts({
+          payer: stranger.publicKey,
+          tombstone: vaultS,
+          heir: a.heir ?? heir,
+          heirTokenAccount: a.heirTokenAccount ?? ataOf(a.heir ?? heir, a.mint ?? mintA, a.tokenProgram),
+          vaultTokenAccount: a.vaultTokenAccount ?? ataA,
+          mint: a.mint ?? mintA,
+          tokenProgram: a.tokenProgram ?? spl.TOKEN_PROGRAM_ID,
+        })
+        .signers([stranger])
+        .rpc({ commitment: "confirmed" });
+
+    // A live vault cannot be swept: only a Close hands its tokens to anyone.
+    await expectError(sweep(), "VaultNotClosed");
+
+    // Close without passing any token account (allowed: they stay owned by the PDA).
+    const bufClose = await stage(vaultS, keyS, 0, Action.close(heir, await FAR()));
+    await execute(vaultS, bufClose, [meta(heir, true)]);
+    expect((await program.account.tombstone.fetch(vaultS)).heir.equals(heir)).to.eq(true);
+    expect((await spl.getAccount(connection, ataA, "confirmed")).owner.equals(vaultS)).to.eq(true);
+
+    // Not to anyone but the heir: another heir, the heir's tokens into another wallet's ATA,
+    // an account the vault does not own, the wrong mint for the account.
+    await expectError(sweep({ heir: other }), "WrongHeir");
+    await expectError(sweep({ heirTokenAccount: ataOf(other, mintA) }), "NotHeirTokenAccount");
+    const otherAta = await spl.createAssociatedTokenAccount(connection, wallet, mintA, other, { commitment: "confirmed" });
+    await expectError(sweep({ vaultTokenAccount: otherAta }), "NotVaultTokenAccount");
+    await expectError(sweep({ mint: mintB }), "WrongMint");
+    await expectError(sweep({ tokenProgram: spl.TOKEN_2022_PROGRAM_ID }), "InvalidTokenProgram");
+    expect(Number((await spl.getAccount(connection, ataA, "confirmed")).amount)).to.eq(700);
+
+    // The sweep, paid by a stranger: the heir's ATA did not exist and is created, the balance moves,
+    // the vault's account is closed and its rent goes to the heir.
+    const heirAtaA = ataOf(heir, mintA);
+    expect(await connection.getAccountInfo(heirAtaA, "confirmed")).to.eq(null);
+    const heirBefore = await connection.getBalance(heir, "confirmed");
+    const ataRent = await connection.getBalance(ataA, "confirmed");
+    const strangerBefore = await connection.getBalance(stranger.publicKey, "confirmed");
+    await sweep();
+    expect(Number((await spl.getAccount(connection, heirAtaA, "confirmed")).amount)).to.eq(700);
+    expect(await connection.getAccountInfo(ataA, "confirmed")).to.eq(null);
+    expect(await connection.getBalance(heir, "confirmed")).to.eq(heirBefore + ataRent);
+    expect(strangerBefore - (await connection.getBalance(stranger.publicKey, "confirmed"))).to.be.greaterThanOrEqual(ataRent); // the ATA's rent (plus the fee, where the cluster charges one)
+    // The second account of the same mint: the ATA exists now (idempotent create), balances add up.
+    await sweep({ vaultTokenAccount: auxA });
+    expect(Number((await spl.getAccount(connection, heirAtaA, "confirmed")).amount)).to.eq(1000);
+    expect(await connection.getAccountInfo(auxA, "confirmed")).to.eq(null);
+    // Token-2022, through the SDK helper: finds the vault's accounts of the mint and sweeps each.
+    const res = await sdk.sweepClosed(connection, stranger, vaultS, mint22, { commitment: "confirmed" });
+    expect(res.heir.equals(heir)).to.eq(true);
+    expect(res.swept.map((s: { account: PublicKey }) => s.account.toBase58())).to.deep.eq([ata22.toBase58()]);
+    expect(res.heirTokenAccount.equals(ataOf(heir, mint22, spl.TOKEN_2022_PROGRAM_ID))).to.eq(true);
+    expect(Number((await spl.getAccount(connection, res.heirTokenAccount, "confirmed", spl.TOKEN_2022_PROGRAM_ID)).amount)).to.eq(11);
+    expect(await connection.getAccountInfo(ata22, "confirmed")).to.eq(null);
+    // Nothing left: the helper finds no account and sends nothing.
+    const again = await sdk.sweepClosed(connection, stranger, vaultS, mintA, { commitment: "confirmed" });
+    expect(again.swept).to.deep.eq([]);
+    // The tombstone is untouched by all of it.
+    const tomb = await connection.getAccountInfo(vaultS, "confirmed");
+    expect(tomb!.data.length).to.eq(TOMBSTONE_SIZE);
+    expect(tomb!.lamports).to.eq(await connection.getMinimumBalanceForRentExemption(TOMBSTONE_SIZE));
   });
 
   // Failure-and-recovery scenarios. Each uses its own H5 vault (32 leaves) so the order of the
@@ -703,7 +1000,7 @@ describe("lamport-vault", () => {
     // no memory of the leaves another signer spent; it must take the bitmap from the vault.
     const { vault: sdk, lms } = loadSdk();
     const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
-    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed" });
+    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed" });
     const live = signer();
     const created = await live.createVault();
     const vaultS = new PublicKey(created.vault.toBase58());
@@ -718,8 +1015,13 @@ describe("lamport-vault", () => {
     const used = (await fetchVault(vaultS)).used;
     expect([0, 1, 2, 3, 4].map((q) => leafUsed(used, q))).to.deep.eq([true, true, true, true, false]);
 
-    // Fresh object, same key, nothing remembered: it reads 0..3 as spent and picks 4.
-    const restored = signer();
+    // Fresh object, same key, nothing remembered: the chain shows spent leaves and there is no record of
+    // them, so it starts stale (a lost record may cover an unsubmitted signature).
+    const blind = signer();
+    expect(await blind.nextQ()).to.eq(4);
+    await expectRejects(blind.execute(transfer), /no journal exists/);
+    // The operator who knows every earlier signature landed adopts the chain's count: 0..3 spent, 4 next.
+    const restored = new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed", adoptChainState: true });
     expect(await restored.nextQ()).to.eq(4);
     await expectRejects(restored.sign(transfer, { q: 2 }), /already spent on chain/);
     const res = await restored.execute(transfer);
@@ -739,7 +1041,7 @@ describe("lamport-vault", () => {
     await fund(provider, vaultP, 0.2);
     const sizeBefore = (await connection.getAccountInfo(vaultP, "confirmed"))!.data.length;
 
-    const expiredRotate = async () => Action.rotate(keyQ.pubkey(), Math.max(0, (await currentSlot(provider)) - 1));
+    const expiredRotate = async () => Action.rotate(keyQ.pubkey(), await expiredWindow(provider));
     const stale = await stage(vaultP, keyP, 0, await expiredRotate());
     await expectError(execute(vaultP, stale, []), "ActionExpired");
     let v = await fetchVault(vaultP);
@@ -766,5 +1068,102 @@ describe("lamport-vault", () => {
     expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyQ.pubkey());
     expect(v.generation).to.eq(1);
     expect(v.spent).to.eq(0);
+  });
+  it("validity window: at most one day; a far expiry on an old signature is unrepresentable", async () => {
+    expect(MAX_VALIDITY_SLOTS).to.eq(216_000);
+    const keyW = LmsKey.random(LMS_H5);
+    const vaultW = await createVault(keyW);
+    await fund(provider, vaultW, 0.2);
+    const slot = await currentSlot(provider);
+
+    // One slot past the cap: refused, the leaf is not burned.
+    const tooLong = Action.transferSol(recipient.publicKey, 1000, { issued: slot, expiry: slot + MAX_VALIDITY_SLOTS + 1 });
+    const b1 = await stage(vaultW, keyW, 0, tooLong);
+    await expectError(execute(vaultW, b1, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+    // Issued at 0 with the largest expiry the field holds: the signer cannot grant itself a far future.
+    const forever = Action.transferSol(recipient.publicKey, 1000, { issued: 0, expiry: new BN("18446744073709551615") });
+    const b2 = await stage(vaultW, keyW, 0, forever);
+    await expectError(execute(vaultW, b2, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+    // Issued a day ago with a far expiry: the window, not the clock, is what fails.
+    const issuedBefore = Math.max(0, slot - 10);
+    const longTail = Action.transferSol(recipient.publicKey, 1000, { issued: issuedBefore, expiry: issuedBefore + MAX_VALIDITY_SLOTS + 1 });
+    const b3 = await stage(vaultW, keyW, 0, longTail);
+    await expectError(execute(vaultW, b3, [meta(recipient.publicKey, true)]), "InvalidValidityWindow");
+    expect(await isUsed(vaultW, 0)).to.eq(false);
+
+    // Exactly one day is accepted (the clock has moved a few slots since `slot`, the window has not).
+    const now = await currentSlot(provider);
+    const day = Action.transferSol(recipient.publicKey, 1000, { issued: now, expiry: now + MAX_VALIDITY_SLOTS });
+    const b4 = await stage(vaultW, keyW, 0, day);
+    await execute(vaultW, b4, [meta(recipient.publicKey, true)]);
+    expect(await isUsed(vaultW, 0)).to.eq(true);
+    // A window that closes in the signing slot is the shortest one; it is accepted when it still holds.
+    const rotateWindow = await window(provider, 0);
+    rotateWindow.expiry = Number(rotateWindow.issued) + 200; // leave time for the three staging transactions
+    const b5 = await stage(vaultW, keyW, 1, Action.transferSol(recipient.publicKey, 1000, rotateWindow));
+    await execute(vaultW, b5, [meta(recipient.publicKey, true)]);
+    expect(await spent(vaultW)).to.eq(2);
+    // The same rules apply to Rotate, with the same error.
+    const keyX = LmsKey.random(LMS_H5);
+    const b6 = await stage(vaultW, keyW, 2, Action.rotate(keyX.pubkey(), { issued: now, expiry: now + MAX_VALIDITY_SLOTS + 1 }));
+    await expectError(execute(vaultW, b6, []), "InvalidValidityWindow");
+    expect((await fetchVault(vaultW)).generation).to.eq(0);
+  });
+
+  it("signer journal: restored from an old backup, only Rotate; after it lands, the new key starts fresh", async () => {
+    // The SDK's VaultSigner with a FileLeafJournal against the real chain. Journals are keyed by the
+    // key fingerprint (sha256 of the public key, hex): one file per key under `dir`.
+    const { vault: sdk, lms } = loadSdk();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lamport-journal-"));
+    const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
+    const keyId = sdk.keyFingerprint(key.publicKey);
+    expect(keyId).to.eq(sha256(Buffer.from(key.publicKey)).toString("hex"));
+    const journalPath = path.join(dir, `${keyId}.json`);
+    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) });
+    const live = signer();
+    expect(live.journal.path).to.eq(journalPath);
+    const created = await live.createVault();
+    const vaultJ = new PublicKey(created.vault.toBase58());
+    const record = (generation: number, spentLeaves: number, reserved: number[], k = keyId, settled: number[] = []) => ({ v: 2, key: k, vault: vaultJ.toBase58(), generation, spent: spentLeaves, reserved, settled });
+    await fund(provider, vaultJ, 0.2);
+    const transfer = { kind: "TransferSol", to: recipient.publicKey, lamports: 1000n };
+    const r0 = await live.execute(transfer);
+    expect(r0.q).to.eq(0);
+    expect(r0.action.issuedSlot).to.be.a("bigint");
+    expect(Number(r0.action.expirySlot - r0.action.issuedSlot)).to.eq(600); // the staged default: four transactions need more than one's worth of slots
+    const backup = fs.readFileSync(journalPath, "utf8");
+    expect(JSON.parse(backup)).to.deep.eq(record(0, 0, [0]));
+    const r1 = await live.execute(transfer);
+    expect(r1.q).to.eq(1);
+    expect(await spent(vaultJ)).to.eq(2);
+
+    // Restore the day-1 backup: the chain shows a spent leaf the journal never reserved.
+    fs.writeFileSync(journalPath, backup);
+    const restored = signer();
+    await expectRejects(restored.execute(transfer), /stale signer state.*Only Rotate/);
+    await expectRejects(restored.sign({ kind: "Close", to: recipient.publicKey }), /stale signer state/);
+    expect(await spent(vaultJ)).to.eq(2);
+    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq(record(0, 0, [0]));
+    // Rotate goes through (staged); once it lands the retired key's record is closed out at
+    // generation 1 (its leaves stay on record) and the new key gets its own journal file.
+    const next = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
+    const rot = await restored.execute({ kind: "Rotate", newLmsPubkey: next.publicKey }, { allowForeignKey: true });
+    expect(rot.q).to.eq(31); // a Rotate takes the highest free leaf, never the one the lost record signed
+    const v = await fetchVault(vaultJ);
+    expect(v.generation).to.eq(1);
+    expect(Buffer.from(v.lmsPubkey)).to.deep.eq(Buffer.from(next.publicKey));
+    expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq(record(1, 0, [0, 31]));
+    // The old key's journal cannot be handed to the new key.
+    expect(() => new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) })).to.throw(/one journal per LMS key/);
+    const fresh = new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(next.publicKey, { dir }) });
+    const r2 = await fresh.execute(transfer);
+    expect(r2.q).to.eq(0);
+    expect(r2.generation).to.eq(1);
+    expect(await spent(vaultJ)).to.eq(1);
+    const nextId = sdk.keyFingerprint(next.publicKey);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, `${nextId}.json`), "utf8"))).to.deep.eq(record(1, 0, [0], nextId));
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -6,12 +6,14 @@
  * `["pqsig", owner, payer, nonce_le_u64]` like the vault's SigBuffer (without a first chunk in `open`):
  *
  *   commit(pq_pubkey)                            owner(s) payer(ws) commitment(w) system_program
- *   open_pq_buffer(nonce, new_pq_pubkey, sig_len) payer(ws) commitment buffer(w) system_program
+ *   open_pq_buffer(nonce, new_pq_pubkey, sig_len, issued_slot, expiry_slot)
+ *                                                payer(ws) commitment buffer(w) system_program
  *   write_pq_sig(offset, chunk)                  payer(s) buffer(w)
  *   close_pq_buffer()                            payer(ws) buffer(w)
  *   rotate_pq()                                  commitment(w) buffer(w) payer(w)
  */
 import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionInstruction, type AccountMeta } from "@solana/web3.js";
+import { checkValidityWindow, type ValidityWindow } from "./action.ts";
 import { ByteWriter } from "./borsh.ts";
 import { chunkSignature, MAX_CHUNK_BYTES, type SigChunk } from "./chunk.ts";
 import { IX } from "./discriminator.ts";
@@ -48,13 +50,23 @@ export interface OpenPqBufferParams {
   nonce: bigint;
   newPqPubkey: Uint8Array;
   sigLen: number;
+  /** The validity window the LMS signature covers (part of the registry message). */
+  window: ValidityWindow;
 }
 
 export function openPqBufferInstruction(p: OpenPqBufferParams): { instruction: TransactionInstruction; buffer: PublicKey; commitment: PublicKey } {
   if (p.newPqPubkey.length !== 56) throw new Error("pq_pubkey must be 56 bytes");
+  checkValidityWindow(p.window);
   const commitment = findCommitmentPda(p.programId, p.owner).address;
   const buffer = findPqSigBufferPda(p.programId, p.owner, p.payer, p.nonce).address;
-  const data = new ByteWriter().raw(IX.openPqBuffer).u64(p.nonce).fixed(p.newPqPubkey, 56).u16(p.sigLen).bytes();
+  const data = new ByteWriter()
+    .raw(IX.openPqBuffer)
+    .u64(p.nonce)
+    .fixed(p.newPqPubkey, 56)
+    .u16(p.sigLen)
+    .u64(p.window.issuedSlot)
+    .u64(p.window.expirySlot)
+    .bytes();
   return {
     buffer,
     commitment,
@@ -109,6 +121,8 @@ export function buildStagedRotatePq(p: {
   payer: PublicKey;
   nonce: bigint;
   newPqPubkey: Uint8Array;
+  /** The window the signature was made over. */
+  window: ValidityWindow;
   signature: Uint8Array;
   chunkSize?: number;
   computeUnits?: number;
@@ -120,6 +134,7 @@ export function buildStagedRotatePq(p: {
     nonce: p.nonce,
     newPqPubkey: p.newPqPubkey,
     sigLen: p.signature.length,
+    window: p.window,
   });
   const chunks = chunkSignature(p.signature, p.chunkSize ?? MAX_CHUNK_BYTES);
   const writes = chunks.map((c) => writePqSigInstruction({ programId: p.programId, buffer, payer: p.payer, offset: c.offset, chunk: c.bytes }));

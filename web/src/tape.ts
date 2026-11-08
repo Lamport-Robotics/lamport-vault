@@ -14,7 +14,9 @@ export function tape(leafCount: number, used: Uint8Array, spent: number, nextFre
     bar.append(seg);
   }
   const cap = document.createElement("div"); cap.className = "cap";
-  cap.innerHTML = `<span>${spent.toLocaleString("en-US")} of ${leafCount.toLocaleString("en-US")} one-time keys spent</span><span>${nextFree === undefined ? "none left" : `next ${nextFree}`}</span>`;
+  const a = document.createElement("span"); a.textContent = `${spent.toLocaleString("en-US")} of ${leafCount.toLocaleString("en-US")} one-time keys spent`;
+  const b = document.createElement("span"); b.textContent = nextFree === undefined ? "none left" : `next ${nextFree}`;
+  cap.append(a, b);
   box.append(bar, cap);
   return box;
 }

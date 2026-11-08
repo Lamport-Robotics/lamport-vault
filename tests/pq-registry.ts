@@ -1,5 +1,5 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
+import { BN, Program } from "@coral-xyz/anchor";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
 import { PqRegistry } from "../target/types/pq_registry";
@@ -8,15 +8,19 @@ import {
   COMPUTE_BUDGET_IX,
   LMS_H5,
   LmsKey,
+  type Window,
   commitmentPda,
   consumedUnits,
+  currentSlot,
   expectError,
+  expiredWindow,
   fund,
   keyHash,
   provider as makeProvider,
   randomNonce,
   registryMessage,
   rotationBufferPda,
+  window,
 } from "./helpers";
 
 describe("pq-registry", () => {
@@ -33,27 +37,33 @@ describe("pq-registry", () => {
 
   /** `MAX_KEY_HISTORY` of the deployed build (32, or 2 with `--features small-history`). */
   const MAX_KEY_HISTORY = Number(program.idl.constants.find((c) => c.name === "maxKeyHistory")!.value);
+  /** `MAX_VALIDITY_SLOTS`: the longest rotation window the program accepts. */
+  const MAX_VALIDITY_SLOTS = Number(program.idl.constants.find((c) => c.name === "maxValiditySlots")!.value);
 
   async function fetchCommitment(c = commitment) {
     const v = await program.account.commitment.fetch(c);
     return { ...v, usedKeys: v.usedKeys.map((k) => Buffer.from(k)) };
   }
 
-  /** Signs the rotation to `newPubkey` with `key` at leaf `q`, bound to the commitment's generation unless given, and stages it. */
+  /**
+   * Signs the rotation to `newPubkey` with `key` at leaf `q`, bound to the commitment's generation
+   * unless given and to a window (default: issued now, 5 000 slots), and stages it.
+   */
   async function stageRotation(
     key: LmsKey,
     q: number,
     newPubkey: Buffer,
-    opts: { sig?: Buffer; generation?: number; owner?: PublicKey; commitment?: PublicKey; message?: Buffer } = {},
+    opts: { sig?: Buffer; generation?: number; owner?: PublicKey; commitment?: PublicKey; message?: Buffer; window?: Window } = {},
   ): Promise<PublicKey> {
     const own = opts.owner ?? owner.publicKey;
     const c = opts.commitment ?? commitment;
     const generation = opts.generation ?? (await fetchCommitment(c)).generation;
-    const s = opts.sig ?? key.sign(q, opts.message ?? registryMessage(program.programId, own, generation, newPubkey));
+    const w = opts.window ?? (await window(provider));
+    const s = opts.sig ?? key.sign(q, opts.message ?? registryMessage(program.programId, own, generation, newPubkey, w));
     const nonce = randomNonce();
     const [buf] = rotationBufferPda(program.programId, own, payer.publicKey, nonce);
     await program.methods
-      .openPqBuffer(nonce, Array.from(newPubkey), s.length)
+      .openPqBuffer(nonce, Array.from(newPubkey), s.length, new BN(w.issued), new BN(w.expiry))
       .accounts({ payer: payer.publicKey, commitment: c, pqSigBuffer: buf })
       .signers([payer])
       .rpc({ commitment: "confirmed" });
@@ -116,8 +126,10 @@ describe("pq-registry", () => {
     const impostor = LmsKey.random(LMS_H5);
     const buf = await stageRotation(impostor, 0, key2.pubkey());
     await expectError(rotate(buf), "InvalidSignature");
+    const w = await window(provider);
     const other = await stageRotation(key1, 0, key2.pubkey(), {
-      message: registryMessage(SystemProgram.programId, owner.publicKey, 0, key2.pubkey()),
+      window: w,
+      message: registryMessage(SystemProgram.programId, owner.publicKey, 0, key2.pubkey(), w),
     });
     await expectError(rotate(other), "InvalidSignature");
     const c = await fetchCommitment();
@@ -203,6 +215,50 @@ describe("pq-registry", () => {
     expect(Buffer.from(after.pqPubkey)).to.deep.eq(kC.pubkey());
     expect(after.generation).to.eq(2);
     expect(after.usedKeys).to.deep.eq([keyHash(kA.pubkey()), keyHash(kB.pubkey())]);
+  });
+
+  it("validity window: expired, issued in the future, too long; one day accepted; the window is signed", async () => {
+    expect(MAX_VALIDITY_SLOTS).to.eq(216_000);
+    const own = Keypair.generate();
+    await fund(provider, own.publicKey, 0.1);
+    const [c] = commitmentPda(program.programId, own.publicKey);
+    const kA = LmsKey.random(LMS_H5);
+    const kB = LmsKey.random(LMS_H5);
+    await program.methods
+      .commit(Array.from(kA.pubkey()))
+      .accounts({ owner: own.publicKey, payer: payer.publicKey, commitment: c })
+      .signers([own, payer])
+      .rpc({ commitment: "confirmed" });
+    const rotateOwn = (buf: PublicKey) =>
+      program.methods
+        .rotatePq()
+        .accounts({ commitment: c, pqSigBuffer: buf, payer: payer.publicKey })
+        .preInstructions([COMPUTE_BUDGET_IX])
+        .rpc({ commitment: "confirmed" });
+    const slot = await currentSlot(provider);
+    const stage = (w: Window) => stageRotation(kA, 0, kB.pubkey(), { owner: own.publicKey, commitment: c, window: w });
+
+    await expectError(rotateOwn(await stage(await expiredWindow(provider))), "RotationExpired");
+    await expectError(rotateOwn(await stage({ issued: slot + 1000, expiry: slot + 2000 })), "IssuedInFuture");
+    await expectError(rotateOwn(await stage({ issued: slot, expiry: slot + MAX_VALIDITY_SLOTS + 1 })), "InvalidValidityWindow");
+    await expectError(rotateOwn(await stage({ issued: 0, expiry: new BN("18446744073709551615") })), "InvalidValidityWindow");
+    // The buffer's window must be the signed one: a buffer opened with another window than the signature covers fails to verify.
+    const signedW = await window(provider);
+    const sig = kA.sign(0, registryMessage(program.programId, own.publicKey, 0, kB.pubkey(), signedW));
+    const swapped = await stageRotation(kA, 0, kB.pubkey(), { owner: own.publicKey, commitment: c, sig, window: { issued: signedW.issued, expiry: Number(signedW.expiry) + 1 } });
+    await expectError(rotateOwn(swapped), "InvalidSignature");
+    let st = await fetchCommitment(c);
+    expect(st.generation).to.eq(0);
+    expect(st.nextQ).to.eq(0);
+    expect(Buffer.from(st.pqPubkey)).to.deep.eq(kA.pubkey());
+
+    // Exactly one day is accepted.
+    const now = await currentSlot(provider);
+    await rotateOwn(await stage({ issued: now, expiry: now + MAX_VALIDITY_SLOTS }));
+    st = await fetchCommitment(c);
+    expect(st.generation).to.eq(1);
+    expect(Buffer.from(st.pqPubkey)).to.deep.eq(kB.pubkey());
+    expect(st.updatedSlot.toNumber()).to.be.greaterThanOrEqual(now);
   });
 
   it("foreign buffer", async () => {

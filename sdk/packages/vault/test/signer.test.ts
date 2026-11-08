@@ -2,45 +2,25 @@
  * VaultSigner / RegistryClient against a mock RPC: no cluster. The mock records every transaction,
  * decodes the instructions and reassembles the staged signature so we can check it verifies.
  */
-import { Connection, Keypair, PublicKey, Transaction, type AccountInfo } from "@solana/web3.js";
-import { deriveKeyMaterial, fromHex, LMS_SHA256_M32_H5, LmsPrivateKey, lmsVerify, mnemonicToMaster, toHex } from "@lamport-robotics/lms";
-import { describe, expect, it } from "vitest";
-import { encodeCommitment, encodeVault, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
+import { Connection, Keypair, Transaction } from "@solana/web3.js";
+import { CLUSTERS, deriveKeyMaterial, fromHex, LMS_SHA256_M32_H5, LmsPrivateKey, lmsVerify, mnemonicToMaster, toHex } from "@lamport-robotics/lms";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { encodeCommitment, encodeVault, usedKeyHash, type VaultAccount, VaultClosedError } from "../src/accounts.ts";
 import { decodeAction } from "../src/action.ts";
 import { IX } from "../src/discriminator.ts";
 import { registryMessage, vaultMessage } from "../src/message.ts";
 import { findCommitmentPda, findVaultPdaForKey, vaultId } from "../src/pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "../src/programIds.ts";
-import { nextKeyMaterial, RegistryClient, type Rpc, VaultSigner } from "../src/signer.ts";
+import { nextFreshKeyIndex, nextKeyMaterial, RegistryClient, resetInFlightLeaves, type Rpc, vaultAddressState, VaultSigner } from "../src/signer.ts";
+import { MockChain } from "./mock.ts";
 
-class MockRpc implements Rpc {
-  accounts = new Map<string, Uint8Array>();
-  sent: Transaction[] = [];
-  slot = 1000;
-  failAt: number | null = null;
+/** The mock cluster of ./mock.ts: records transactions and applies `execute` to the vault account. */
+const MockRpc = MockChain;
 
-  async getAccountInfo(pk: PublicKey): Promise<AccountInfo<Buffer> | null> {
-    const data = this.accounts.get(pk.toBase58());
-    if (!data) return null;
-    return { data: Buffer.from(data), executable: false, lamports: 1, owner: LAMPORT_VAULT_PROGRAM_ID };
-  }
-  async getLatestBlockhash() {
-    return { blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 10 };
-  }
-  async sendRawTransaction(raw: Buffer | Uint8Array | number[]): Promise<string> {
-    const tx = Transaction.from(Buffer.from(raw as Uint8Array));
-    if (!tx.verifySignatures()) throw new Error("bad signature");
-    this.sent.push(tx);
-    return "sig" + this.sent.length;
-  }
-  async confirmTransaction(strategy: { signature: string }) {
-    const idx = Number(strategy.signature.slice(3)) - 1;
-    return { value: { err: this.failAt === idx ? { InstructionError: [0, "Custom"] } : null } };
-  }
-  async getSlot(): Promise<number> {
-    return this.slot;
-  }
-}
+// Every signer here is `journal: "ephemeral"` (the old implicit default, now an explicit opt-in); the one-line warning is expected.
+beforeAll(() => {
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+});
 
 const KAT_SEED = fromHex("784bd340367baa20a90c48bf5623171cba34eb7b4022f11ecca2cc1a893cb506");
 const KAT_I = fromHex("00112233445566778899aabbccddeeff");
@@ -99,7 +79,7 @@ describe("VaultSigner", () => {
     const payer = Keypair.generate();
     const vault = findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, key.publicKey).address;
     rpc.accounts.set(vault.toBase58(), vaultAccount(range(5)));
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     expect(signer.programId.equals(LAMPORT_VAULT_PROGRAM_ID)).toBe(true);
     expect(signer.vault.equals(vault)).toBe(true);
     expect(await signer.nextQ()).toBe(5);
@@ -111,7 +91,8 @@ describe("VaultSigner", () => {
     expect(res.q).toBe(5);
     expect(res.signatures).toEqual(["sig1", "sig2", "sig3", "sig4"]); // open(+chunk), write, write, execute
     expect(seen).toEqual([0, 1, 2, 3]);
-    expect(res.action.expirySlot).toBe(1300n); // slot 1000 + default 300
+    expect(res.action.issuedSlot).toBe(1000n); // the current slot
+    expect(res.action.expirySlot).toBe(1600n); // slot 1000 + the staged floor of 600 (three or four transactions in a row)
     expect(res.generation).toBe(0);
     expect(toHex(res.message)).toBe(toHex(vaultMessage(vault, 0, res.actionBytes)));
     expect(lmsVerify(key.publicKey, res.message, res.lmsSignature)).toBe(true);
@@ -144,9 +125,9 @@ describe("VaultSigner", () => {
   it("firstChunkSize 0 falls back to three write_sig transactions", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer, firstChunkSize: 0 });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", firstChunkSize: 0 });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([]));
-    const res = await signer.execute({ kind: "Close", to: payer.publicKey, expirySlot: 5n });
+    const res = await signer.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 5n });
     expect(res.signatures.length).toBe(5);
     const { bytes } = reassemble(rpc.sent.slice(0, 4), IX.openSigBuffer, IX.writeSig, (d) => 20 + d.readUInt32LE(16) + 2);
     expect(toHex(bytes)).toBe(toHex(res.lmsSignature));
@@ -155,48 +136,48 @@ describe("VaultSigner", () => {
   it("never reuses a leaf within a process even if the chain has not advanced", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([]));
-    const a = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
-    const b = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
+    const a = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    const b = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect(a.q).toBe(0);
     expect(b.q).toBe(1);
     expect(await signer.nextQ()).toBe(2);
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 1 })).rejects.toThrow(/already signed/);
+    await expect(signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 1 })).rejects.toThrow(/already signed/);
   });
 
   it("skips spent leaves in any order (bitmap) and refuses a spent or out-of-range leaf", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([0, 1, 2, 5, 9]));
     expect(await signer.nextQ()).toBe(3);
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 5 })).rejects.toThrow(/already spent/);
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 32 })).rejects.toThrow(/beyond/);
-    const a = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 20 });
+    await expect(signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 5 })).rejects.toThrow(/already spent/);
+    await expect(signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 32 })).rejects.toThrow(/beyond/);
+    const a = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 20 });
     expect(a.q).toBe(20);
-    const b = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
+    const b = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect(b.q).toBe(3);
   });
 
   it("lanes: signer k of n only uses leaves q ≡ k (mod n)", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const even = new VaultSigner({ rpc, key, payer, lane: 0, lanes: 2 });
-    const odd = new VaultSigner({ rpc, key, payer, lane: 1, lanes: 2 });
+    const even = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", lane: 0, lanes: 2 });
+    const odd = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", lane: 1, lanes: 2 });
     rpc.accounts.set(even.vault.toBase58(), vaultAccount([0, 3]));
     expect(await even.nextQ()).toBe(2);
     expect(await odd.nextQ()).toBe(1);
-    const e1 = await even.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
-    const o1 = await odd.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
-    const e2 = await even.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
-    const o2 = await odd.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
+    const e1 = await even.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    const o1 = await odd.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    const e2 = await even.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    const o2 = await odd.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect([e1.q, o1.q, e2.q, o2.q]).toEqual([2, 1, 4, 5]);
-    expect(() => new VaultSigner({ rpc, key, payer, lane: 2, lanes: 2 })).toThrow(RangeError);
+    expect(() => new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral", lane: 2, lanes: 2 })).toThrow(RangeError);
     // a lane with no leaf left
     rpc.accounts.set(even.vault.toBase58(), vaultAccount(range(32).filter((q) => q % 2 === 0)));
     expect(await even.nextQ()).toBeUndefined();
-    await expect(even.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).rejects.toThrow(/no free leaf/);
+    await expect(even.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/no free leaf/);
     expect(await odd.nextQ()).toBe(3); // 1 and 5 are reserved by this odd signer
   });
 
@@ -216,6 +197,8 @@ describe("VaultSigner", () => {
         },
       } as unknown as LmsPrivateKey,
       payer,
+      adoptChainState: true,
+      journal: "ephemeral",
       reserve: async (q) => {
         order.push(`reserve ${q}`);
         if (store.has(q)) throw new Error(`leaf ${q} was reserved before`);
@@ -223,99 +206,139 @@ describe("VaultSigner", () => {
       },
     });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([0, 1, 2, 3]));
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).rejects.toThrow(/reserved before/);
+    await expect(signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/reserved before/);
     expect(order).toEqual(["reserve 4"]);
-    const ok = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 5 });
+    const ok = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 5 });
     expect(ok.q).toBe(5);
     expect(order).toEqual(["reserve 4", "reserve 5", "sign 5"]);
     expect([...store].sort()).toEqual([4, 5]);
   });
 
-  it("enforces the exhaustion rule (last free leaf is Rotate only) and Rotate preconditions", async () => {
+  it("enforces the exhaustion rule (last free leaf is Rotate or Close only) and Rotate preconditions", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount(range(32).filter((q) => q !== 7)));
     expect(await signer.nextQ()).toBe(7);
-    await expect(signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).rejects.toThrow(/Rotate/);
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: key.publicKey, expirySlot: 1n })).rejects.toThrow(/used before/);
+    await expect(signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    await expect(signer.sign({ kind: "TransferToken", mint: payer.publicKey, to: payer.publicKey, amount: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    // Close is the exit when Rotate cannot run (full key history): it may spend the last leaf.
+    const close = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(close.q).toBe(7);
+    expect(lmsVerify(key.publicKey, close.message, close.lmsSignature)).toBe(true);
+    // (signed, not sent: leaf 7 is still free on the mock chain, but this process remembers signing it:
+    // a second signer for the key finds no leaf at all. Only a new process, i.e. a lost record, would.)
+    const sameProcess = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
+    await expect(sameProcess.sign({ kind: "Rotate", newLmsPubkey: key.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/used before/); // preconditions come first
+    await expect(sameProcess.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/no free leaf/);
+    resetInFlightLeaves(rpc);
+    const signer2 = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: key.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/used before/);
     const h10 = LmsPrivateKey.generate({ lmsType: 6, lmotsType: 3, seed: new Uint8Array(32).fill(4), I: KAT_I });
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: h10.publicKey, expirySlot: 1n })).rejects.toThrow(/typecodes/);
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: h10.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/typecodes/);
     const next = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H5, lmotsType: 3, seed: new Uint8Array(32).fill(5), I: KAT_I });
     // `next` is a random key, not derived from any words: the foreign-key guard wants an explicit opt-in.
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, expirySlot: 1n })).rejects.toThrow(/foreign key/);
-    const rot = await signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, expirySlot: 1n }, { allowForeignKey: true });
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key/);
+    const rot = await signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
     expect(rot.q).toBe(7);
     expect(lmsVerify(key.publicKey, rot.message, rot.lmsSignature)).toBe(true);
     // a past key is refused too
-    rpc.accounts.set(signer.vault.toBase58(), vaultAccount([], { generation: 1, usedKeys: [usedKeyHash(next.publicKey)] }));
-    await expect(signer.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, expirySlot: 1n }, { allowForeignKey: true })).rejects.toThrow(/used before/);
+    rpc.accounts.set(signer2.vault.toBase58(), vaultAccount([], { generation: 1, usedKeys: [usedKeyHash(next.publicKey)] }));
+    await expect(signer2.sign({ kind: "Rotate", newLmsPubkey: next.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).rejects.toThrow(/used before/);
+  });
+
+  it("signed but unsent leaves count toward the exhaustion rule", async () => {
+    const rpc = new MockRpc();
+    const payer = Keypair.generate();
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
+    // 30 of 32 spent on chain; the two free leaves are 7 and 9
+    rpc.accounts.set(signer.vault.toBase58(), vaultAccount(range(32).filter((q) => q !== 7 && q !== 9)));
+    const t = await signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n });
+    expect(t.q).toBe(7);
+    // leaf 7 is signed but not sent: the chain still shows two free leaves, the signer must not
+    await expect(signer.sign({ kind: "TransferSol", to: payer.publicKey, lamports: 1n, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/Rotate or Close/);
+    const close = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(close.q).toBe(9);
   });
 
   it("rotate to a key not from the words", async () => {
     // The vault's key is index 0 of a 24-word phrase; the only Rotate target the signer accepts
     // on its own is index 1 of the same words. Anything else needs { allowForeignKey: true }.
     const master = mnemonicToMaster("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art");
-    const key0 = LmsPrivateKey.generate(deriveKeyMaterial(master, 0, LMS_SHA256_M32_H5, 3));
-    const key1 = LmsPrivateKey.generate(deriveKeyMaterial(master, 1, LMS_SHA256_M32_H5, 3));
-    const key2 = LmsPrivateKey.generate(deriveKeyMaterial(master, 2, LMS_SHA256_M32_H5, 3));
+    const scope = { genesisHash: CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    const genesisHash = CLUSTERS.devnet.genesisHash;
+    const key0 = LmsPrivateKey.generate(deriveKeyMaterial(master, 0, scope, LMS_SHA256_M32_H5, 3));
+    const key1 = LmsPrivateKey.generate(deriveKeyMaterial(master, 1, scope, LMS_SHA256_M32_H5, 3));
+    const key2 = LmsPrivateKey.generate(deriveKeyMaterial(master, 2, scope, LMS_SHA256_M32_H5, 3));
     const account = (lmsPubkey: Uint8Array, generation: number, usedKeys: Uint8Array[]) =>
       encodeVault({ version: 2, bump: 0, vaultId: vaultId(key0.publicKey), lmsPubkey, spent: 0, generation, createdSlot: 1n, used: new Uint8Array(4), usedKeys });
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key: key0, payer, master });
+    // master without the cluster is refused: v2 derivation has no default cluster.
+    expect(() => new VaultSigner({ rpc, key: key0, payer, journal: "ephemeral", master })).toThrow(/genesisHash/);
+    const signer = new VaultSigner({ rpc, key: key0, payer, journal: "ephemeral", master, genesisHash });
     rpc.accounts.set(signer.vault.toBase58(), account(key0.publicKey, 0, []));
 
     // nextKeyMaterial: index 0 is the current key, so the next one is index 1.
-    const next = nextKeyMaterial(master, { lmsPubkey: key0.publicKey });
+    const next = nextKeyMaterial(master, { lmsPubkey: key0.publicKey }, scope);
     expect(next.k).toBe(0);
     expect(toHex(LmsPrivateKey.generate(next.material).publicKey)).toBe(toHex(key1.publicKey));
-    expect(() => nextKeyMaterial(master, { lmsPubkey: key.publicKey })).toThrow(/not derived from this master/);
-    expect(() => nextKeyMaterial(master, { lmsPubkey: key2.publicKey }, { maxIndex: 1 })).toThrow(/0\.\.1/);
+    expect(() => nextKeyMaterial(master, { lmsPubkey: key.publicKey }, scope)).toThrow(/not derived from this master/);
+    expect(() => nextKeyMaterial(master, { lmsPubkey: key2.publicKey }, scope, { maxIndex: 1 })).toThrow(/0\.\.1/);
+    // The same words on another cluster, or under another program, are other keys entirely.
+    expect(() => nextKeyMaterial(master, { lmsPubkey: key0.publicKey }, { ...scope, genesisHash: CLUSTERS.mainnet.genesisHash })).toThrow(/not derived/);
+    expect(() => nextKeyMaterial(master, { lmsPubkey: key0.publicKey }, { ...scope, programId: PQ_REGISTRY_PROGRAM_ID })).toThrow(/not derived/);
 
     const foreign = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H5, lmotsType: 3, seed: new Uint8Array(32).fill(7), I: new Uint8Array(16).fill(7) });
     let signed = 0;
     const counting = { ...key0, publicKey: key0.publicKey, sign: (q: number, m: Uint8Array, o?: { C?: Uint8Array }) => (signed++, key0.sign(q, m, o)) } as unknown as LmsPrivateKey;
-    const guarded = new VaultSigner({ rpc, key: counting, payer, master });
+    const guarded = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", master, genesisHash });
     // A random key: refused before anything is signed or sent, by sign() and by execute().
-    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, expirySlot: 1n })).rejects.toThrow(/foreign key.*index 1/);
-    await expect(guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, expirySlot: 1n })).rejects.toThrow(/foreign key/);
+    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key.*index 1/);
+    await expect(guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key/);
     // Skipping an index (0 -> 2) is foreign too: recovery walks k in order and expects k+1.
-    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: key2.publicKey, expirySlot: 1n })).rejects.toThrow(/foreign key/);
+    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: key2.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key/);
     // Right I (index 1) but a wrong root: refused, since the words could never sign for it.
     const wrongRoot = key1.publicKey.slice();
     wrongRoot[55]! ^= 1;
-    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: wrongRoot, expirySlot: 1n })).rejects.toThrow(/root does not/);
+    await expect(guarded.sign({ kind: "Rotate", newLmsPubkey: wrongRoot, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/root does not/);
     expect(signed).toBe(0);
     expect(rpc.sent.length).toBe(0);
     expect(await guarded.nextQ()).toBe(0); // nothing was reserved either
 
     // Index 1: accepted without any flag.
-    const ok = await guarded.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, expirySlot: 1n });
-    expect(ok.q).toBe(0);
+    const ok = await guarded.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(ok.q).toBe(31); // a Rotate takes the highest free leaf
     expect(lmsVerify(key0.publicKey, ok.message, ok.lmsSignature)).toBe(true);
     // The override lets a foreign key through, on sign() and on execute().
-    const forced = await guarded.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, expirySlot: 1n }, { allowForeignKey: true });
-    expect(forced.q).toBe(1);
-    const res = await guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, expirySlot: 1n }, { allowForeignKey: true });
-    expect(res.q).toBe(2);
+    const forced = await guarded.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
+    expect(forced.q).toBe(30);
+    const res = await guarded.execute({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true });
+    expect(res.q).toBe(29);
+    // The mock applied the Rotate: the vault now holds `foreign` at generation 1 and the signer's
+    // journal (key 0's) is closed out at that generation with its three leaves on record. Put the
+    // generation-0 account back for the rest of this test.
+    expect(rpc.vault(signer.vault).generation).toBe(1);
+    expect(await guarded.journal.load()).toEqual({ key: guarded.keyId, vault: signer.vault.toBase58(), generation: 1, spent: 0, reserved: [31, 30, 29], settled: [] });
+    rpc.accounts.set(signer.vault.toBase58(), account(key0.publicKey, 0, []));
     expect(decodeAction(new Uint8Array(rpc.sent[0]!.instructions[0]!.data.subarray(20, 20 + rpc.sent[0]!.instructions[0]!.data.readUInt32LE(16)))).kind).toBe("Rotate");
     expect(signed).toBe(3);
 
     // No master at all: every target is foreign, even the right one, unless overridden.
-    const blind = new VaultSigner({ rpc, key: key0, payer });
-    await expect(blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, expirySlot: 1n })).rejects.toThrow(/no master seed/);
-    expect((await blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, expirySlot: 1n }, { allowForeignKey: true })).q).toBe(0);
+    const blind = new VaultSigner({ rpc, key: key0, payer, journal: "ephemeral" });
+    await expect(blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/no master seed/);
+    // 31, 30 and 29 were signed by `guarded` in this process: another signer for the same key skips them
+    expect((await blind.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n }, { allowForeignKey: true })).q).toBe(28);
     // Other actions are not touched by the guard.
-    expect((await blind.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).q).toBe(1);
+    expect((await blind.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).q).toBe(0)  // the Rotate took the top leaf, so the bottom is still free;
 
     // After the rotation (index 1 is current, generation 1) the next target is index 2.
     rpc.accounts.set(signer.vault.toBase58(), account(key1.publicKey, 1, [usedKeyHash(key0.publicKey)]));
-    expect(nextKeyMaterial(master, { lmsPubkey: key1.publicKey }).k).toBe(1);
-    const gen1 = new VaultSigner({ rpc, key: key1, payer, master, vault: signer.vault });
-    await expect(gen1.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, expirySlot: 1n })).rejects.toThrow(/used before/);
-    await expect(gen1.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, expirySlot: 1n })).rejects.toThrow(/foreign key.*index 2/);
-    const r2 = await gen1.sign({ kind: "Rotate", newLmsPubkey: key2.publicKey, expirySlot: 1n });
+    expect(nextKeyMaterial(master, { lmsPubkey: key1.publicKey }, scope).k).toBe(1);
+    const gen1 = new VaultSigner({ rpc, key: key1, payer, journal: "ephemeral", master, genesisHash, vault: signer.vault });
+    await expect(gen1.sign({ kind: "Rotate", newLmsPubkey: key1.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/used before/);
+    await expect(gen1.sign({ kind: "Rotate", newLmsPubkey: foreign.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/foreign key.*index 2/);
+    const r2 = await gen1.sign({ kind: "Rotate", newLmsPubkey: key2.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect(r2.generation).toBe(1);
     expect(lmsVerify(key1.publicKey, r2.message, r2.lmsSignature)).toBe(true);
   });
@@ -335,29 +358,39 @@ describe("VaultSigner", () => {
     };
     let signed = 0;
     const counting = { ...key, publicKey: key.publicKey, sign: (q: number, m: Uint8Array, o?: { C?: Uint8Array }) => (signed++, key.sign(q, m, o)) } as unknown as LmsPrivateKey;
-    const first = new VaultSigner({ rpc, key: counting, payer, reserve });
+    const first = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", reserve });
     rpc.accounts.set(first.vault.toBase58(), vaultAccount([]));
-    const a = await first.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
+    const a = await first.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect(a.q).toBe(0);
     expect(signed).toBe(1);
     // The same object never asks the hook again for q=0: it refuses up front.
-    await expect(first.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already signed/);
+    await expect(first.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already signed/);
     expect(calls).toEqual([0]);
 
-    const second = new VaultSigner({ rpc, key: counting, payer, reserve });
+    const second = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", reserve });
     expect(await second.nextQ()).toBe(0); // the chain still shows q=0 free
-    await expect(second.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).rejects.toThrow(/already reserved/);
-    await expect(second.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already reserved/);
-    await expect(second.execute({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already reserved/);
+    // In one process every signer for this key shares what was signed: q=0 is never offered again,
+    // and asked for by name it is refused before the hook is even consulted.
+    await expect(second.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already signed/);
+    await expect(second.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 0 })).rejects.toThrow(/already signed/);
     expect(signed).toBe(1); // nothing was signed for q=0 a second time
     expect(rpc.sent.length).toBe(0);
-    expect(calls).toEqual([0, 0, 0, 0]);
+    expect(calls).toEqual([0]);
+    // A separate process (new in-memory state, same store): only the hook stands between it and q=0.
+    resetInFlightLeaves(rpc);
+    const fresh = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", reserve });
+    await expect(fresh.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/already reserved/);
+    expect(signed).toBe(1);
+    expect(calls).toEqual([0, 0]);
     // The next leaf is fine, and once reserved it is rejected on the second try as well.
-    const b = await second.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 1 });
+    const b = await second.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 1 });
     expect(b.q).toBe(1);
     expect(signed).toBe(2);
-    const third = new VaultSigner({ rpc, key: counting, payer, reserve });
-    await expect(third.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n }, { q: 1 })).rejects.toThrow(/already reserved/);
+    const third = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", reserve });
+    await expect(third.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 1 })).rejects.toThrow(/already signed/); // this process remembers
+    resetInFlightLeaves(rpc);
+    const fourth = new VaultSigner({ rpc, key: counting, payer, journal: "ephemeral", reserve });
+    await expect(fourth.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n }, { q: 1 })).rejects.toThrow(/already reserved/); // a new process: the hook does
     expect(signed).toBe(2);
     expect([...store].sort()).toEqual([0, 1]);
   });
@@ -365,9 +398,9 @@ describe("VaultSigner", () => {
   it("binds the message to the vault's generation", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([], { generation: 3 }));
-    const res = await signer.sign({ kind: "Close", to: payer.publicKey, expirySlot: 1n });
+    const res = await signer.sign({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
     expect(res.generation).toBe(3);
     expect(toHex(res.message)).toBe(toHex(vaultMessage(signer.vault, 3, res.actionBytes)));
     expect(toHex(res.message)).not.toBe(toHex(vaultMessage(signer.vault, 2, res.actionBytes)));
@@ -376,7 +409,7 @@ describe("VaultSigner", () => {
   it("refuses to sign for a vault whose key has rotated away, or that does not exist", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     await expect(signer.nextQ()).rejects.toThrow(/does not exist/);
     const other = LmsPrivateKey.generate({ lmsType: LMS_SHA256_M32_H5, lmotsType: 3, seed: new Uint8Array(32).fill(9), I: KAT_I });
     rpc.accounts.set(
@@ -400,20 +433,63 @@ describe("VaultSigner", () => {
     const rpc = new MockRpc();
     rpc.failAt = 1;
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     rpc.accounts.set(signer.vault.toBase58(), vaultAccount([]));
-    await expect(signer.execute({ kind: "Close", to: payer.publicKey, expirySlot: 1n })).rejects.toThrow(/sig2 failed/);
-    expect(rpc.sent.length).toBe(2);
+    await expect(signer.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n })).rejects.toThrow(/sig2 failed/);
+    expect(rpc.sent.length).toBe(3); // open, the failed chunk, then close_sig_buffer to take the rent back
   });
 
-  it("createVault sends one create_vault transaction", async () => {
+  it("createVault sends one create_vault transaction, and refuses an occupied or tombstoned address", async () => {
     const rpc = new MockRpc();
     const payer = Keypair.generate();
-    const signer = new VaultSigner({ rpc, key, payer });
+    const signer = new VaultSigner({ rpc, key, payer, adoptChainState: true, journal: "ephemeral" });
     const { vault, signature } = await signer.createVault();
     expect(signature).toBe("sig1");
     expect(vault.equals(signer.vault)).toBe(true);
     expect(toHex(rpc.sent[0]!.instructions[0]!.data)).toBe(toHex(IX.createVault) + toHex(vaultId(key.publicKey)) + toHex(key.publicKey));
+    // The address holds a vault: refused before anything is sent.
+    rpc.accounts.set(vault.toBase58(), vaultAccount([]));
+    expect(await vaultAddressState(rpc, vault)).toBe("vault");
+    await expect(signer.createVault()).rejects.toThrow(/already exists/);
+    // Close leaves a tombstone: the address is gone for good, the next vault needs the next key.
+    await signer.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    expect(await vaultAddressState(rpc, vault)).toBe("tombstone");
+    await expect(signer.createVault()).rejects.toThrow(/closed: a tombstone holds its address/);
+    await expect(signer.nextQ()).rejects.toThrow(VaultClosedError);
+    await expect(signer.execute({ kind: "TransferSol", to: payer.publicKey, lamports: 1n })).rejects.toThrow(/vault is closed/);
+    expect(rpc.sent.length).toBe(5); // create + the four staged Close transactions, nothing after
+  });
+
+  it("nextFreshKeyIndex skips indices whose vault address holds a vault or a tombstone", async () => {
+    const master = mnemonicToMaster("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art");
+    const scope = { genesisHash: CLUSTERS.devnet.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
+    const rpc = new MockRpc();
+    const payer = Keypair.generate();
+    const keyAt = (k: number) => LmsPrivateKey.generate(deriveKeyMaterial(master, k, scope, LMS_SHA256_M32_H5, 3));
+    const vaultOf = (k: LmsPrivateKey) => findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, k.publicKey).address;
+    // Nothing on chain: index 0 is fresh.
+    const fresh0 = await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5 });
+    expect(fresh0.k).toBe(0);
+    expect(fresh0.skipped).toEqual([]);
+    expect(toHex(fresh0.key.publicKey)).toBe(toHex(keyAt(0).publicKey));
+    expect(fresh0.vault.equals(vaultOf(keyAt(0)))).toBe(true);
+    expect(toHex(LmsPrivateKey.generate(fresh0.material).publicKey)).toBe(toHex(fresh0.key.publicKey));
+    // Index 0's vault was created and closed (tombstone), index 1's is live: index 2 is the next fresh one.
+    const signer0 = new VaultSigner({ rpc, key: keyAt(0), payer, journal: "ephemeral" });
+    rpc.accounts.set(signer0.vault.toBase58(), encodeVault({ version: 2, bump: 0, vaultId: vaultId(keyAt(0).publicKey), lmsPubkey: keyAt(0).publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] }));
+    await signer0.execute({ kind: "Close", to: payer.publicKey, issuedSlot: 0n, expirySlot: 1n });
+    rpc.accounts.set(vaultOf(keyAt(1)).toBase58(), encodeVault({ version: 2, bump: 0, vaultId: vaultId(keyAt(1).publicKey), lmsPubkey: keyAt(1).publicKey, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] }));
+    const fresh2 = await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5 });
+    expect(fresh2.k).toBe(2);
+    expect(fresh2.skipped).toEqual([
+      { k: 0, state: "tombstone" },
+      { k: 1, state: "vault" },
+    ]);
+    expect(fresh2.vault.equals(vaultOf(keyAt(2)))).toBe(true);
+    // `start` skips the probes for indices already known to be used; the cap is respected.
+    expect((await nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, start: 1 })).k).toBe(2);
+    await expect(nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, maxIndex: 1 })).rejects.toThrow(/no free vault address among key indices 0\.\.1/);
+    await expect(nextFreshKeyIndex(master, scope, rpc, { lmsType: LMS_SHA256_M32_H5, start: 5, maxIndex: 4 })).rejects.toThrow(RangeError);
   });
 });
 
@@ -452,13 +528,20 @@ describe("RegistryClient", () => {
     expect(res.q).toBe(4);
     expect(res.generation).toBe(2);
     expect(res.signatures).toEqual(["sig2", "sig3", "sig4", "sig5", "sig6"]);
-    expect(toHex(res.message)).toBe(toHex(registryMessage(owner.publicKey, 2, next.publicKey)));
-    expect(toHex(res.message)).not.toBe(toHex(registryMessage(owner.publicKey, 1, next.publicKey)));
+    // window: issued at the current slot, 300 slots long by default
+    expect(res.issuedSlot).toBe(1000n);
+    expect(res.expirySlot).toBe(1300n);
+    const window = { issuedSlot: res.issuedSlot, expirySlot: res.expirySlot };
+    expect(toHex(res.message)).toBe(toHex(registryMessage(owner.publicKey, 2, next.publicKey, window)));
+    expect(toHex(res.message)).not.toBe(toHex(registryMessage(owner.publicKey, 1, next.publicKey, window)));
+    expect(toHex(res.message)).not.toBe(toHex(registryMessage(owner.publicKey, 2, next.publicKey, { ...window, expirySlot: 1301n })));
     expect(lmsVerify(key.publicKey, res.message, res.lmsSignature)).toBe(true);
     const open = rpc.sent[1]!.instructions[0]!;
     expect(toHex(open.data.subarray(0, 8))).toBe(toHex(IX.openPqBuffer));
-    expect(open.data.length).toBe(8 + 8 + 56 + 2);
+    expect(open.data.length).toBe(8 + 8 + 56 + 2 + 8 + 8);
     expect(toHex(open.data.subarray(16, 72))).toBe(toHex(next.publicKey));
+    expect(open.data.readBigUInt64LE(74)).toBe(1000n);
+    expect(open.data.readBigUInt64LE(82)).toBe(1300n);
     const { bytes, offsets } = reassemble(rpc.sent.slice(2, 5), IX.openPqBuffer, IX.writePqSig, () => 0);
     expect(toHex(bytes)).toBe(toHex(res.lmsSignature));
     expect(offsets).toEqual([0, 900, 1800]);
@@ -468,6 +551,13 @@ describe("RegistryClient", () => {
     await expect(client.rotatePq(owner.publicKey, key, next.publicKey, { q: 3 })).rejects.toThrow(/below/);
     await expect(client.rotatePq(owner.publicKey, key, key.publicKey)).rejects.toThrow(/committed before/);
     await expect(client.rotatePq(owner.publicKey, key, new Uint8Array(56).fill(9))).rejects.toThrow(/committed before/);
+    // an explicit window is used as given; one the chain would refuse is refused before anything is signed or sent
+    const sentBefore = rpc.sent.length;
+    const explicit = await client.rotatePq(owner.publicKey, key, next.publicKey, { nonce: 2n, q: 5, issuedSlot: 900n, expirySlot: 950n });
+    expect([explicit.issuedSlot, explicit.expirySlot]).toEqual([900n, 950n]);
+    await expect(client.rotatePq(owner.publicKey, key, next.publicKey, { q: 6, issuedSlot: 900n, expirySlot: 900n + 216_001n })).rejects.toThrow(/MAX_VALIDITY_SLOTS/);
+    await expect(client.rotatePq(owner.publicKey, key, next.publicKey, { q: 6, issuedSlot: 900n, expirySlot: 899n })).rejects.toThrow(/inverted/);
+    expect(rpc.sent.length).toBe(sentBefore + 5);
   });
 
   it("commit with owner == payer signs once", async () => {

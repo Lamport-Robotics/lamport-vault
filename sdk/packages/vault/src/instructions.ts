@@ -7,6 +7,8 @@
  *   write_sig(offset, chunk)                          payer(s) sig_buffer(w)
  *   close_sig_buffer()                                payer(ws) sig_buffer(w)
  *   execute()                                         vault(w) sig_buffer(w) payer(w) + per-action remaining accounts
+ *   sweep_closed()                                    payer(ws) tombstone heir(w) heir_token_account(w) vault_token_account(w)
+ *                                                     mint token_program system_program associated_token_program
  */
 import {
   ComputeBudgetProgram,
@@ -21,7 +23,7 @@ import { type Action, encodeAction } from "./action.ts";
 import { ByteWriter } from "./borsh.ts";
 import { chunkSignature, MAX_CHUNK_BYTES, type SigChunk } from "./chunk.ts";
 import { IX } from "./discriminator.ts";
-import { associatedTokenAddress, findSigBufferPda, findVaultPda, TOKEN_PROGRAM_ID, vaultId } from "./pda.ts";
+import { ASSOCIATED_TOKEN_PROGRAM_ID, associatedTokenAddress, findSigBufferPda, findVaultPda, TOKEN_PROGRAM_ID, vaultId } from "./pda.ts";
 
 /** Compute budget requested for `execute` (docs/DESIGN.md Section 6). */
 export const EXECUTE_COMPUTE_UNITS = 400_000;
@@ -162,6 +164,10 @@ export interface ExecuteParams {
   tokenProgram?: PublicKey;
   /** For `Close`: empty token accounts owned by the vault to close to `to` in the same instruction. */
   closeTokenAccounts?: CloseTokenAccount[];
+  /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
+  /** For `TransferToken` on a Token-2022 mint with a transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
 }
 
 /** Remaining accounts `execute` needs for an action (docs/DESIGN.md "Actions", program `execute` doc). */
@@ -170,23 +176,29 @@ export function executeRemainingAccounts(
   action: Action,
   tokenProgram = TOKEN_PROGRAM_ID,
   closeTokenAccounts: CloseTokenAccount[] = [],
+  source?: PublicKey,
+  extraAccounts: AccountMeta[] = [],
 ): AccountMeta[] {
   switch (action.kind) {
     case "TransferSol":
       return [w(action.to)];
     case "TransferToken":
-      return [w(associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram)];
+      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
     case "Rotate":
       return [];
     case "Close":
       return [w(action.to), ...closeTokenAccounts.flatMap((t) => [w(t.account), r(t.tokenProgram ?? TOKEN_PROGRAM_ID)])];
+    case "TransferTokenFrom":
+      // the signature names the source; a different `source` here would only fail on chain (WrongSource)
+      if (source && !source.equals(action.from)) throw new Error(`source ${source.toBase58()} differs from the signed action's from ${action.from.toBase58()}`);
+      return [w(action.from), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
   }
 }
 
 export function executeInstruction(p: ExecuteParams): TransactionInstruction {
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts)],
+    keys: [w(p.vault), w(p.sigBuffer), w(p.payer), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source, p.extraAccounts)],
     data: Buffer.from(IX.execute),
   });
 }
@@ -222,6 +234,8 @@ export interface StagedExecutionParams {
   chunkSize?: number;
   tokenProgram?: PublicKey;
   closeTokenAccounts?: CloseTokenAccount[];
+  /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
   computeUnits?: number;
 }
 
@@ -252,8 +266,73 @@ export function buildStagedExecution(p: StagedExecutionParams): StagedExecution 
       action: p.action,
       ...(p.tokenProgram ? { tokenProgram: p.tokenProgram } : {}),
       ...(p.closeTokenAccounts ? { closeTokenAccounts: p.closeTokenAccounts } : {}),
+      ...(p.source ? { source: p.source } : {}),
     },
     p.computeUnits ?? EXECUTE_COMPUTE_UNITS,
   );
   return { sigBuffer, actionBytes, firstChunk, open, writes, chunks, execute, transactions: [[open], ...writes.map((ix) => [ix]), execute] };
+}
+
+export interface SweepClosedParams {
+  programId: PublicKey;
+  /** Pays for the heir's associated token account if it has to be created; any key. */
+  payer: PublicKey;
+  /** The closed vault's address (its `Tombstone`). */
+  vault: PublicKey;
+  /** The tombstone's `heir`; the program refuses any other account (`WrongHeir`). */
+  heir: PublicKey;
+  mint: PublicKey;
+  /** A token account for `mint` still owned by the closed vault. */
+  vaultTokenAccount: PublicKey;
+  /** Token or Token-2022: the program that owns `mint`. Default: Token. */
+  tokenProgram?: PublicKey;
+  /** A Token-2022 transfer hook's program and extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
+}
+
+/**
+ * `sweep_closed`: moves the whole balance of `vaultTokenAccount` to the heir's associated token
+ * account for the mint (created in the same instruction when missing, rent from `payer`) and closes
+ * the vault's token account, its rent to the heir. Permissionless; the destination is fixed by the
+ * tombstone. Fails `VaultNotClosed` on a live vault.
+ */
+export interface SweepClosedSolParams {
+  programId: PublicKey;
+  /** the closed vault's address (the tombstone) */
+  vault: PublicKey;
+  /** must be the tombstone's heir; the program checks */
+  heir: PublicKey;
+}
+
+/**
+ * `sweep_closed_sol`: SOL that landed on a closed vault's address after the `Close` goes to the heir
+ * named by the tombstone. Permissionless; the tombstone keeps its rent. Fails `WrongHeir` on any other
+ * destination and `VaultNotClosed` on a live vault.
+ */
+export function sweepClosedSolInstruction(p: SweepClosedSolParams): TransactionInstruction {
+  return new TransactionInstruction({ programId: p.programId, keys: [w(p.vault), w(p.heir)], data: Buffer.from(IX.sweepClosedSol) });
+}
+
+export function sweepClosedInstruction(p: SweepClosedParams): { instruction: TransactionInstruction; heirTokenAccount: PublicKey } {
+  const tokenProgram = p.tokenProgram ?? TOKEN_PROGRAM_ID;
+  const heirTokenAccount = associatedTokenAddress(p.heir, p.mint, tokenProgram);
+  return {
+    heirTokenAccount,
+    instruction: new TransactionInstruction({
+      programId: p.programId,
+      keys: [
+        ws(p.payer),
+        r(p.vault),
+        w(p.heir),
+        w(heirTokenAccount),
+        w(p.vaultTokenAccount),
+        r(p.mint),
+        r(tokenProgram),
+        r(SystemProgram.programId),
+        r(ASSOCIATED_TOKEN_PROGRAM_ID),
+        ...(p.extraAccounts ?? []),
+      ],
+      data: Buffer.from(IX.sweepClosed),
+    }),
+  };
 }

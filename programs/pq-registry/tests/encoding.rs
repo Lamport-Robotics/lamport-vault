@@ -4,7 +4,7 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
-use pq_registry::{signed_message, Commitment, PqSigBuffer, KEY_HASH_LEN, MESSAGE_VERSION, PQ_SEED, PQ_SIG_SEED};
+use pq_registry::{signed_message, Commitment, PqSigBuffer, KEY_HASH_LEN, MAX_VALIDITY_SLOTS, MESSAGE_VERSION, PQ_SEED, PQ_SIG_SEED};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -49,13 +49,20 @@ fn discriminators_and_instruction_data() {
     let h5: [u8; 56] = hx(&d["inputs"]["h5_pubkey_hex"]).try_into().unwrap();
     assert_eq!(I::Commit { pq_pubkey: h10 }.data(), hx(&d["instruction_data"]["commit_hex"]));
 
-    // open_pq_buffer: disc || u64 nonce || [u8;56] new key || u16 sig_len
+    // open_pq_buffer: disc || u64 nonce || [u8;56] new key || u16 sig_len || u64 issued_slot || u64 expiry_slot
     let open = hx(&d["instruction_data"]["open_pq_buffer_hex"]);
-    let sig_len = u16::from_le_bytes(open[8 + 8 + 56..8 + 8 + 56 + 2].try_into().unwrap());
+    let p = 8 + 8 + 56;
+    let sig_len = u16::from_le_bytes(open[p..p + 2].try_into().unwrap());
+    let issued_slot = u64::from_le_bytes(open[p + 2..p + 10].try_into().unwrap());
+    let expiry_slot = u64::from_le_bytes(open[p + 10..p + 18].try_into().unwrap());
+    assert_eq!(open.len(), p + 18, "trailing bytes in open_pq_buffer vector");
+    assert_eq!(issued_slot, u64s(&d["inputs"]["issued_slot"]));
+    assert_eq!(expiry_slot, u64s(&d["inputs"]["expiry_slot"]));
     assert_eq!(
-        I::OpenPqBuffer { nonce: u64s(&d["inputs"]["nonce"]), new_pq_pubkey: h5, sig_len }.data(),
+        I::OpenPqBuffer { nonce: u64s(&d["inputs"]["nonce"]), new_pq_pubkey: h5, sig_len, issued_slot, expiry_slot }.data(),
         open
     );
+    assert_eq!(d["validity"]["max_validity_slots"].as_u64().unwrap(), MAX_VALIDITY_SLOTS);
 }
 
 #[test]
@@ -81,8 +88,13 @@ fn pdas_and_message() {
     assert_eq!(pk(&inp["program_id"]), pq_registry::ID);
     let new_key: [u8; 56] = hx(&inp["new_pq_pubkey_hex"]).try_into().unwrap();
     let generation = u32s(&inp["generation"]);
-    assert_eq!(signed_message(&pk(&inp["owner"]), generation, &new_key).to_vec(), hx(&m["registry_message_hex"]));
-    assert_ne!(signed_message(&pk(&inp["owner"]), generation + 1, &new_key).to_vec(), hx(&m["registry_message_hex"]));
+    let issued = u64s(&inp["issued_slot"]);
+    let expiry = u64s(&inp["expiry_slot"]);
+    let owner = pk(&inp["owner"]);
+    assert_eq!(signed_message(&owner, generation, &new_key, issued, expiry).to_vec(), hx(&m["registry_message_hex"]));
+    assert_ne!(signed_message(&owner, generation + 1, &new_key, issued, expiry).to_vec(), hx(&m["registry_message_hex"]));
+    assert_ne!(signed_message(&owner, generation, &new_key, issued + 1, expiry).to_vec(), hx(&m["registry_message_hex"]));
+    assert_ne!(signed_message(&owner, generation, &new_key, issued, expiry + 1).to_vec(), hx(&m["registry_message_hex"]));
 }
 
 #[test]
@@ -122,8 +134,13 @@ fn account_layouts() {
 
     let b_hex = hx(&d["accounts"]["pq_sig_buffer_hex"]);
     let h5: [u8; 56] = hx(&d["inputs"]["h5_pubkey_hex"]).try_into().unwrap();
-    // disc(8) version bump owner(32) payer(32) nonce(8) key(56) sig_len(2) filled(2) vec sig
-    let p = 8 + 1 + 1 + 32 + 32 + 8 + 56;
+    // disc(8) version bump owner(32) payer(32) nonce(8) key(56) issued(8) expiry(8) sig_len(2) filled(2) vec sig
+    let w = 8 + 1 + 1 + 32 + 32 + 8 + 56;
+    let p = w + 16;
+    let issued_slot = u64::from_le_bytes(b_hex[w..w + 8].try_into().unwrap());
+    let expiry_slot = u64::from_le_bytes(b_hex[w + 8..w + 16].try_into().unwrap());
+    assert_eq!(issued_slot, u64s(&d["inputs"]["issued_slot"]));
+    assert_eq!(expiry_slot, u64s(&d["inputs"]["expiry_slot"]));
     let sig_len = u16::from_le_bytes(b_hex[p..p + 2].try_into().unwrap());
     let filled = u16::from_le_bytes(b_hex[p + 2..p + 4].try_into().unwrap());
     let b = PqSigBuffer {
@@ -133,6 +150,8 @@ fn account_layouts() {
         payer: Pubkey::new_from_array(b_hex[42..74].try_into().unwrap()),
         nonce: u64::from_le_bytes(b_hex[74..82].try_into().unwrap()),
         new_pq_pubkey: h5,
+        issued_slot,
+        expiry_slot,
         sig_len,
         filled,
         sig: b_hex[p + 8..p + 8 + sig_len as usize].to_vec(),

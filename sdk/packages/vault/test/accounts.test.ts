@@ -8,29 +8,38 @@ import {
   decodeCommitment,
   decodePqSigBuffer,
   decodeSigBuffer,
+  decodeTombstone,
   decodeVault,
+  decodeVaultOrTombstone,
   encodeCommitment,
   encodePqSigBuffer,
   encodeSigBuffer,
+  encodeTombstone,
   encodeVault,
   firstFreeLeaf,
   freeLeaves,
+  freeLeavesExcluding,
   hasUsedKey,
   isLeafUsed,
+  isTombstone,
   KEY_HASH_LEN,
   leafCount,
   pqSigBufferSize,
   SCHEME_LMS_SHA256,
   type SigBufferAccount,
   sigBufferSize,
+  TOMBSTONE_ACCOUNT_SIZE,
+  TOMBSTONE_ACCOUNT_VERSION,
+  type TombstoneAccount,
   usedKeyHash,
   vaultAccountSize,
   type VaultAccount,
+  VaultClosedError,
 } from "../src/accounts.ts";
 import { encodeAction } from "../src/action.ts";
 import { ACCOUNT } from "../src/discriminator.ts";
 import { vaultId } from "../src/pda.ts";
-import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22 } from "./fixtures.ts";
+import { KAT_H10_PUBKEY, KAT_H5_PUBKEY, NONCE, PK_11, PK_22, PK_33 } from "./fixtures.ts";
 
 /** A past key that only appears hashed (same inputs as scripts/write-kat.ts). */
 const PAST_PUBKEY = fromHex("0000000500000003" + "aa".repeat(16) + "bb".repeat(32));
@@ -95,6 +104,13 @@ describe("Vault account", () => {
     expect(hasUsedKey(v, fresh)).toBe(false);
   });
 
+  it("counts free leaves without the ones a signer already used", () => {
+    expect(freeLeavesExcluding(v)).toBe(freeLeaves(v));
+    const below10 = Array.from({ length: 10 }, (_, q) => q).filter((q) => !isLeafUsed(v, q)).length;
+    expect(freeLeavesExcluding(v, (q) => q < 10)).toBe(freeLeaves(v) - below10);
+    expect(freeLeavesExcluding(v, () => true)).toBe(0);
+  });
+
   it("reads the bitmap: isLeafUsed, freeLeaves, firstFreeLeaf with lanes", () => {
     expect(leafCount(v)).toBe(32);
     expect(freeLeaves(v)).toBe(26);
@@ -130,16 +146,58 @@ describe("Vault account", () => {
   });
 });
 
+describe("Tombstone account", () => {
+  const t: TombstoneAccount = { version: TOMBSTONE_ACCOUNT_VERSION, vaultId: vaultId(KAT_H5_PUBKEY), closedSlot: 0x1122334455n, heir: PK_33 };
+
+  it("is disc || version 0xfe || vault_id || closed_slot || heir, 81 bytes, with its own discriminator", () => {
+    const bytes = encodeTombstone(t);
+    expect(bytes.length).toBe(TOMBSTONE_ACCOUNT_SIZE);
+    expect(TOMBSTONE_ACCOUNT_SIZE).toBe(81);
+    expect(toHex(ACCOUNT.tombstone)).toBe(toHex(sha256(new TextEncoder().encode("account:Tombstone")).subarray(0, 8)));
+    expect(toHex(bytes)).toBe(toHex(ACCOUNT.tombstone) + "fe" + toHex(t.vaultId) + "5544332211000000" + "33".repeat(32));
+    expect(decodeTombstone(bytes).heir.equals(PK_33)).toBe(true);
+    expect(decodeTombstone(bytes)).toEqual(t);
+    expect(isTombstone(bytes)).toBe(true);
+    expect(isTombstone(bytes.subarray(0, 7))).toBe(false);
+  });
+
+  it("decodeVaultOrTombstone tells the two apart; decodeVault names a closed vault", () => {
+    const vault = encodeVault({ version: 2, bump: 0, vaultId: vaultId(KAT_H5_PUBKEY), lmsPubkey: KAT_H5_PUBKEY, spent: 0, generation: 0, createdSlot: 1n, used: new Uint8Array(4), usedKeys: [] });
+    expect(isTombstone(vault)).toBe(false);
+    expect(decodeVaultOrTombstone(vault)).toEqual({ kind: "vault", vault: decodeVault(vault) });
+    const tomb = encodeTombstone(t);
+    expect(decodeVaultOrTombstone(tomb)).toEqual({ kind: "tombstone", tombstone: t });
+    let err: unknown;
+    try {
+      decodeVault(tomb);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(VaultClosedError);
+    expect((err as VaultClosedError).tombstone).toEqual(t);
+    expect(String(err)).toMatch(/closed at slot 73588229205/);
+    // the wrong version, trailing bytes, short data and another account are refused
+    const v1 = encodeTombstone(t);
+    v1[8] = 2;
+    expect(() => decodeTombstone(v1)).toThrow(/version 2/);
+    expect(() => decodeTombstone(new Uint8Array([...tomb, 0]))).toThrow(/trailing/);
+    expect(() => decodeTombstone(tomb.subarray(0, 40))).toThrow();
+    expect(() => decodeTombstone(tomb.subarray(0, 49))).toThrow(); // the pre-heir layout is not accepted
+    expect(() => decodeTombstone(vault)).toThrow(/discriminator/);
+    expect(() => decodeVaultOrTombstone(new Uint8Array(81))).toThrow(/discriminator/);
+  });
+});
+
 describe("SigBuffer account", () => {
-  const action = encodeAction({ kind: "TransferSol", to: PK_22, lamports: 10n, expirySlot: 20n });
+  const action = encodeAction({ kind: "TransferSol", to: PK_22, lamports: 10n, issuedSlot: 0n, expirySlot: 20n });
   const sig = new Uint8Array(2348).map((_, i) => (i * 7) & 0xff);
   const b: SigBufferAccount = { version: 1, bump: 250, vault: PK_11, payer: PK_22, nonce: NONCE, action, sigLen: 2348, filled: 900, sig };
 
   it("lays out vec<u8> action, sig_len/filled u16, then vec<u8> sig (SigBuffer::space)", () => {
     const bytes = encodeSigBuffer(b);
     expect(bytes.length).toBe(sigBufferSize(action.length, 2348));
-    expect(sigBufferSize(49, 2348)).toBe(8 + 1 + 1 + 32 + 32 + 8 + (4 + 49) + 2 + 2 + (4 + 2348));
-    const head = toHex(ACCOUNT.sigBuffer) + "01" + "fa" + "11".repeat(32) + "22".repeat(32) + "0807060504030201" + "31000000" + toHex(action) + "2c09" + "8403" + "2c090000";
+    expect(sigBufferSize(57, 2348)).toBe(8 + 1 + 1 + 32 + 32 + 8 + (4 + 57) + 2 + 2 + (4 + 2348));
+    const head = toHex(ACCOUNT.sigBuffer) + "01" + "fa" + "11".repeat(32) + "22".repeat(32) + "0807060504030201" + "39000000" + toHex(action) + "2c09" + "8403" + "2c090000";
     expect(toHex(bytes.subarray(0, head.length / 2))).toBe(head);
     expect(toHex(bytes.subarray(head.length / 2))).toBe(toHex(sig));
     const back = decodeSigBuffer(bytes);
@@ -207,11 +265,17 @@ describe("Commitment account", () => {
 describe("PqSigBuffer account", () => {
   it("round-trips with PqSigBuffer::space", () => {
     const sig = new Uint8Array(2508).fill(3);
-    const bytes = encodePqSigBuffer({ version: 1, bump: 1, owner: PK_11, payer: PK_22, nonce: 9n, newPqPubkey: KAT_H5_PUBKEY, sigLen: 2508, filled: 2508, sig });
+    const bytes = encodePqSigBuffer({ version: 1, bump: 1, owner: PK_11, payer: PK_22, nonce: 9n, newPqPubkey: KAT_H5_PUBKEY, issuedSlot: 0x1234n, expirySlot: 0x5678n, sigLen: 2508, filled: 2508, sig });
     expect(bytes.length).toBe(pqSigBufferSize(2508));
-    expect(pqSigBufferSize(2508)).toBe(8 + 1 + 1 + 32 + 32 + 8 + 56 + 2 + 2 + 4 + 2508);
+    expect(pqSigBufferSize(2508)).toBe(8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + 4 + 2508);
+    // the window sits between the key and sig_len: u64le issued, u64le expiry
+    const w = 8 + 1 + 1 + 32 + 32 + 8 + 56;
+    expect(toHex(bytes.subarray(w, w + 16))).toBe("3412000000000000" + "7856000000000000");
+    expect(toHex(bytes.subarray(w + 16, w + 18))).toBe("cc09");
     const back = decodePqSigBuffer(bytes);
     expect(back.nonce).toBe(9n);
+    expect(back.issuedSlot).toBe(0x1234n);
+    expect(back.expirySlot).toBe(0x5678n);
     expect(toHex(back.newPqPubkey)).toBe(toHex(KAT_H5_PUBKEY));
     expect(toHex(back.sig)).toBe(toHex(sig));
   });

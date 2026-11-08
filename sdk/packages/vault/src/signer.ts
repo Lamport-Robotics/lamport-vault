@@ -1,30 +1,59 @@
 /**
  * High-level clients. `VaultSigner` turns "move funds" into the transactions the chain needs:
- * read the vault (bitmap + generation), pick a free leaf, reserve it, sign, then either send one
- * v1 transaction (`execute_direct`, mode "direct-v1") or open the buffer (carrying the first
- * signature bytes), write the remaining chunks and execute (mode "staged"). Mode "auto" tries
- * direct first and falls back to staged when the wallet or the RPC rejects v1. `RegistryClient`
- * does the same for `rotate_pq` (staged only), plus the one-transaction `commit`.
+ * read the vault (bitmap + generation), compare it with the signer's leaf journal, pick a free
+ * leaf, reserve it durably, sign, then either send one v1 transaction (`execute_direct`, mode
+ * "direct-v1") or open the buffer (carrying the first signature bytes), write the remaining
+ * chunks and execute (mode "staged"). Mode "auto" tries direct first and falls back to staged
+ * when the wallet or the RPC rejects v1. `RegistryClient` does the same for `rotate_pq` (staged
+ * only), plus the one-transaction `commit`.
  *
  * Both talk to the cluster through the small `Rpc` interface below, which `Connection` satisfies,
  * so tests run against a mock.
  */
-import { deriveKeyMaterial, deriveLmsInputs, equalBytes, type LmsKeyMaterial, LmsPrivateKey, parseLmsPublicKey, RECOVERY_MAX_INDEX } from "@lamport-robotics/lms";
+import {
+  deriveKeyMaterial,
+  deriveLmsInputs,
+  type DerivationScope,
+  equalBytes,
+  type LmsKeyMaterial,
+  LMOTS_SHA256_N32_W4,
+  LMS_SHA256_M32_H10,
+  LmsPrivateKey,
+  parseLmsPublicKey,
+  RECOVERY_MAX_INDEX,
+} from "@lamport-robotics/lms";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   type AccountInfo,
   type Commitment,
-  type PublicKey,
+  PublicKey,
   type SendOptions,
   type Signer,
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
-import { type CommitmentAccount, decodeCommitment, decodeVault, firstFreeLeaf, freeLeaves, hasUsedKey, isLeafUsed, leafCount, type VaultAccount } from "./accounts.ts";
-import { type Action, encodeAction } from "./action.ts";
+import {
+  type CommitmentAccount,
+  decodeCommitment,
+  decodeVault,
+  decodeVaultOrTombstone,
+  firstFreeLeaf,
+  lastFreeLeaf,
+  freeLeavesExcluding,
+  hasUsedKey,
+  isLeafUsed,
+  leafCount,
+  spentLeavesInLane,
+  type VaultAccount,
+} from "./accounts.ts";
+import { type Action, checkValidityWindow, encodeAction, type ValidityWindow } from "./action.ts";
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
-import { isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
-import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS } from "./instructions.ts";
+import { DirectV1Error, DirectV1LandedError, isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
+import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS, closeSigBufferInstruction } from "./instructions.ts";
+import { cloneState, JournalVaultMismatchError, keyFingerprint, type LeafJournal, type LeafJournalState, MemoryLeafJournal, type StaleSignerDetail, StaleSignerError } from "./journal.ts";
+export { StaleSignerError, JournalVaultMismatchError, JournalConflictError } from "./journal.ts";
+export { DirectV1LandedError, isUserRejection } from "./direct.ts";
 import { registryMessage, vaultMessage } from "./message.ts";
 import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "./programIds.ts";
@@ -39,6 +68,8 @@ export interface Rpc {
     commitment?: Commitment,
   ): Promise<{ value: { err: unknown } }>;
   getSlot(commitment?: Commitment): Promise<number>;
+  /** Optional (Connection has it): lets `nextFreshKeyIndex` refuse a key that is live in another vault. */
+  getProgramAccounts?(programId: PublicKey, config?: unknown): Promise<ReadonlyArray<{ pubkey: PublicKey; account: AccountInfo<Buffer> }>>;
 }
 
 export interface SendOpts {
@@ -77,9 +108,43 @@ export function randomNonce(): bigint {
   return v;
 }
 
+/** Slots an action stays valid when the request names no expiry: about two minutes. */
+export const DEFAULT_EXPIRY_SLOTS = 300;
+/** Floor for the default window of a staged execution (open, chunks, execute): about four minutes. */
+export const STAGED_MIN_EXPIRY_SLOTS = 600;
+const TOKEN_PROGRAM_IDS = new Set(["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]);
+// leaves signed in this process per key fingerprint, whatever journal each signer used; scoped to the
+// rpc object so two signers on one connection share it (separate test chains do not)
+const inflightByRpc = new WeakMap<object, Map<string, Set<number>>>();
+function inflightFor(rpc: object, keyId: string): Set<number> {
+  let byKey = inflightByRpc.get(rpc);
+  if (!byKey) { byKey = new Map(); inflightByRpc.set(rpc, byKey); }
+  let set = byKey.get(keyId);
+  if (!set) { set = new Set(); byKey.set(keyId, set); }
+  return set;
+}
+/**
+ * UNSAFE, for tests: forgets which leaves were signed in this process over `rpc`, as a fresh process
+ * would. In production the set lives as long as the process; nothing should clear it.
+ */
+export function resetInFlightLeaves(rpc: object): void {
+  inflightByRpc.delete(rpc);
+}
+const keyLocks = new Map<string, Promise<unknown>>();
+async function withKeyLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = keyLocks.get(key) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  const settled = run.then(() => undefined, () => undefined);
+  keyLocks.set(key, settled);
+  try { return await run; } finally { if (keyLocks.get(key) === settled) keyLocks.delete(key); }
+}
+
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-/** An Action whose expiry may be left for the signer to fill from the current slot. */
-export type ActionRequest = DistributiveOmit<Action, "expirySlot"> & { expirySlot?: bigint };
+/**
+ * An Action whose validity window may be left for the signer to fill: `issuedSlot` defaults to
+ * the current slot, `expirySlot` to `issuedSlot + defaultExpirySlots`.
+ */
+export type ActionRequest = DistributiveOmit<Action, "issuedSlot" | "expirySlot"> & Partial<ValidityWindow>;
 
 /**
  * How a signed action reaches the chain.
@@ -102,8 +167,10 @@ export interface VaultSignerOptions {
    * vault; after a `Rotate`, pass the vault address explicitly (it never changes).
    */
   vault?: PublicKey;
-  /** Slots an action stays valid when the request has no expiry. Default 300 (about two minutes). */
+  /** Slots an action stays valid when the request has no expiry. Default {@link DEFAULT_EXPIRY_SLOTS}. */
   defaultExpirySlots?: number;
+  /** "auto" mode: delays (ms) between the polls that check whether an ambiguously rejected direct transaction landed. Default `[0, 1500, 3000]`. */
+  landedPollMs?: number[];
   /**
    * Leaf lane: this signer only uses leaves `q ≡ lane (mod lanes)`. Several devices sharing one
    * key each take a different lane and never collide. Default: lane 0 of 1 (every leaf).
@@ -111,20 +178,46 @@ export interface VaultSignerOptions {
   lane?: number;
   lanes?: number;
   /**
-   * Called with the leaf about to be signed, BEFORE the signature exists. Persist it (file,
-   * secure element, database) and throw if it was ever reserved before: a signer that crashes
-   * between signing and submitting then cannot sign the same leaf twice after restart. The
-   * default remembers leaves in memory for the life of this object only.
+   * Durable record of the leaves this signer signed and of the chain state it last saw
+   * (docs/DESIGN.md "Signer rollback"). It is keyed by `key`'s fingerprint (`sha256(lms_pubkey)`,
+   * {@link keyFingerprint}); a journal built for another key is refused. A leaf is written to it
+   * BEFORE it is signed, so a crash between signing and submitting cannot lead to a second
+   * signature on that leaf after a restart; and before every signature the journal is compared
+   * with the chain: a journal that is behind (restored from an old backup, or another signer
+   * with this key moved on in this lane) makes the signer stale, and a stale signer refuses
+   * everything but Rotate ({@link StaleSignerError}); a journal that names another vault means
+   * the key is being reused and is refused outright ({@link JournalVaultMismatchError}).
+   * Required: a `FileLeafJournal` in Node, a `BrowserLeafJournal` in a browser, or `"ephemeral"`
+   * to say in so many words that this signer keeps its record in memory only (a
+   * `MemoryLeafJournal` that dies with the object; a crash after signing loses the reservation).
+   * An ephemeral signer says so once on `console.warn` when it first signs and in every result's
+   * `ephemeral` flag.
+   */
+  journal: LeafJournal | "ephemeral";
+  /**
+   * Called with the leaf about to be signed, after the journal has recorded it and BEFORE the
+   * signature exists. An extra hook for a secure element or a database; throw to veto. Optional,
+   * the journal already persists reservations.
    */
   reserve?: (q: number) => Promise<void> | void;
+  /**
+   * UNSAFE. With no journal record for the key, adopt the chain's view even when the key has history
+   * on chain (`generation > 0` or any spent leaf). By default such a signer starts stale (Rotate only):
+   * a missing record cannot be told from a lost one, and a lost one may cover a signature that was
+   * never submitted. Set it only for a key that has never signed anywhere else.
+   */
+  adoptChainState?: boolean;
   /**
    * The 64-byte BIP-39 master seed the vault key was derived from (docs/SPEC-DERIVATION.md).
    * With it a `Rotate` is only signed for the next derived key, index k+1 of the current key
    * (see {@link nextKeyMaterial}); any other target is "foreign" and needs `allowForeignKey`.
    * Without it every Rotate target is foreign: a vault rotated to a key the words cannot
-   * reproduce is unrecoverable from the words.
+   * reproduce is unrecoverable from the words. Needs `genesisHash`: derivation v2 binds keys
+   * to the cluster and the program id.
    */
   master?: Uint8Array;
+  /** The cluster's genesis hash (base58 or 32 bytes), see `CLUSTERS` in `@lamport-robotics/lms`. Required with `master`. */
+  genesisHash?: string | Uint8Array;
   /** Signature bytes carried by `open_sig_buffer`. Default "auto": as many as fit. */
   firstChunkSize?: number | "auto";
   chunkSize?: number;
@@ -151,6 +244,8 @@ export interface SignedAction {
   actionBytes: Uint8Array;
   message: Uint8Array;
   lmsSignature: Uint8Array;
+  /** True when the signer was built with `journal: "ephemeral"`: the leaf is recorded in memory only. */
+  ephemeral: boolean;
 }
 
 export interface StagedExecuteResult extends SignedAction {
@@ -174,6 +269,8 @@ export interface DirectExecuteResult extends SignedAction {
 export type ExecuteResult = StagedExecuteResult | DirectExecuteResult;
 
 export interface SignOpts {
+  /** Lower bound for the default validity window; `execute` sets it for staged flows. */
+  minExpirySlots?: number;
   q?: number;
   /** LM-OTS randomizer C; default random. */
   C?: Uint8Array;
@@ -190,26 +287,100 @@ export interface ExecuteOpts extends SendOpts {
   allowForeignKey?: boolean;
   nonce?: bigint;
   closeTokenAccounts?: CloseTokenAccount[];
+  /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
   /** Overrides the signer's default mode for this call. */
   mode?: ExecuteMode;
   /** In "auto" mode: called with the rejection before the staged flow starts. */
   onFallback?: (error: unknown) => void;
 }
 
+/** What `syncJournal` establishes: the journal state to work from and, if behind the chain, why. */
+export interface JournalSync {
+  state: LeafJournalState;
+  stale: StaleSignerDetail | undefined;
+}
+
+// One critical section per journal identity, so two signers over one journal (same object, or two
+// FileLeafJournal objects on one path) never interleave a load / save pair. Inside it the journal's
+// own cross-process lock (a `.lock` file, a Web Lock) keeps other processes and tabs out.
+const journalLocks = new Map<string, Promise<unknown>>();
+const objectLockKeys = new WeakMap<LeafJournal, string>();
+let anonymousJournals = 0;
+
+function lockKeyOf(journal: LeafJournal): string {
+  if (journal.lockKey !== undefined) return journal.lockKey;
+  let key = objectLockKeys.get(journal);
+  if (key === undefined) {
+    key = `object:${++anonymousJournals}`;
+    objectLockKeys.set(journal, key);
+  }
+  return key;
+}
+
+/**
+ * Runs `fn` with exclusive access to `journal`: serialised per process by the journal's identity,
+ * and, when the journal has `acquireLock`, exclusive across processes or tabs too (a journal held
+ * elsewhere rejects with {@link JournalLockedError} or waits, as the implementation chooses).
+ */
+export async function withJournalLock<T>(journal: LeafJournal, fn: () => Promise<T>): Promise<T> {
+  const key = lockKeyOf(journal);
+  const previous = journalLocks.get(key) ?? Promise.resolve();
+  const locked = async (): Promise<T> => {
+    if (!journal.acquireLock) return fn();
+    await journal.acquireLock();
+    try {
+      return await fn();
+    } finally {
+      await journal.releaseLock?.();
+    }
+  };
+  const run = previous.then(locked, locked);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  journalLocks.set(key, settled);
+  try {
+    return await run;
+  } finally {
+    if (journalLocks.get(key) === settled) journalLocks.delete(key);
+  }
+}
+
+/** The RPC shows fewer spent leaves than this journal already saw: a lagging, forked or lying view. */
+export class ChainBehindJournalError extends Error {
+  readonly vault: string;
+  readonly journalSpent: number;
+  readonly chainSpent: number;
+  constructor(vault: string, journalSpent: number, chainSpent: number) {
+    super(`vault ${vault}: the chain reports ${chainSpent} spent leaves in this lane but the journal already saw ${journalSpent}; this RPC view is behind (lagging, forked or dishonest). Nothing was signed. Retry against a finalized, trusted RPC.`);
+    this.name = "ChainBehindJournalError";
+    this.vault = vault; this.journalSpent = journalSpent; this.chainSpent = chainSpent;
+  }
+}
+
 export class VaultSigner {
   readonly rpc: Rpc;
   readonly programId: PublicKey;
   readonly key: LmsPrivateKey;
+  /** `sha256(key.publicKey)` in hex: what the journal is keyed by. */
+  readonly keyId: string;
   readonly payer: Signer;
   readonly vault: PublicKey;
   readonly lane: number;
   readonly lanes: number;
+  readonly journal: LeafJournal;
+  /** True when built with `journal: "ephemeral"`: reservations live in this object only. */
+  readonly ephemeral: boolean;
   private readonly opts: VaultSignerOptions;
-  /** Leaves this object has already signed with; never reused even before the chain confirms. */
-  private readonly reserved = new Set<number>();
+  private readonly scope: DerivationScope | undefined;
+  private staleAcknowledged = false;
+  private warnedEphemeral = false;
 
   constructor(opts: VaultSignerOptions) {
-    this.opts = opts;
+    // the journal decides on what the chain says; a "processed" view can be rolled back, so never below confirmed
+    this.opts = { ...opts, commitment: opts.commitment ?? "confirmed" };
     this.rpc = opts.rpc;
     this.programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
     this.key = opts.key;
@@ -217,21 +388,62 @@ export class VaultSigner {
     this.vault = opts.vault ?? findVaultPdaForKey(this.programId, opts.key.publicKey).address;
     this.lanes = opts.lanes ?? 1;
     this.lane = opts.lane ?? 0;
+    if (!opts.journal) {
+      throw new Error('journal is required: pass a FileLeafJournal (Node) or BrowserLeafJournal (web), or journal: "ephemeral" to keep the leaf record in memory only');
+    }
+    this.keyId = keyFingerprint(opts.key.publicKey);
+    this.ephemeral = opts.journal === "ephemeral";
+    this.journal = opts.journal === "ephemeral" ? new MemoryLeafJournal(this.keyId) : opts.journal;
+    if (this.journal.key !== this.keyId) {
+      throw new Error(`journal is for key ${this.journal.key}, this signer's key is ${this.keyId}: one journal per LMS key`);
+    }
     if (!Number.isInteger(this.lanes) || this.lanes < 1) throw new RangeError(`lanes must be >= 1, got ${this.lanes}`);
     if (!Number.isInteger(this.lane) || this.lane < 0 || this.lane >= this.lanes) throw new RangeError(`lane must be in 0..${this.lanes - 1}, got ${this.lane}`);
+    if (opts.master) {
+      if (!opts.genesisHash) throw new Error("master needs genesisHash: derivation v2 binds every key to a cluster (see CLUSTERS) and a program id");
+      this.scope = { genesisHash: opts.genesisHash, programId: this.programId };
+    }
+    const n = opts.defaultExpirySlots ?? DEFAULT_EXPIRY_SLOTS;
+    if (!Number.isInteger(n) || n < 0) throw new RangeError(`defaultExpirySlots must be a non-negative integer, got ${n}`);
+    checkValidityWindow({ issuedSlot: 0n, expirySlot: BigInt(n) });
   }
 
-  /** `create_vault` for this signer's key. One transaction. */
+  /**
+   * `create_vault` for this signer's key. One transaction. Refused before anything is sent when
+   * the address already holds a vault, or the tombstone of a closed one: a closed vault's address
+   * is never reusable, so the next vault needs the next key (see {@link nextFreshKeyIndex}).
+   */
   async createVault(opts: SendOpts = {}): Promise<{ vault: PublicKey; signature: string }> {
     const { instruction, vault } = createVaultInstruction({ programId: this.programId, payer: this.payer.publicKey, lmsPubkey: this.key.publicKey });
+    const record = await this.journal.load();
+    if (record && record.vault !== vault.toBase58()) throw new JournalVaultMismatchError(this.keyId, record.vault, vault.toBase58());
+    if (this.rpc.getProgramAccounts) {
+      // the key's own address is free after a rotation, but the key may be live at the old one (ours or anyone's)
+      const live = await this.rpc.getProgramAccounts(this.programId, { commitment: this.opts.commitment ?? "confirmed", dataSlice: { offset: 0, length: 0 }, filters: [{ memcmp: { offset: 42, bytes: Buffer.from(this.key.publicKey).toString("base64"), encoding: "base64" } }] });
+      if (live.length) throw new Error(`key is the current key of vault ${live[0]!.pubkey.toBase58()}; a one-time key serves one vault (nextFreshKeyIndex gives the next free one)`);
+    }
+    const occupied = await vaultAddressState(this.rpc, vault, this.opts.commitment);
+    if (occupied === "tombstone") {
+      throw new Error(`vault ${vault.toBase58()} was closed: a tombstone holds its address for good; create the next vault with the next key (nextFreshKeyIndex)`);
+    }
+    if (occupied === "vault") throw new Error(`vault ${vault.toBase58()} already exists`);
     const signature = await sendAndConfirm(this.rpc, [this.payer], [instruction], { ...opts, commitment: opts.commitment ?? this.opts.commitment });
     return { vault, signature };
   }
 
-  async fetchVault(): Promise<VaultAccount> {
+  /**
+   * The vault account as it is on chain, whatever key it currently holds. A closed vault (its
+   * tombstone) throws `VaultClosedError`.
+   */
+  async fetchVaultAccount(): Promise<VaultAccount> {
     const info = await this.rpc.getAccountInfo(this.vault, this.opts.commitment);
     if (!info) throw new Error(`vault ${this.vault.toBase58()} does not exist`);
-    const v = decodeVault(new Uint8Array(info.data));
+    return decodeVault(new Uint8Array(info.data));
+  }
+
+  /** The vault account, checked to hold this signer's key. */
+  async fetchVault(): Promise<VaultAccount> {
+    const v = await this.fetchVaultAccount();
     if (!Buffer.from(v.lmsPubkey).equals(Buffer.from(this.key.publicKey))) {
       throw new Error("the vault's current lms_pubkey is not this key (rotated? recover with the next index)");
     }
@@ -239,31 +451,131 @@ export class VaultSigner {
   }
 
   /**
+   * Compares the journal with the chain (DESIGN.md "Signer rollback"). A journal that was never
+   * written is initialised from the chain. A journal that names another vault means this key is
+   * being pointed at a second vault: refused ({@link JournalVaultMismatchError}). Otherwise the
+   * journal is behind the chain, "stale", when the chain is at a later key generation, or when
+   * this lane has more spent leaves than the journal's `spent` plus its own `reserved` leaves
+   * that are now spent can explain: a signer state this journal never saw signed and executed
+   * them. A stale journal is returned untouched (so the evidence survives); a fresh one is
+   * re-synced: `spent` set to the lane's count and reserved leaves that are spent on chain
+   * dropped (the bitmap guards them for good). Called under the journal lock.
+   */
+  async syncJournal(vault: VaultAccount): Promise<JournalSync> {
+    const spentInLane = spentLeavesInLane(vault, this.lane, this.lanes);
+    const vaultAddress = this.vault.toBase58();
+    const loaded = await this.journal.load();
+    const cluster = this.clusterId;
+    if (!loaded) {
+      const state: LeafJournalState = { key: this.keyId, vault: vaultAddress, generation: vault.generation, spent: spentInLane, reserved: [], settled: [], ...(cluster ? { cluster } : {}) };
+      // No record, but this key has signed before (the bitmap is the current key's; a rotation resets
+      // it): a lost record or a second signer until proven otherwise, and the chain cannot tell which.
+      // Start stale: only a Rotate on the top leaf, unless the operator takes the risk in so many words.
+      const history = vault.spent > 0;
+      if (history && !this.staleAcknowledged && !this.opts.adoptChainState) {
+        const unaccounted: number[] = [];
+        for (let q = this.lane; q < leafCount(vault); q += this.lanes) if (isLeafUsed(vault, q)) unaccounted.push(q);
+        const blank = { ...state, spent: 0 };
+        return { state: blank, stale: { vault: vaultAddress, lane: this.lane, lanes: this.lanes, chain: { generation: vault.generation, spentInLane }, journal: cloneState(blank), unaccounted, missingRecord: true } };
+      }
+      this.staleAcknowledged = false;
+      await this.journal.save(state);
+      return { state, stale: undefined };
+    }
+    if (loaded.vault !== vaultAddress) throw new JournalVaultMismatchError(this.keyId, loaded.vault, vaultAddress);
+    if (cluster && loaded.cluster && loaded.cluster !== cluster) throw new Error(`journal for key ${this.keyId} was written on cluster ${loaded.cluster}, this signer runs on ${cluster}: a key serves one cluster; refusing`);
+    const state = cloneState(loaded);
+    if (cluster && !state.cluster) state.cluster = cluster;
+    const reservedSpent = state.reserved.filter((q) => q % this.lanes === this.lane && isLeafUsed(vault, q));
+    // The chain can only move forward within a generation. Fewer spent leaves than the journal last saw
+    // means this RPC is lagging, forked or lying: nothing may be signed on that view, not even a Rotate.
+    if (state.generation === vault.generation && spentInLane < state.spent) {
+      throw new ChainBehindJournalError(this.vault.toBase58(), state.spent, spentInLane);
+    }
+    const behind = state.generation !== vault.generation || spentInLane > state.spent + reservedSpent.length;
+    if (behind && !this.staleAcknowledged) {
+      const reserved = new Set(state.reserved);
+      const unaccounted: number[] = [];
+      if (state.generation === vault.generation) {
+        // Every spent leaf of the lane beyond the first `spent` ones that this journal did not reserve.
+        let seen = 0;
+        for (let q = this.lane; q < leafCount(vault); q += this.lanes) {
+          if (!isLeafUsed(vault, q)) continue;
+          seen++;
+          if (seen > state.spent && !reserved.has(q)) unaccounted.push(q);
+        }
+      }
+      return {
+        state,
+        stale: {
+          vault: this.vault.toBase58(),
+          lane: this.lane,
+          lanes: this.lanes,
+          chain: { generation: vault.generation, spentInLane },
+          journal: cloneState(loaded),
+          unaccounted,
+        },
+      };
+    }
+    // Fresh (or the operator overrode a stale journal): adopt the chain's view of the count, but keep
+    // every leaf this signer ever reserved on record. A leaf that one RPC once showed as spent is not
+    // free again when another RPC shows it clear; it was signed, and that is the fact that matters.
+    this.staleAcknowledged = false;
+    state.generation = vault.generation;
+    state.spent = spentInLane;
+    const landed = state.reserved.filter((q) => isLeafUsed(vault, q));
+    state.reserved = state.reserved.filter((q) => !isLeafUsed(vault, q));
+    state.settled = [...new Set([...(state.settled ?? []), ...landed])];
+    await this.journal.save(state);
+    return { state, stale: undefined };
+  }
+
+  /**
+   * UNSAFE. Makes the next sync adopt the chain's state even though the journal is behind it.
+   * Only call it when you are certain that no signature this signer made after the journal's
+   * last save is still unsubmitted (every one of them is on chain, or expired): otherwise the
+   * signer may sign a leaf a second time, and two LM-OTS signatures by one leaf let anyone forge
+   * a third. The safe way out of a stale state is a `Rotate`.
+   */
+  acknowledgeStale(): void {
+    this.staleAcknowledged = true;
+  }
+
+  /**
    * The leaf this signer will use next: the smallest free leaf of its lane that is neither spent
-   * on chain nor reserved here. `undefined` once the lane is exhausted.
+   * on chain nor reserved in the journal. `undefined` once the lane is exhausted. Does not
+   * change the journal.
    */
   async nextQ(): Promise<number | undefined> {
     const v = await this.fetchVault();
-    return firstFreeLeaf(v, this.lane, this.lanes, (q) => this.reserved.has(q));
+    const reserved = new Set((await this.journal.load())?.reserved ?? []);
+    return firstFreeLeaf(v, this.lane, this.lanes, (q) => reserved.has(q));
   }
 
   /**
    * Sign `request` with leaf `q` (default: the lane's next free leaf) and bind it to this vault
-   * and its current key generation (read from the account). The leaf is passed to `reserve`
-   * before anything is signed. Pure otherwise: nothing is sent. The returned signature verifies
-   * under `key.publicKey` over `message`.
+   * and its current key generation (read from the account). The leaf is written to the journal
+   * (and passed to `reserve`) before anything is signed. Pure otherwise: nothing is sent. The
+   * returned signature verifies under `key.publicKey` over `message`. Throws
+   * {@link StaleSignerError} for anything but a Rotate when the journal is behind the chain.
    */
   async sign(request: ActionRequest, opts: SignOpts = {}): Promise<SignedAction> {
+    // two signers for one key in one process (different journals, or one ephemeral) still never
+    // interleave, and never pick a leaf the other one signed: the lock and the in-flight set are per key
+    return withKeyLock(this.keyId, () => withJournalLock(this.journal, () => this.signLocked(request, opts)));
+  }
+
+  /** The genesis hash this signer was told about, base58, or undefined. */
+  private get clusterId(): string | undefined {
+    const g = this.scope?.genesisHash;
+    if (!g) return undefined;
+    if (typeof g === "string") return g;
+    return new PublicKey(g instanceof Uint8Array ? g : g.toBytes()).toBase58();
+  }
+
+  private async signLocked(request: ActionRequest, opts: SignOpts): Promise<SignedAction> {
     const vault = await this.fetchVault();
-    const total = leafCount(vault);
-    const q = opts.q ?? firstFreeLeaf(vault, this.lane, this.lanes, (x) => this.reserved.has(x));
-    if (q === undefined) throw new Error(`no free leaf left in lane ${this.lane}/${this.lanes}; rotate to a fresh key`);
-    if (!Number.isInteger(q) || q < 0 || q >= total) throw new Error(`q=${q} is beyond the last leaf of a ${total}-leaf key`);
-    if (isLeafUsed(vault, q)) throw new Error(`q=${q} is already spent on chain`);
-    if (this.reserved.has(q)) throw new Error(`q=${q} was already signed by this signer`);
-    if (freeLeaves(vault) <= 1 && request.kind !== "Rotate") {
-      throw new Error("the last free leaf may only be spent on Rotate (exhaustion rule); rotate to a fresh key first");
-    }
+    const { state, stale } = await this.syncJournal(vault);
     if (request.kind === "Rotate") {
       if (hasUsedKey(vault, request.newLmsPubkey)) throw new Error("Rotate to a key this vault has used before (the chain would refuse it with KeyReused)");
       for (let i = 0; i < 8; i++) {
@@ -271,28 +583,57 @@ export class VaultSigner {
       }
       if (!opts.allowForeignKey) await this.checkRotateTarget(vault, request.newLmsPubkey);
     }
-    const action = await this.withExpiry(request);
+    const inflight = inflightFor(this.rpc, this.keyId);
+    const reserved = new Set([...state.reserved, ...(state.settled ?? []), ...inflight]); // never a leaf this signer, or another one for this key in this process, ever signed
+    const total = leafCount(vault);
+    // A Rotate retires the whole key, so it takes the highest free leaf of the lane: the smallest one is
+    // exactly the leaf a lost or restored record most likely signed last, and two signatures on one
+    // leaf are a forgery kit. Everything else keeps filling from the bottom.
+    const pick = request.kind === "Rotate" ? lastFreeLeaf : firstFreeLeaf;
+    const q = opts.q ?? pick(vault, this.lane, this.lanes, (x) => reserved.has(x));
+    if (q === undefined) throw new Error(`no free leaf left in lane ${this.lane}/${this.lanes}; rotate to a fresh key`);
+    if (opts.q !== undefined && this.lanes > 1 && q % this.lanes !== this.lane) throw new RangeError(`q=${q} is not in lane ${this.lane}/${this.lanes}`);
+    if (!Number.isInteger(q) || q < 0 || q >= total) throw new Error(`q=${q} is beyond the last leaf of a ${total}-leaf key`);
+    if (isLeafUsed(vault, q)) throw new Error(`q=${q} is already spent on chain`);
+    if (reserved.has(q)) throw new Error(`q=${q} was already signed for this key (journal, or another signer in this process)`);
+    if (stale && request.kind !== "Rotate") throw new StaleSignerError(stale);
+    // leaves this signer already signed with count as gone even before they land
+    if (freeLeavesExcluding(vault, (x) => reserved.has(x)) <= 1 && request.kind !== "Rotate" && request.kind !== "Close") {
+      throw new Error("the last free leaf may only be spent on Rotate or Close (exhaustion rule); rotate to a fresh key first");
+    }
+    if (request.kind === "TransferSol" || request.kind === "Close") {
+      // SOL sent to a token account is gone (the token program owns it, nothing can move lamports out)
+      const dest = await this.rpc.getAccountInfo(request.to, this.opts.commitment);
+      if (dest && TOKEN_PROGRAM_IDS.has(dest.owner.toBase58())) throw new Error(`destination ${request.to.toBase58()} is a token account; SOL sent there cannot be recovered`);
+    }
+    const action = await this.withWindow(request, opts.minExpirySlots);
     const actionBytes = encodeAction(action);
     const message = vaultMessage(this.vault, vault.generation, actionBytes, this.programId);
-    // Reserve first: if persisting fails, no signature for this leaf ever exists.
+    // Reserve first, durably: if persisting fails, no signature for this leaf ever exists.
     await this.opts.reserve?.(q);
-    this.reserved.add(q);
+    state.reserved.push(q);
+    await this.journal.save(state);
+    inflight.add(q);
+    if (this.ephemeral && !this.warnedEphemeral) {
+      this.warnedEphemeral = true;
+      console.warn(`VaultSigner for vault ${this.vault.toBase58()} is ephemeral: leaf reservations live in memory only, a crash after signing can lead to a second signature on a leaf; pass a FileLeafJournal or BrowserLeafJournal`);
+    }
     const lmsSignature = this.key.sign(q, message, opts.C ? { C: opts.C } : {});
-    return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature };
+    return { q, vault: this.vault, generation: vault.generation, action, actionBytes, message, lmsSignature, ephemeral: this.ephemeral };
   }
 
   /**
-   * Foreign-key guard: a Rotate target must be the public key of `nextKeyMaterial(master, vault)`,
-   * i.e. derived from the signer's words at index k+1. The full tree is built (H10: a fraction
-   * of a second) so a key with the right `I` but a wrong root is refused too: rotating to it
-   * would lock the vault for good.
+   * Foreign-key guard: a Rotate target must be the public key of `nextKeyMaterial(master, vault, scope)`,
+   * i.e. derived from the signer's words at index k+1 for this cluster and program. The full
+   * tree is built (H10: a fraction of a second) so a key with the right `I` but a wrong root is
+   * refused too: rotating to it would lock the vault for good.
    */
   private async checkRotateTarget(vault: VaultAccount, newLmsPubkey: Uint8Array): Promise<void> {
     const master = this.opts.master;
-    if (!master) {
+    if (!master || !this.scope) {
       throw new Error("Rotate to a foreign key: this signer has no master seed to derive the next key from; pass { allowForeignKey: true } to rotate to a key the words cannot reproduce");
     }
-    const { k, material } = nextKeyMaterial(master, vault);
+    const { k, material } = nextKeyMaterial(master, vault, this.scope);
     const target = parseLmsPublicKey(newLmsPubkey);
     if (!equalBytes(target.I, material.I)) {
       throw new Error(`Rotate to a foreign key: not the next key derived from these words (index ${k + 1}); pass { allowForeignKey: true } to rotate to a key the words cannot reproduce`);
@@ -311,13 +652,23 @@ export class VaultSigner {
 
   /**
    * Sign and execute by the signer's mode (or `opts.mode`). Returns the signatures of every
-   * transaction, in order: one for "direct-v1", open/write.../execute for "staged".
+   * transaction, in order: one for "direct-v1", open/write.../execute for "staged". After a
+   * `Rotate` lands the journal is reset for the new generation ({@link confirmRotation}).
    */
   async execute(request: ActionRequest, opts: ExecuteOpts = {}): Promise<ExecuteResult> {
+    const mode = opts.mode ?? this.opts.mode ?? "staged";
     const signed = await this.sign(request, {
       ...(opts.q !== undefined ? { q: opts.q } : {}),
       ...(opts.allowForeignKey !== undefined ? { allowForeignKey: opts.allowForeignKey } : {}),
+      // three or four transactions in a row need more than one transaction's worth of slots
+      ...(mode !== "direct-v1" ? { minExpirySlots: STAGED_MIN_EXPIRY_SLOTS } : {}),
     });
+    const result = await this.send(signed, opts);
+    if (signed.action.kind === "Rotate") await this.confirmRotation(signed);
+    return result;
+  }
+
+  private async send(signed: SignedAction, opts: ExecuteOpts): Promise<ExecuteResult> {
     const mode = opts.mode ?? this.opts.mode ?? "staged";
     if (mode !== "staged") {
       const v1Signer = this.v1Signer;
@@ -327,11 +678,36 @@ export class VaultSigner {
           return await this.sendDirect(signed, v1Signer, opts);
         } catch (e) {
           if (mode === "direct-v1" || !isV1Rejection(e)) throw e;
+          // an RPC "rejection" after the bytes were relayed may still land. If the leaf shows up spent
+          // the action executed: say so and stop, rather than stage the same signature behind it.
+          if (e instanceof DirectV1Error && e.stage === "send" && (await this.leafLanded(signed.q))) throw new DirectV1LandedError(signed.q, e);
           opts.onFallback?.(e);
         }
       }
     }
     return this.sendStaged(signed, opts);
+  }
+
+  /**
+   * Records in the journal that the Rotate in `signed` landed: reads the vault, requires the
+   * generation to be `signed.generation + 1` and the key to be the Rotate's target, then closes
+   * this key's record out at the new generation (the key is retired; its spent and reserved
+   * leaves stay on record). The new key starts its own journal, initialised from the chain on
+   * its first signature. `execute` calls this itself; call it after submitting a Rotate signed
+   * with `sign()` by other means. Until it runs a stale signer stays stale.
+   */
+  async confirmRotation(signed: SignedAction): Promise<void> {
+    if (signed.action.kind !== "Rotate") throw new Error("confirmRotation takes a signed Rotate");
+    const target = signed.action.newLmsPubkey;
+    const v = await this.fetchVaultAccount();
+    if (v.generation !== signed.generation + 1 || !equalBytes(v.lmsPubkey, target)) {
+      throw new Error(`rotation has not landed: the vault is at generation ${v.generation} (signed at ${signed.generation})`);
+    }
+    await withJournalLock(this.journal, async () => {
+      const state = (await this.journal.load()) ?? { key: this.keyId, vault: this.vault.toBase58(), generation: signed.generation, spent: 0, reserved: [] };
+      await this.journal.save({ ...state, generation: v.generation });
+    });
+    this.staleAcknowledged = false;
   }
 
   private async sendDirect(signed: SignedAction, v1Signer: V1MessageSigner, opts: ExecuteOpts): Promise<DirectExecuteResult> {
@@ -347,10 +723,21 @@ export class VaultSigner {
       ...(cfg.loadedAccountsDataSizeLimit !== undefined ? { loadedAccountsDataSizeLimit: cfg.loadedAccountsDataSizeLimit } : {}),
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
+      ...(opts.source ? { source: opts.source } : {}),
       commitment: opts.commitment ?? this.opts.commitment,
     });
     opts.onTransaction?.(0, 1, res.signature);
     return { ...signed, mode: "direct-v1", signatures: [res.signature], transactionBytes: res.transactionBytes };
+  }
+
+  /** Polls the vault a few times for leaf `q`; true once the chain shows it spent. */
+  private async leafLanded(q: number): Promise<boolean> {
+    const delays = this.opts.landedPollMs ?? [0, 1500, 3000];
+    for (const d of delays) {
+      if (d) await new Promise((r) => setTimeout(r, d));
+      if (isLeafUsed(await this.fetchVault(), q)) return true;
+    }
+    return false;
   }
 
   private async sendStaged(signed: SignedAction, opts: ExecuteOpts): Promise<StagedExecuteResult> {
@@ -367,17 +754,112 @@ export class VaultSigner {
       computeUnits: this.opts.computeUnits ?? EXECUTE_COMPUTE_UNITS,
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
+      ...(opts.source ? { source: opts.source } : {}),
     });
-    const signatures = await sendSequence(this.rpc, this.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
+    let signatures: string[];
+    try {
+      signatures = await sendSequence(this.rpc, this.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
+    } catch (e) {
+      // the buffer may be open with the payer's rent in it: take it back, best effort (the leaf is spent either way)
+      try {
+        await sendAndConfirm(this.rpc, [this.payer], [closeSigBufferInstruction({ programId: this.programId, payer: this.payer.publicKey, sigBuffer: staged.sigBuffer })], { commitment: opts.commitment ?? this.opts.commitment });
+      } catch { /* nothing to close, or not reachable: closeSigBufferInstruction can be sent later */ }
+      throw e;
+    }
     return { ...signed, mode: "staged", nonce, sigBuffer: staged.sigBuffer, signatures };
   }
 
-  private async withExpiry(request: ActionRequest): Promise<Action> {
-    if (request.expirySlot !== undefined) return request as Action;
-    const slot = await this.rpc.getSlot(this.opts.commitment);
-    const expirySlot = BigInt(slot + (this.opts.defaultExpirySlots ?? 300));
-    return { ...request, expirySlot } as Action;
+  /**
+   * Fills the validity window: `issuedSlot` defaults to the current slot, `expirySlot` to
+   * `issuedSlot + defaultExpirySlots`. A window the chain would refuse (inverted, or longer than
+   * `MAX_VALIDITY_SLOTS`) is refused here before any leaf is spent.
+   */
+  private async withWindow(request: ActionRequest, minSlots?: number): Promise<Action> {
+    let { issuedSlot, expirySlot } = request;
+    if (issuedSlot === undefined || expirySlot === undefined) {
+      const slot = BigInt(await this.rpc.getSlot(this.opts.commitment));
+      issuedSlot ??= slot;
+      expirySlot ??= issuedSlot + BigInt(Math.max(this.opts.defaultExpirySlots ?? DEFAULT_EXPIRY_SLOTS, minSlots ?? 0));
+    }
+    checkValidityWindow({ issuedSlot, expirySlot });
+    return { ...request, issuedSlot, expirySlot } as Action;
   }
+}
+
+/** What sits at a vault address: nothing, a live vault, or the tombstone of a closed one. */
+export type VaultAddressState = "free" | "vault" | "tombstone";
+
+/** Reads the account at `vault` and says which of the three it is. Anything else is an error. */
+export async function vaultAddressState(rpc: Rpc, vault: PublicKey, commitment?: Commitment): Promise<VaultAddressState> {
+  const info = await rpc.getAccountInfo(vault, commitment);
+  if (!info) return "free";
+  return decodeVaultOrTombstone(new Uint8Array(info.data)).kind;
+}
+
+export interface FreshKeyOptions {
+  /** First index to try; default 0. */
+  start?: number;
+  /** Last index to try; default `RECOVERY_MAX_INDEX`. */
+  maxIndex?: number;
+  /** Typecodes of the keys; default H10 / W4 (the vault default). */
+  lmsType?: number;
+  lmotsType?: number;
+  /** Default: the id declared by `programs/lamport-vault`. */
+  programId?: PublicKey;
+  commitment?: Commitment;
+}
+
+export interface FreshKey {
+  /** The index whose vault address is free. */
+  k: number;
+  /** Its key material (build it with `LmsPrivateKey.generate(material)`). */
+  material: LmsKeyMaterial;
+  /** The key, already built (the address needs its root). */
+  key: LmsPrivateKey;
+  /** The vault address `create_vault` would use for it. */
+  vault: PublicKey;
+  /** Indices skipped because their address holds a live vault or a tombstone. */
+  /** indices passed over: an address with a live vault, a tombstone, or a key that is live or retired in some vault */
+  skipped: { k: number; state: "vault" | "tombstone" | "in-use" }[];
+}
+
+/**
+ * The next key index under `master` whose vault address is free: a closed vault leaves a
+ * tombstone at its address for good (DESIGN.md section 2, "Close"), so `create_vault` with that
+ * key fails `VaultClosed`, and an address with a live vault is in use. Walks `k` from `start`,
+ * builds each key (its address needs the root, H10 takes a fraction of a second) and reads the
+ * account. Pass `start` as the index after the last one you know you used to save the probes.
+ */
+export async function nextFreshKeyIndex(master: Uint8Array, scope: DerivationScope, rpc: Rpc, opts: FreshKeyOptions = {}): Promise<FreshKey> {
+  const start = opts.start ?? 0;
+  const max = opts.maxIndex ?? RECOVERY_MAX_INDEX;
+  if (!Number.isInteger(start) || start < 0 || start > max) throw new RangeError(`start must be in 0..${max}, got ${start}`);
+  const programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
+  const skipped: FreshKey["skipped"] = [];
+  // Fingerprints (sha256[0..16]) of keys that are, or were, in a vault this walk has seen: a vault
+  // rotates to k+1, so key k+1's own address is free while the key is live at the old address.
+  const seen = new Set<string>();
+  const fp = (pk: Uint8Array) => Buffer.from(sha256(pk).subarray(0, 16)).toString("hex");
+  for (let k = start; k <= max; k++) {
+    const material = deriveKeyMaterial(master, k, scope, opts.lmsType ?? LMS_SHA256_M32_H10, opts.lmotsType ?? LMOTS_SHA256_N32_W4);
+    const key = await LmsPrivateKey.generateAsync(material);
+    const vault = findVaultPdaForKey(programId, key.publicKey).address;
+    const info = await rpc.getAccountInfo(vault, opts.commitment ?? "confirmed");
+    if (info) {
+      const at = decodeVaultOrTombstone(new Uint8Array(info.data));
+      if (at.kind === "vault") { seen.add(fp(at.vault.lmsPubkey)); for (const h of at.vault.usedKeys) seen.add(Buffer.from(h).toString("hex")); }
+      skipped.push({ k, state: at.kind });
+      continue;
+    }
+    if (seen.has(fp(key.publicKey))) { skipped.push({ k, state: "in-use" }); continue; }
+    if (rpc.getProgramAccounts) {
+      // any vault, ours or not, whose current key is this one (lms_pubkey sits at offset 42 of a Vault)
+      const live = await rpc.getProgramAccounts(programId, { commitment: opts.commitment ?? "confirmed", dataSlice: { offset: 0, length: 0 }, filters: [{ memcmp: { offset: 42, bytes: Buffer.from(key.publicKey).toString("base64"), encoding: "base64" } }] });
+      if (live.length) { skipped.push({ k, state: "in-use" }); continue; }
+    }
+    return { k, material, key, vault, skipped };
+  }
+  throw new Error(`no free vault address among key indices ${start}..${max}`);
 }
 
 export interface NextKeyMaterial {
@@ -389,20 +871,22 @@ export interface NextKeyMaterial {
 
 /**
  * The key a vault should rotate to next (SPEC-DERIVATION.md: "each Rotate uses the next index"):
- * find the index `k` of the vault's current `lms_pubkey` under `master` by its `I` (the first
- * step of recovery; `I_k` is 128 bits so no tree is built), then derive index k+1 with the
- * vault's own typecodes. Throws when the current key is not derived from `master` within
- * `maxIndex` (default `RECOVERY_MAX_INDEX`). Build it with `LmsPrivateKey.generate(material)`.
+ * find the index `k` of the vault's current `lms_pubkey` under `master` for `scope` (the
+ * cluster's genesis hash and the vault program id) by its `I` (the first step of recovery; `I_k`
+ * is 128 bits so no tree is built), then derive index k+1 with the vault's own typecodes. Throws
+ * when the current key is not derived from `master` within `maxIndex` (default
+ * `RECOVERY_MAX_INDEX`). Build it with `LmsPrivateKey.generate(material)`.
  */
-export function nextKeyMaterial(master: Uint8Array, vault: Pick<VaultAccount, "lmsPubkey">, opts: { maxIndex?: number } = {}): NextKeyMaterial {
+export function nextKeyMaterial(master: Uint8Array, vault: Pick<VaultAccount, "lmsPubkey">, scope: DerivationScope, opts: { maxIndex?: number } = {}): NextKeyMaterial {
   const current = parseLmsPublicKey(vault.lmsPubkey);
   const max = opts.maxIndex ?? RECOVERY_MAX_INDEX;
   for (let k = 0; k <= max; k++) {
-    if (!equalBytes(deriveLmsInputs(master, k).I, current.I)) continue;
+    if (!equalBytes(deriveLmsInputs(master, k, scope).I, current.I)) continue;
     if (k === 0xffffffff) throw new Error("the vault's key is the registry key (index 0xffffffff); it has no next index");
-    return { k, material: deriveKeyMaterial(master, k + 1, current.lmsType, current.lmotsType) };
+    if (k + 1 > max) throw new Error(`the next key index ${k + 1} is past the recovery limit ${max}; it could not be found again from the words`);
+    return { k, material: deriveKeyMaterial(master, k + 1, scope, current.lmsType, current.lmotsType) };
   }
-  throw new Error(`the vault's current key is not derived from this master seed (indices 0..${max} tried)`);
+  throw new Error(`the vault's current key is not derived from this master seed for this cluster and program (indices 0..${max} tried)`);
 }
 
 export interface RegistryClientOptions {
@@ -413,9 +897,11 @@ export interface RegistryClientOptions {
   chunkSize?: number;
   computeUnits?: number;
   commitment?: Commitment;
+  /** Slots a rotation stays valid when the call names no expiry. Default {@link DEFAULT_EXPIRY_SLOTS}. */
+  defaultExpirySlots?: number;
 }
 
-export interface RotatePqResult {
+export interface RotatePqResult extends ValidityWindow {
   q: number;
   /** the commitment's generation the message was bound to */
   generation: number;
@@ -456,14 +942,16 @@ export class RegistryClient {
 
   /**
    * `rotate_pq`: sign sha256("pq-registry/v1" || program_id || owner || u32le(generation) ||
-   * new_pq_pubkey) with the committed LMS key at leaf q >= next_q, stage it, rotate. Anyone can pay; the owner's
-   * classical key is not needed. A key that was committed before is refused up front.
+   * new_pq_pubkey || u64le(issued_slot) || u64le(expiry_slot)) with the committed LMS key at leaf
+   * q >= next_q, stage it, rotate. The window defaults to the current slot and
+   * `defaultExpirySlots` after it. Anyone can pay; the owner's classical key is not needed. A key
+   * that was committed before is refused up front.
    */
   async rotatePq(
     owner: PublicKey,
     committedKey: LmsPrivateKey,
     newPqPubkey: Uint8Array,
-    opts: SendOpts & { q?: number; nonce?: bigint } = {},
+    opts: SendOpts & { q?: number; nonce?: bigint } & Partial<ValidityWindow> = {},
   ): Promise<RotatePqResult> {
     const current = await this.fetchCommitment(owner);
     if (!current) throw new Error(`no commitment for ${owner.toBase58()}`);
@@ -475,7 +963,15 @@ export class RegistryClient {
     if (hasUsedKey(current, newPqPubkey)) {
       throw new Error("rotation to a key that was committed before (the chain would refuse it with KeyReused)");
     }
-    const message = registryMessage(owner, current.generation, newPqPubkey, this.programId);
+    let { issuedSlot, expirySlot } = opts;
+    if (issuedSlot === undefined || expirySlot === undefined) {
+      const slot = BigInt(await this.opts.rpc.getSlot(this.opts.commitment));
+      issuedSlot ??= slot;
+      expirySlot ??= issuedSlot + BigInt(this.opts.defaultExpirySlots ?? DEFAULT_EXPIRY_SLOTS);
+    }
+    const window: ValidityWindow = { issuedSlot, expirySlot };
+    checkValidityWindow(window);
+    const message = registryMessage(owner, current.generation, newPqPubkey, window, this.programId);
     const lmsSignature = committedKey.sign(q, message);
     const nonce = opts.nonce ?? randomNonce();
     const staged = buildStagedRotatePq({
@@ -484,11 +980,12 @@ export class RegistryClient {
       payer: this.opts.payer.publicKey,
       nonce,
       newPqPubkey,
+      window,
       signature: lmsSignature,
       chunkSize: this.opts.chunkSize ?? MAX_CHUNK_BYTES,
       computeUnits: this.opts.computeUnits ?? EXECUTE_COMPUTE_UNITS,
     });
     const signatures = await sendSequence(this.opts.rpc, this.opts.payer, staged.transactions, { ...opts, commitment: opts.commitment ?? this.opts.commitment });
-    return { q, generation: current.generation, nonce, message, lmsSignature, signatures, buffer: staged.buffer };
+    return { q, generation: current.generation, nonce, message, lmsSignature, signatures, buffer: staged.buffer, ...window };
   }
 }

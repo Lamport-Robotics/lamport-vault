@@ -11,6 +11,10 @@ import { ACCOUNT } from "./discriminator.ts";
 
 /** Current `Vault` layout version; the decoder refuses anything else. */
 export const VAULT_ACCOUNT_VERSION = 2;
+/** `Tombstone` layout version (0xFE, a value no `Vault` layout carries). */
+export const TOMBSTONE_ACCOUNT_VERSION = 0xfe;
+/** Size of a `Tombstone` account: discriminator, version, vault_id, closed_slot, heir. */
+export const TOMBSTONE_ACCOUNT_SIZE = 8 + 1 + 32 + 8 + 32;
 /** Current `Commitment` layout version; the decoder refuses anything else. */
 export const COMMITMENT_ACCOUNT_VERSION = 2;
 /** A `used_keys` entry is `sha256(pubkey)[0..16]`. */
@@ -36,6 +40,33 @@ export interface VaultAccount {
   used: Uint8Array;
   /** sha256[0..16] of every past LMS public key, oldest first (not the current one) */
   usedKeys: Uint8Array[];
+}
+
+/**
+ * What `Close` leaves at a vault's address, for good: the PDA is never free again, so `create_vault`
+ * with the vault's initial key fails (`VaultClosed`) and no signature made before the close can
+ * replay against a recreated vault. Holds exactly its rent-exempt minimum. `heir` is the `to` the
+ * Close was signed for: the only account `sweep_closed` can move a token balance the closed vault
+ * still owns to (see `sweepClosedInstruction` / `sweepClosed`).
+ */
+export interface TombstoneAccount {
+  version: number;
+  /** `vault_id` of the closed vault */
+  vaultId: Uint8Array;
+  /** slot of the `Close` */
+  closedSlot: bigint;
+  /** the Close action's `to`: where the lamports went and where swept tokens go */
+  heir: PublicKey;
+}
+
+/** Thrown by `decodeVault` on a tombstone: the vault at this address was closed. */
+export class VaultClosedError extends Error {
+  readonly tombstone: TombstoneAccount;
+  constructor(tombstone: TombstoneAccount) {
+    super(`vault is closed: a Tombstone (closed at slot ${tombstone.closedSlot}) holds its address; create a vault with a fresh key`);
+    this.name = "VaultClosedError";
+    this.tombstone = tombstone;
+  }
 }
 
 /** The `used_keys` entry for a 56-byte public key: sha256(pubkey)[0..16]. */
@@ -73,9 +104,21 @@ export function leafCount(vault: Pick<VaultAccount, "lmsPubkey">): number {
   return 2 ** lmsParams(parseLmsPublicKey(vault.lmsPubkey).lmsType).h;
 }
 
-/** Leaves still free under the current key. */
+/** Leaves still free under the current key, as the chain counts them. */
 export function freeLeaves(vault: Pick<VaultAccount, "lmsPubkey" | "spent">): number {
   return leafCount(vault) - vault.spent;
+}
+
+/**
+ * Leaves still free under the current key once `skip` (leaves this signer has already signed
+ * with, sent or not) is taken out. The exhaustion rule must use this count: a signature that
+ * exists but has not landed still consumes its leaf.
+ */
+export function freeLeavesExcluding(vault: Pick<VaultAccount, "lmsPubkey" | "used">, skip?: (q: number) => boolean): number {
+  const total = leafCount(vault);
+  let n = 0;
+  for (let q = 0; q < total; q++) if (!isLeafUsed(vault, q) && !skip?.(q)) n++;
+  return n;
 }
 
 /** Whether leaf `q` is spent on chain. Leaves outside the tree count as spent. */
@@ -98,6 +141,32 @@ export function firstFreeLeaf(vault: Pick<VaultAccount, "used">, lane = 0, lanes
     if (!isLeafUsed(vault, q) && !skip?.(q)) return q;
   }
   return undefined;
+}
+
+/**
+ * The largest unspent leaf `q` with `q % lanes === lane`, or `undefined` when the lane is exhausted.
+ * A signer that cannot trust its own record (restored, forked, second machine) must not sign the
+ * smallest free leaf: that is the leaf its lost state most likely signed last. Rotate takes this one.
+ */
+export function lastFreeLeaf(vault: Pick<VaultAccount, "used">, lane = 0, lanes = 1, skip?: (q: number) => boolean): number | undefined {
+  if (!Number.isInteger(lanes) || lanes < 1) throw new RangeError(`lanes must be >= 1, got ${lanes}`);
+  if (!Number.isInteger(lane) || lane < 0 || lane >= lanes) throw new RangeError(`lane must be in 0..${lanes - 1}, got ${lane}`);
+  const total = vault.used.length * 8;
+  let q = total - 1 - ((total - 1 - lane) % lanes);
+  for (; q >= lane; q -= lanes) {
+    if (!isLeafUsed(vault, q) && !skip?.(q)) return q;
+  }
+  return undefined;
+}
+
+/** Spent leaves of the current key in lane `lane` of `lanes` (all leaves by default). */
+export function spentLeavesInLane(vault: Pick<VaultAccount, "used">, lane = 0, lanes = 1): number {
+  if (!Number.isInteger(lanes) || lanes < 1) throw new RangeError(`lanes must be >= 1, got ${lanes}`);
+  if (!Number.isInteger(lane) || lane < 0 || lane >= lanes) throw new RangeError(`lane must be in 0..${lanes - 1}, got ${lane}`);
+  let n = 0;
+  const total = vault.used.length * 8;
+  for (let q = lane; q < total; q += lanes) if (isLeafUsed(vault, q)) n++;
+  return n;
 }
 
 export interface SigBufferAccount {
@@ -144,6 +213,10 @@ export interface PqSigBufferAccount {
   payer: PublicKey;
   nonce: bigint;
   newPqPubkey: Uint8Array;
+  /** first slot of the signed validity window */
+  issuedSlot: bigint;
+  /** last slot of the signed validity window */
+  expirySlot: bigint;
   sigLen: number;
   filled: number;
   sig: Uint8Array;
@@ -176,7 +249,36 @@ function writeUsedKeys(w: ByteWriter, keys: Uint8Array[], max: number): ByteWrit
   return w;
 }
 
+/** True when `data` starts with the `Tombstone` discriminator. */
+export function isTombstone(data: Uint8Array): boolean {
+  return data.length >= 8 && ACCOUNT.tombstone.every((b, i) => data[i] === b);
+}
+
+export function decodeTombstone(data: Uint8Array): TombstoneAccount {
+  const r = new ByteReader(data);
+  checkDiscriminator(r, ACCOUNT.tombstone, "Tombstone");
+  const version = r.u8();
+  checkVersion(version, TOMBSTONE_ACCOUNT_VERSION, "Tombstone");
+  const t: TombstoneAccount = { version, vaultId: r.fixed(32), closedSlot: r.u64(), heir: r.pubkey() };
+  r.finish();
+  return t;
+}
+
+export function encodeTombstone(t: TombstoneAccount): Uint8Array {
+  return new ByteWriter().raw(ACCOUNT.tombstone).u8(t.version).fixed(t.vaultId, 32).u64(t.closedSlot).pubkey(t.heir).bytes();
+}
+
+/** Either account that can sit at a vault address: the live vault, or the tombstone `Close` left. */
+export type VaultOrTombstone = { kind: "vault"; vault: VaultAccount } | { kind: "tombstone"; tombstone: TombstoneAccount };
+
+/** Decodes the account at a vault address, whichever of the two it is; throws on anything else. */
+export function decodeVaultOrTombstone(data: Uint8Array): VaultOrTombstone {
+  return isTombstone(data) ? { kind: "tombstone", tombstone: decodeTombstone(data) } : { kind: "vault", vault: decodeVault(data) };
+}
+
+/** Decodes a live vault; a tombstone throws {@link VaultClosedError}, anything else a plain `Error`. */
 export function decodeVault(data: Uint8Array): VaultAccount {
+  if (isTombstone(data)) throw new VaultClosedError(decodeTombstone(data));
   const r = new ByteReader(data);
   checkDiscriminator(r, ACCOUNT.vault, "Vault");
   const version = r.u8();
@@ -295,11 +397,13 @@ export function decodePqSigBuffer(data: Uint8Array): PqSigBufferAccount {
   const payer = r.pubkey();
   const nonce = r.u64();
   const newPqPubkey = r.fixed(56);
+  const issuedSlot = r.u64();
+  const expirySlot = r.u64();
   const sigLen = r.u16();
   const filled = r.u16();
   const sig = r.vecU8();
   if (sig.length !== sigLen) throw new Error("PqSigBuffer: sig vector length differs from sig_len");
-  return { version, bump, owner, payer, nonce, newPqPubkey, sigLen, filled, sig };
+  return { version, bump, owner, payer, nonce, newPqPubkey, issuedSlot, expirySlot, sigLen, filled, sig };
 }
 
 export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
@@ -312,6 +416,8 @@ export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
     .pubkey(b.payer)
     .u64(b.nonce)
     .fixed(b.newPqPubkey, 56)
+    .u64(b.issuedSlot)
+    .u64(b.expirySlot)
     .u16(b.sigLen)
     .u16(b.filled)
     .vecU8(b.sig)
@@ -320,5 +426,5 @@ export function encodePqSigBuffer(b: PqSigBufferAccount): Uint8Array {
 
 /** Space a PqSigBuffer needs for a signature of `sigLen` bytes (PqSigBuffer::space). */
 export function pqSigBufferSize(sigLen: number): number {
-  return 8 + 1 + 1 + 32 + 32 + 8 + 56 + 2 + 2 + (4 + sigLen);
+  return 8 + 1 + 1 + 32 + 32 + 8 + 56 + 8 + 8 + 2 + 2 + (4 + sigLen);
 }

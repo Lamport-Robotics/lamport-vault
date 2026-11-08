@@ -32,7 +32,7 @@ lamport-lms = { path = "../lms", features = ["sign"] }
 
 [dependencies]
 anchor-lang = "0.32.1"
-anchor-spl = { version = "0.32.1", default-features = false, features = ["token", "token_2022", "mint"] }
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token", "token_2022", "mint", "associated_token"] }
 lamport-lms = { path = "../lms" }
 solana-sha256-hasher = { version = "2.3", default-features = false }
 

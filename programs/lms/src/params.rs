@@ -11,15 +11,21 @@ use crate::error::Error;
 /// parameter set uses the first 24 bytes and keeps the rest zero.
 pub const N: usize = 32;
 
-/// Upper bound on `p` among the accepted LM-OTS parameter sets. Sizes the
-/// scratch space used by the verifier. Raise it when accepting W1 or W2.
+/// Largest `p` among the LM-OTS parameter sets the default policy
+/// ([`LmotsType::ACCEPTED`]) admits: W4's 67 chains. [`LmotsType::ALL`]
+/// goes up to 265 (W1); callers that size buffers from this constant and opt
+/// into `ALL` must use [`LmotsType::p`] of the key instead.
 pub const MAX_P: usize = 67;
 
 /// LM-OTS parameter set (RFC 8554 Table 1).
 ///
-/// The enum carries all four SHA-256 rows so that the arithmetic in
-/// [`crate::lmots`] can be written once. Which rows a parser accepts is a
-/// separate list, [`LmotsType::ACCEPTED`].
+/// The enum carries all four SHA-256 rows and the arithmetic in
+/// [`crate::lmots`] is written once for any `w`. Which rows a parser admits is
+/// a policy passed at parse time: [`LmotsType::from_typecode`] and
+/// [`crate::LmsPublicKey::parse`] use the conservative [`LmotsType::ACCEPTED`]
+/// (W4 only, what the vault program enforces);
+/// [`LmotsType::from_typecode_in`] and [`crate::LmsPublicKey::parse_with`]
+/// take an explicit list, usually [`LmotsType::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LmotsType {
@@ -42,20 +48,45 @@ pub enum LmotsType {
 }
 
 impl LmotsType {
-    /// Parameter sets this build accepts in public keys and signatures.
-    ///
-    /// The two RFC 9858 rows are accepted by the parser; whether a program
-    /// accepts them is the program's own decision (its key arrays, account
-    /// layouts and compute budget).
-    #[cfg(feature = "sha256-192")]
-    pub const ACCEPTED: &'static [LmotsType] =
-        &[LmotsType::Sha256N32W4, LmotsType::Sha256N24W4, LmotsType::Sha256N24W8];
-    /// Parameter sets this build accepts (without the `sha256-192` feature).
-    #[cfg(not(feature = "sha256-192"))]
+    /// The default acceptance policy: W4 only. This is what
+    /// [`Self::from_typecode`] and [`crate::LmsPublicKey::parse`] enforce, and
+    /// therefore what the vault program accepts on chain. The `sha256-192`
+    /// feature does not change it: the RFC 9858 rows are in [`Self::ALL`].
     pub const ACCEPTED: &'static [LmotsType] = &[LmotsType::Sha256N32W4];
+
+    /// Every SHA-256 row of Table 1, for tooling and interoperability tests
+    /// (RFC 8554 Appendix F uses W8; hash-sigs produces all four).
+    #[cfg(not(feature = "sha256-192"))]
+    pub const ALL: &'static [LmotsType] = &[
+        LmotsType::Sha256N32W1,
+        LmotsType::Sha256N32W2,
+        LmotsType::Sha256N32W4,
+        LmotsType::Sha256N32W8,
+    ];
+    /// Every SHA-256 row of RFC 8554 Table 1 and every SHA-256/192 row of
+    /// RFC 9858, for tooling and interoperability tests.
+    #[cfg(feature = "sha256-192")]
+    pub const ALL: &'static [LmotsType] = &[
+        LmotsType::Sha256N32W1,
+        LmotsType::Sha256N32W2,
+        LmotsType::Sha256N32W4,
+        LmotsType::Sha256N32W8,
+        LmotsType::Sha256N24W1,
+        LmotsType::Sha256N24W2,
+        LmotsType::Sha256N24W4,
+        LmotsType::Sha256N24W8,
+    ];
 
     /// Looks a typecode up in Table 1 and checks it is in [`Self::ACCEPTED`].
     pub fn from_typecode(code: u32) -> Result<Self, Error> {
+        Self::from_typecode_in(code, Self::ACCEPTED)
+    }
+
+    /// Looks a typecode up in Table 1 and checks it is in `accepted`.
+    ///
+    /// Any code outside Table 1, or inside it but not in `accepted`, is
+    /// [`Error::UnknownLmotsType`].
+    pub fn from_typecode_in(code: u32, accepted: &[LmotsType]) -> Result<Self, Error> {
         let t = match code {
             1 => LmotsType::Sha256N32W1,
             2 => LmotsType::Sha256N32W2,
@@ -71,7 +102,7 @@ impl LmotsType {
             8 => LmotsType::Sha256N24W8,
             _ => return Err(Error::UnknownLmotsType),
         };
-        if Self::ACCEPTED.contains(&t) {
+        if accepted.contains(&t) {
             Ok(t)
         } else {
             Err(Error::UnknownLmotsType)
@@ -292,12 +323,23 @@ mod tests {
 
     #[test]
     #[cfg(feature = "sha256-192")]
-    fn only_w4_and_rfc9858_w4_w8_accepted() {
+    fn w4_by_default_and_the_rfc9858_rows_in_all() {
+        // the default policy (the program's) stays W4; the RFC 9858 rows are there for tooling
         assert_eq!(LmotsType::from_typecode(3), Ok(LmotsType::Sha256N32W4));
-        assert_eq!(LmotsType::from_typecode(7), Ok(LmotsType::Sha256N24W4));
-        assert_eq!(LmotsType::from_typecode(8), Ok(LmotsType::Sha256N24W8));
-        for c in [0u32, 1, 2, 4, 5, 6, 9, u32::MAX] {
+        for c in [0u32, 1, 2, 4, 5, 6, 7, 8, 9, u32::MAX] {
             assert_eq!(LmotsType::from_typecode(c), Err(Error::UnknownLmotsType));
+        }
+        for (c, t) in [
+            (5u32, LmotsType::Sha256N24W1),
+            (6, LmotsType::Sha256N24W2),
+            (7, LmotsType::Sha256N24W4),
+            (8, LmotsType::Sha256N24W8),
+        ] {
+            assert_eq!(LmotsType::from_typecode_in(c, LmotsType::ALL), Ok(t));
+            assert_eq!(t.n(), 24);
+        }
+        for c in [0u32, 9, u32::MAX] {
+            assert_eq!(LmotsType::from_typecode_in(c, LmotsType::ALL), Err(Error::UnknownLmotsType));
         }
         for (c, h) in [(5u32, 5u32), (6, 10), (7, 15), (8, 20)] {
             assert_eq!(LmsType::from_typecode(c).unwrap().height(), h);

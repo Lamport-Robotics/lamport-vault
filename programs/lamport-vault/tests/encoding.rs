@@ -5,9 +5,11 @@
 //! program would disagree on the wire.
 
 use anchor_lang::prelude::*;
-use anchor_lang::{AccountSerialize, Discriminator, InstructionData};
+use anchor_lang::{AccountDeserialize, AccountSerialize, Discriminator, InstructionData};
 use lamport_lms::LmsType;
-use lamport_vault::{signed_message, vault_id_for, Action, SigBuffer, Vault, KEY_HASH_LEN, MESSAGE_VERSION, SIG_SEED, VAULT_SEED};
+use lamport_vault::{
+    signed_message, vault_id_for, Action, SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_VALIDITY_SLOTS, MESSAGE_VERSION, SIG_SEED, VAULT_SEED,
+};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -47,7 +49,12 @@ fn vectors_target_this_program_id() {
 #[test]
 fn action_encodings_and_messages() {
     let d = v();
+    let issued = u64s(&d["inputs"]["issued_slot"]);
     let expiry = u64s(&d["inputs"]["expiry_slot"]);
+    assert_eq!(issued.to_le_bytes().to_vec(), hx(&d["inputs"]["issued_slot_le_hex"]));
+    assert_eq!(expiry.to_le_bytes().to_vec(), hx(&d["inputs"]["expiry_slot_le_hex"]));
+    assert_eq!(d["validity"]["max_validity_slots"].as_u64().unwrap(), MAX_VALIDITY_SLOTS);
+    let sizes = &d["validity"]["action_sizes"];
     let generation = u32s(&d["inputs"]["generation"]);
     let h10: [u8; 56] = hx(&d["inputs"]["h10_pubkey_hex"]).try_into().unwrap();
     let (vault, _) = Pubkey::find_program_address(&[VAULT_SEED, &vault_id_for(&h5(&d))], &lamport_vault::ID);
@@ -64,6 +71,7 @@ fn action_encodings_and_messages() {
             Action::TransferSol {
                 to: pk(&a["transfer_sol"]["action"]["to"]),
                 lamports: u64s(&a["transfer_sol"]["action"]["lamports"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -73,6 +81,7 @@ fn action_encodings_and_messages() {
                 mint: pk(&a["transfer_token"]["action"]["mint"]),
                 to: pk(&a["transfer_token"]["action"]["to"]),
                 amount: u64s(&a["transfer_token"]["action"]["amount"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -80,6 +89,7 @@ fn action_encodings_and_messages() {
             "rotate",
             Action::Rotate {
                 new_lms_pubkey: h10,
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -87,6 +97,7 @@ fn action_encodings_and_messages() {
             "close",
             Action::Close {
                 to: pk(&a["close"]["action"]["to"]),
+                issued_slot: issued,
                 expiry_slot: expiry,
             },
         ),
@@ -95,6 +106,18 @@ fn action_encodings_and_messages() {
         let bytes = action.encode();
         assert_eq!(bytes, hx(&a[name]["action_hex"]), "{name} encoding");
         assert_eq!(Action::decode(&bytes).unwrap(), action, "{name} decode");
+        assert_eq!(action.window(), (issued, expiry), "{name} window");
+        let size_key = match name {
+            "transfer_sol" => "TransferSol",
+            "transfer_token" => "TransferToken",
+            "rotate" => "Rotate",
+            _ => "Close",
+        };
+        assert_eq!(bytes.len() as u64, sizes[size_key].as_u64().unwrap(), "{name} size");
+        // The window is the last 16 bytes of every variant: issued_slot then expiry_slot.
+        let n = bytes.len();
+        assert_eq!(&bytes[n - 16..n - 8], &issued.to_le_bytes());
+        assert_eq!(&bytes[n - 8..], &expiry.to_le_bytes());
         assert_eq!(
             signed_message(&vault, generation, &bytes).to_vec(),
             hx(&a[name]["message_hex"]),
@@ -138,7 +161,9 @@ fn discriminators_and_instruction_data() {
     assert_eq!(I::ExecuteDirect::DISCRIMINATOR.to_vec(), hx(&ix["execute_direct"]));
     let acc = &d["discriminators"]["accounts"];
     assert_eq!(Vault::DISCRIMINATOR.to_vec(), hx(&acc["Vault"]));
+    assert_eq!(Tombstone::DISCRIMINATOR.to_vec(), hx(&acc["Tombstone"]));
     assert_eq!(SigBuffer::DISCRIMINATOR.to_vec(), hx(&acc["SigBuffer"]));
+    assert_ne!(Vault::DISCRIMINATOR, Tombstone::DISCRIMINATOR);
 
     let key = h5(&d);
     assert_eq!(
@@ -210,11 +235,37 @@ fn account_layouts() {
     assert_eq!(out, vault_hex);
     assert_eq!(out.len(), Vault::space(LmsType::Sha256M32H5, hist_len));
 
+    // Tombstone: disc(8) version(0xfe) vault_id(32) closed_slot(8) heir(32), 81 bytes; reading it as
+    // a Vault says VaultClosed, reading a Vault as a Tombstone says VaultNotClosed, and a Vault
+    // serialised after `Close` marked it writes nothing.
+    let tomb_hex = hx(&d["accounts"]["tombstone_hex"]);
+    assert_eq!(tomb_hex.len(), Tombstone::SPACE);
+    assert_eq!(Tombstone::SPACE, 81);
+    assert_eq!(tomb_hex[8], Tombstone::VERSION);
+    let tomb = Tombstone::try_deserialize(&mut &tomb_hex[..]).unwrap();
+    assert_eq!(tomb.vault_id, vault_id_for(&key));
+    assert_eq!(tomb.closed_slot, 0x1122334466);
+    assert_eq!(tomb.heir, pk(&d["inputs"]["pk_22"]), "the heir is the Close action's `to`");
+    let mut out = Vec::new();
+    tomb.try_serialize(&mut out).unwrap();
+    assert_eq!(out, tomb_hex);
+    let closed = Vault::try_deserialize(&mut &tomb_hex[..]).expect_err("a tombstone is not a vault");
+    assert_eq!(closed, anchor_lang::error::Error::from(lamport_vault::VaultError::VaultClosed));
+    let live = Tombstone::try_deserialize(&mut &vault_hex[..]).expect_err("a vault is not a tombstone");
+    assert_eq!(live, anchor_lang::error::Error::from(lamport_vault::VaultError::VaultNotClosed));
+    let mut retired = vault.clone();
+    retired.version = Tombstone::VERSION;
+    let mut none = Vec::new();
+    retired.try_serialize(&mut none).unwrap();
+    assert!(none.is_empty(), "a vault marked closed is never written back");
+    assert!(Vault::try_deserialize(&mut &none[..]).is_err());
+
     let sizes = &d["accounts"]["sizes"];
     assert_eq!(sizes["vault_h5"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H5, 0));
     assert_eq!(sizes["vault_h10"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H10, 0));
     assert_eq!(sizes["vault_h15"].as_u64().unwrap() as usize, Vault::space(LmsType::Sha256M32H15, 0));
     assert_eq!(sizes["key_history_entry"].as_u64().unwrap() as usize, KEY_HASH_LEN);
+    assert_eq!(sizes["tombstone"].as_u64().unwrap() as usize, Tombstone::SPACE);
     assert_eq!(sizes["vault_max_key_history"].as_u64().unwrap(), lamport_vault::MAX_KEY_HISTORY as u64);
 
     let sb_hex = hx(&d["accounts"]["sig_buffer_hex"]);

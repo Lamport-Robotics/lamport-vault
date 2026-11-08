@@ -62,6 +62,10 @@ export interface ExecuteDirectParams {
   tokenProgram?: PublicKey;
   /** For `Close`: empty token accounts owned by the vault to close to `to` in the same instruction. */
   closeTokenAccounts?: CloseTokenAccount[];
+  /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
+  source?: PublicKey;
+  /** Token-2022 transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  extraAccounts?: AccountMeta[];
 }
 
 /**
@@ -74,7 +78,7 @@ export function executeDirectInstruction(p: ExecuteDirectParams): TransactionIns
   const data = new ByteWriter().raw(IX.executeDirect).vecU8(actionBytes).vecU8(p.signature).bytes();
   return new TransactionInstruction({
     programId: p.programId,
-    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts)],
+    keys: [w(p.vault), ws(p.payer), r(SystemProgram.programId), ...executeRemainingAccounts(p.vault, p.action, p.tokenProgram, p.closeTokenAccounts, p.source, p.extraAccounts)],
     data: Buffer.from(data),
   });
 }
@@ -202,13 +206,33 @@ export class DirectV1Error extends Error {
  * could not parse or sanitize the bytes), as opposed to the transaction having run and failed.
  * The "auto" mode of `VaultSigner` falls back to the staged flow only on these.
  */
+/** The wallet's user said no (EIP-1193 4001 and the usual wordings): not a format problem, so no retry by another route. */
+export function isUserRejection(cause: unknown): boolean {
+  const code = (cause as { code?: unknown } | null)?.code;
+  if (code === 4001) return true;
+  const text = cause instanceof Error ? cause.message : String(cause);
+  return /user rejected|rejected the request|user declined|user denied|cancelled by user|canceled by user/i.test(text);
+}
+
 export function isV1Rejection(e: unknown): boolean {
   if (!(e instanceof DirectV1Error)) return false;
-  if (e.stage === "sign") return true;
+  if (e.stage === "sign") return !isUserRejection(e.cause);
   if (e.stage !== "send") return false;
   const text = e.cause instanceof Error ? e.cause.message : String(e.cause);
   // The program ran (preflight simulation) and failed: a real error, not a format problem.
   return !/Error processing Instruction|custom program error|Error Code:|InstructionError|insufficient funds|Blockhash not found|already been processed/i.test(text);
+}
+
+/** The direct transaction was refused by the RPC in a way that left its fate open, and the leaf then showed up spent: it executed. Nothing may be retried. */
+export class DirectV1LandedError extends Error {
+  readonly q: number;
+  override readonly cause: unknown;
+  constructor(q: number, cause: unknown) {
+    super(`direct-v1 send looked rejected (${cause instanceof Error ? cause.message : String(cause)}) but leaf ${q} is now spent on chain: the action executed. Do not retry.`);
+    this.name = "DirectV1LandedError";
+    this.q = q;
+    this.cause = cause;
+  }
 }
 
 export interface SendDirectV1Params extends Omit<DirectV1Params, "blockhash" | "lastValidBlockHeight"> {

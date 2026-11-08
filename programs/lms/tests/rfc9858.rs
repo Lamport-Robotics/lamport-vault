@@ -48,7 +48,7 @@ fn covers_w8_h5_and_w4_h20() {
 #[test]
 fn rfc_signatures_verify() {
     for v in kat() {
-        let pk = LmsPublicKey::parse(&hx(&v.public_key_hex)).unwrap();
+        let pk = LmsPublicKey::parse_any(&hx(&v.public_key_hex)).unwrap();
         assert_eq!(pk.encode(), hx(&v.public_key_hex), "{}", v.name);
         assert_eq!(lms_verify(&pk, &hx(&v.message_hex), &hx(&v.signature_hex)), Ok(v.q), "{}", v.name);
     }
@@ -57,7 +57,7 @@ fn rfc_signatures_verify() {
 #[test]
 fn every_flipped_bit_region_fails() {
     for v in kat() {
-        let pk = LmsPublicKey::parse(&hx(&v.public_key_hex)).unwrap();
+        let pk = LmsPublicKey::parse_any(&hx(&v.public_key_hex)).unwrap();
         let msg = hx(&v.message_hex);
         let sig = hx(&v.signature_hex);
         // q, C, first chain value, last chain value, lms type, first and last path node
@@ -95,7 +95,7 @@ fn sdk_signatures_verify_under_the_rust_verifier() {
     let f: File = serde_json::from_str(include_str!("../../../kat/sdk_signatures_sha256_192.json")).unwrap();
     let mut count = 0;
     for k in f.vectors {
-        let pk = LmsPublicKey::parse(&hx(&k.public_key_hex)).unwrap();
+        let pk = LmsPublicKey::parse_any(&hx(&k.public_key_hex)).unwrap();
         for s in k.signatures {
             assert_eq!(lms_verify(&pk, &hx(&s.message_hex), &hx(&s.signature_hex)), Ok(s.q), "{}", k.name);
             count += 1;

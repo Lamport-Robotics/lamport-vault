@@ -19,8 +19,8 @@ npm run bench
 ## `@lamport-robotics/lms`
 
 Parameter sets: `LMOTS_SHA256_N32_W4` (typecode 3; W1/W2/W8 are in the tables and work the same way)
-and `LMS_SHA256_M32_H5 … H20` (typecodes 5–8). The vault and the registry accept H5, H10 and H15 with
-W4 (`VAULT_LMS_TYPES`); H20 verifies here but is refused on chain. Private keys follow RFC 8554
+and `LMS_SHA256_M32_H5 … H20` (typecodes 5–8). The vault accepts H5, H10 and H15 with W4
+(`VAULT_LMS_TYPES`); the registry takes H20 too (it keeps no bitmap). Private keys follow RFC 8554
 Appendix A: everything is derived from a 32-byte `SEED` and a 16-byte `I`, so a key is fully described
 by `(lmsType, lmotsType, seed, I)`.
 
@@ -139,7 +139,8 @@ naming the heir; `create_vault` on it fails `VaultClosed`), so the next vault ne
 address is free, skipping tombstones and live vaults; `vaultAddressState(rpc, vault)` is the one-address
 check.
 
-`expirySlot` may be given on any action; when omitted the signer uses the current slot plus 300. The
+`expirySlot` may be given on any action; when omitted the signer uses the current slot plus 300, and
+`execute` in the "staged" (default) and "auto" modes plus 600, as staging takes three or four transactions. The
 signer refuses a spent leaf, `q` beyond the tree, anything but `Rotate` or `Close` on the last free leaf
 (the exhaustion rule), a `Rotate` to a key the vault had before or with other typecodes, and it never reuses a
 leaf within one object even before the chain confirms.

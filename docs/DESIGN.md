@@ -196,8 +196,9 @@ signatures and signers stay valid.
 `MAX_VALIDITY_SLOTS`. A signer cannot grant itself a far future: whatever `expiry_slot` it writes, the
 window is capped at a day from `issued_slot`, and `issued_slot` cannot be ahead of the clock, so a
 signature made today is dead tomorrow. The SDK's `VaultSigner` fills the window itself: `issued_slot` =
-the current slot, `expiry_slot` = `issued_slot + 300` (about two minutes) unless the request says
-otherwise, and refuses a request whose window the chain would refuse before any leaf is spent.
+the current slot, `expiry_slot` = `issued_slot + 300` (about two minutes; 600 when `execute` may stage it,
+modes "staged" and "auto") unless the request says otherwise, and refuses a request whose window the
+chain would refuse before any leaf is spent.
 
 `TransferSol` leaves the rent-exempt minimum in place. `TransferToken` signs a `transfer_checked` with the
 vault PDA; remaining accounts: vault token account, destination token account, mint, token program (Token

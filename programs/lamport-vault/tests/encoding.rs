@@ -30,9 +30,9 @@ fn u64s(s: &Value) -> u64 {
 fn u32s(s: &Value) -> u32 {
     s.as_str().unwrap().parse().unwrap()
 }
-/// True if `bytes` is one of the four action vectors in the file.
+/// True if `bytes` is one of the action vectors in the file.
 fn known_action(d: &Value, bytes: &[u8]) -> bool {
-    ["transfer_sol", "transfer_token", "rotate", "close"]
+    ["transfer_sol", "transfer_token", "rotate", "close", "transfer_token_from"]
         .iter()
         .any(|k| hx(&d["actions"][k]["action_hex"]) == bytes)
 }
@@ -101,6 +101,17 @@ fn action_encodings_and_messages() {
                 expiry_slot: expiry,
             },
         ),
+        (
+            "transfer_token_from",
+            Action::TransferTokenFrom {
+                from: pk(&a["transfer_token_from"]["action"]["from"]),
+                mint: pk(&a["transfer_token_from"]["action"]["mint"]),
+                to: pk(&a["transfer_token_from"]["action"]["to"]),
+                amount: u64s(&a["transfer_token_from"]["action"]["amount"]),
+                issued_slot: issued,
+                expiry_slot: expiry,
+            },
+        ),
     ];
     for (name, action) in cases {
         let bytes = action.encode();
@@ -111,6 +122,7 @@ fn action_encodings_and_messages() {
             "transfer_sol" => "TransferSol",
             "transfer_token" => "TransferToken",
             "rotate" => "Rotate",
+            "transfer_token_from" => "TransferTokenFrom",
             _ => "Close",
         };
         assert_eq!(bytes.len() as u64, sizes[size_key].as_u64().unwrap(), "{name} size");

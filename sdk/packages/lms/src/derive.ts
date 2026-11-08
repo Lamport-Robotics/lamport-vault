@@ -177,7 +177,7 @@ export function deriveRegistryKeyMaterial(
 }
 
 export interface RecoverOptions {
-  /** Highest k tried, inclusive. Default 64. */
+  /** Highest k tried, inclusive. Default {@link RECOVERY_MAX_INDEX} (4096). */
   maxIndex?: number;
   /** Progress for the tree build of a matching candidate. */
   onProgress?: (done: number, total: number) => void;

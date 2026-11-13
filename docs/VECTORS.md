@@ -14,6 +14,7 @@ in `sdk/packages/lms/test/`). Four sources are independent of this repository.
 | `kat/hashsigs_w1w2w8.json` | same hash-sigs build | W1 H5, W2 H5, W8 H5 (q = 0, 1, 31 each), W8 H10 (q = 0, 1023) | 4 keys, 11 signatures |
 | `kat/acvp_lms.json` | [usnistgov/ACVP-Server](https://github.com/usnistgov/ACVP-Server) commit `975de31eb83d87039ec88934fdc47d8c312b892d`, `gen-val/json-files/LMS-{keyGen-1.0,sigGen-1.0,sigGen-SP800-208,sigVer-1.0,sigVer-SP800-208}/internalProjection.json` | **SHA-256/192 only** (see below): sigVer 16 cases (4 valid, 12 invalid with reasons), sigGen 62, keyGen 9 with SEED/I | 87 cases |
 | `kat/vault_encoding.json` | this repository | vault account and instruction byte layouts (not LMS) | — |
+| `kat/succession_encoding.json` | this repository (`cd sdk && npm run kat`) | the Heir-enabled build (`docs/SUCCESSION.md`): program ids, discriminators, limits, error codes, `SetSuccession` and version-3 account bytes, clock cases (not LMS) | 3 actions, 6 accounts, 15 clock cases |
 
 ## What each source pins down
 

@@ -1015,3 +1015,9 @@ mod tests {
         assert_eq!(code(check_validity_window(0, u64::MAX, 0)), vault_err(VaultError::InvalidValidityWindow));
     }
 }
+
+// Lamport Heir's inactivity clock (docs/SUCCESSION.md). Declared here, after everything else, on
+// purpose: `require!` and every overflow check compile their source line into the program, so a
+// line added above existing code changes the default build. succession.yml checks that it does not.
+#[cfg(feature = "succession")]
+pub mod succession;

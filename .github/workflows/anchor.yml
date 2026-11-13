@@ -5,8 +5,9 @@ name: anchor
 # (agave 2.3.13, the version pinned for devnet) and runs the mocha tests with
 # real LMS signatures from `lms-tool`. Once with the production constants and
 # once with `--features small-history` (MAX_KEY_HISTORY = 2) so the HistoryFull
-# path is exercised. No Docker: everything runs on the runner. The host-side
-# cargo and SDK tests are in test.yml.
+# path is exercised, and both again with `succession` (docs/SUCCESSION.md): the
+# same suite must pass against the build that carries the feature. No Docker:
+# everything runs on the runner. The host-side cargo and SDK tests are in test.yml.
 
 on:
   push:
@@ -32,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", "small-history"]
+        features: ["", "small-history", "succession", "succession,small-history"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -121,9 +122,13 @@ jobs:
     # data, 2.3 KB and more, which no wire transaction of the test validator can
     # carry. LiteSVM runs the built program against the SVM directly, so all four
     # actions take that path here (tests/svm).
-    name: execute_direct in litesvm
+    name: execute_direct in litesvm${{ matrix.features && format(' (--features {0})', matrix.features) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "succession"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -134,7 +139,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: execute-direct-svm
+          key: execute-direct-svm${{ matrix.features && format('-{0}', matrix.features) || '' }}
           workspaces: |
             . -> target
             tests/svm -> target
@@ -179,7 +184,7 @@ jobs:
           cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
 
       - name: anchor build
-        run: anchor build
+        run: anchor build ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
 
       # run from inside the crate: its rust-toolchain.toml pins the toolchain litesvm's agave crates need, rustup fetches it
       - name: cargo test (tests/svm)

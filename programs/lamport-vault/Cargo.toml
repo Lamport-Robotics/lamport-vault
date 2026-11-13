@@ -21,6 +21,10 @@ anchor-debug = []
 # Test build: MAX_KEY_HISTORY = 2 so the HistoryFull path is reachable in a test
 # (`anchor test -- --features small-history`). Never deploy with it.
 small-history = []
+# Lamport Heir: an inactivity clock for the vault (docs/SUCCESSION.md). Off by default, and the
+# default build must stay byte-identical to a build without this feature (CI: succession.yml).
+# A build with it is a separate program under its own id, never an upgrade of the vault.
+succession = []
 custom-heap = []
 custom-panic = []
 

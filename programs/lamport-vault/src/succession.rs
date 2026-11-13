@@ -703,6 +703,42 @@ mod tests {
         s.release_due(t + 120 * D + 1).unwrap();
     }
 
+    /// `check_claim` on an account built by hand: `(owner, executable, data)`.
+    fn claim_check(key: Pubkey, owner: Pubkey, executable: bool, data: &[u8], vault_key: &Pubkey) -> Result<()> {
+        let mut lamports = 1_000_000u64;
+        let mut data = data.to_vec();
+        let ai = AccountInfo::new(&key, false, false, &mut lamports, &mut data, &owner, executable, 0);
+        check_claim(&ai, vault_key)
+    }
+
+    #[test]
+    fn which_accounts_may_be_a_claim_address() {
+        let vault = key(50);
+        let system = Pubkey::default(); // the System Program's id is the all-zero address
+        let unusable = e(SuccessionError::ClaimNotUsable);
+        // a plain wallet, an address with nothing at it, another program's data account
+        assert!(claim_check(key(1), system, false, &[], &vault).is_ok());
+        assert!(claim_check(key(1), key(77), false, &[1, 2, 3], &vault).is_ok());
+        // the vault itself
+        assert_eq!(code(claim_check(vault, crate::ID, false, &[], &vault)), e(SuccessionError::ClaimIsTheVault));
+        // executable, whoever owns it: a loader this program has never heard of included
+        assert_eq!(code(claim_check(key(1), key(77), true, &[], &vault)), unusable);
+        assert_eq!(code(claim_check(key(1), system, true, &[], &vault)), unusable);
+        // token accounts and mints, sysvars, and what the loaders own
+        for owner in [anchor_spl::token::ID, anchor_spl::token_2022::ID].into_iter().chain(UNUSABLE_OWNERS) {
+            assert_eq!(code(claim_check(key(1), owner, false, &[0u8; 165], &vault)), unusable, "owner {owner}");
+        }
+        // an account of this program: only an open vault
+        let mut open = <Vault as Discriminator>::DISCRIMINATOR.to_vec();
+        open.extend_from_slice(&[3u8; 40]);
+        assert!(claim_check(key(1), crate::ID, false, &open, &vault).is_ok(), "another open vault");
+        let mut tombstone = <Tombstone as Discriminator>::DISCRIMINATOR.to_vec();
+        tombstone.extend_from_slice(&[0xFE; 73]);
+        assert_eq!(code(claim_check(key(1), crate::ID, false, &tombstone, &vault)), unusable, "a closed vault");
+        assert_eq!(code(claim_check(key(1), crate::ID, false, &[], &vault)), unusable, "an empty account of this program");
+        assert_eq!(code(claim_check(key(1), crate::ID, false, &[1, 2, 3, 4, 5, 6, 7, 8, 9], &vault)), unusable, "a signature buffer or anything else");
+    }
+
     #[test]
     fn the_clock_refuses_to_overflow() {
         let mut s = armed(90, 30);

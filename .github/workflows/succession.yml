@@ -4,10 +4,11 @@ name: succession
 # feature. Two things are checked here, with the image and solana-verify version verify.yml pins:
 #
 #   default build unchanged   on a pull request from a branch named succession*: the DEFAULT build
-#                             of lamport_vault at the pull request is byte-for-byte the default
+#                             of each program at the pull request is byte-for-byte the default
 #                             build of its base. Whatever the feature adds, the vault without it
-#                             is still the same program. Other pull requests may change the vault
-#                             on purpose, so the job only runs for those branches.
+#                             is still the same program, and so is the registry. Other pull
+#                             requests may change a program on purpose, so the job only runs for
+#                             those branches.
 #   succession build          the build WITH the feature: hash and size in the job summary, the
 #                             .so as an artifact. It is a different program with its own id.
 
@@ -30,12 +31,17 @@ env:
 
 jobs:
   unchanged:
-    name: default build unchanged
+    name: default build unchanged (${{ matrix.lib }})
     if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'succession')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        lib: [lamport_vault, pq_registry]
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      LIB: ${{ matrix.lib }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -59,23 +65,23 @@ jobs:
 
       - name: Build the pull request, default features
         run: |
-          solana-verify build --library-name lamport_vault --base-image "$BASE_IMAGE"
-          cp target/deploy/lamport_vault.so "$RUNNER_TEMP/head.so"
+          solana-verify build --library-name "$LIB" --base-image "$BASE_IMAGE"
+          cp "target/deploy/$LIB.so" "$RUNNER_TEMP/head.so"
 
       - name: Build the base, default features
         run: |
           # from nothing: no artifact of the first build may stand in for the second
           sudo rm -rf target
           git checkout --quiet "$BASE_SHA"
-          solana-verify build --library-name lamport_vault --base-image "$BASE_IMAGE"
-          cp target/deploy/lamport_vault.so "$RUNNER_TEMP/base.so"
+          solana-verify build --library-name "$LIB" --base-image "$BASE_IMAGE"
+          cp "target/deploy/$LIB.so" "$RUNNER_TEMP/base.so"
 
       - name: Compare
         run: |
           base_hash=$(solana-verify get-executable-hash "$RUNNER_TEMP/base.so" | tail -n1)
           head_hash=$(solana-verify get-executable-hash "$RUNNER_TEMP/head.so" | tail -n1)
           {
-            echo "### lamport_vault, default features"
+            echo "### $LIB, default features"
             echo
             echo '```'
             echo "base  $BASE_SHA  $base_hash  $(wc -c < "$RUNNER_TEMP/base.so") bytes"
@@ -85,7 +91,7 @@ jobs:
           echo "base $base_hash"
           echo "head $head_hash"
           if ! cmp "$RUNNER_TEMP/base.so" "$RUNNER_TEMP/head.so"; then
-            echo "DIFFERENT: this pull request changes the default build of lamport_vault" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "DIFFERENT: this pull request changes the default build of $LIB" | tee -a "$GITHUB_STEP_SUMMARY"
             echo "A line added above existing code is enough: see docs/SUCCESSION.md." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

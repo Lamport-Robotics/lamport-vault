@@ -14,7 +14,14 @@ fn hashv(parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
+#[cfg(not(feature = "succession"))]
 pub const PROGRAM_ID: Pubkey = Address::from_str_const("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
+/// The Heir-enabled build declares its own id (a placeholder with no private key until deployed).
+#[cfg(feature = "succession")]
+pub const PROGRAM_ID: Pubkey = Address::from_str_const("HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb");
+
+#[cfg(feature = "succession")]
+pub mod succession;
 pub const TOKEN_PROGRAM_ID: Pubkey = Address::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 pub const MESSAGE_DOMAIN: &[u8] = b"lamport-vault/v1";
 
@@ -96,6 +103,9 @@ pub struct VaultState {
     pub spent: u32,
     pub generation: u32,
     pub created_slot: u64,
+    /// The succession block: 200 bytes after `created_slot` in a version-3 vault.
+    #[cfg(feature = "succession")]
+    pub succession: succession::SuccessionState,
     pub used: Vec<u8>,
     pub used_keys: Vec<[u8; 16]>,
 }
@@ -111,11 +121,26 @@ pub fn decode_vault(data: &[u8]) -> VaultState {
     let spent = u32::from_le_bytes(take(4).try_into().unwrap());
     let generation = u32::from_le_bytes(take(4).try_into().unwrap());
     let created_slot = u64::from_le_bytes(take(8).try_into().unwrap());
+    #[cfg(feature = "succession")]
+    let succession = succession::decode(take(succession::BLOCK_LEN));
     let n = u32::from_le_bytes(take(4).try_into().unwrap()) as usize;
     let used = take(n).to_vec();
     let k = u32::from_le_bytes(take(4).try_into().unwrap()) as usize;
     let used_keys = (0..k).map(|_| take(16).try_into().unwrap()).collect();
-    VaultState { version, bump, vault_id, lms_pubkey, spent, generation, created_slot, used, used_keys }
+    assert_eq!(o, data.len(), "trailing bytes after the vault");
+    VaultState {
+        version,
+        bump,
+        vault_id,
+        lms_pubkey,
+        spent,
+        generation,
+        created_slot,
+        #[cfg(feature = "succession")]
+        succession,
+        used,
+        used_keys,
+    }
 }
 
 impl VaultState {

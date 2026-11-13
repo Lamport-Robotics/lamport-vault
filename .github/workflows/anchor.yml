@@ -186,7 +186,8 @@ jobs:
       - name: anchor build
         run: anchor build ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
 
-      # run from inside the crate: its rust-toolchain.toml pins the toolchain litesvm's agave crates need, rustup fetches it
+      # run from inside the crate: its rust-toolchain.toml pins the toolchain litesvm's agave crates need, rustup fetches it.
+      # The test crate takes the same feature as the build: another program id, another vault layout, more tests.
       - name: cargo test (tests/svm)
         working-directory: tests/svm
-        run: cargo test --locked
+        run: cargo test --locked ${{ matrix.features && format('--features {0}', matrix.features) || '' }}

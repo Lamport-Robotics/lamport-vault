@@ -110,8 +110,15 @@ jobs:
           node --version
           yarn --version
 
+      # A build with `succession` declares its own program id, so the validator has to load it at
+      # that address: the script points Anchor.toml there for the run (docs/SUCCESSION.md).
       - name: anchor test
-        run: anchor test ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
+        run: |
+          if [[ ",${{ matrix.features }}," == *,succession,* ]]; then
+            scripts/anchor-succession.sh "${{ matrix.features }}"
+          else
+            anchor test ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
+          fi
 
       - name: Validator log on failure
         if: failure()

@@ -52,6 +52,12 @@ describe("lamport-vault", () => {
   const MAX_KEY_HISTORY = Number(program.idl.constants.find((c) => c.name === "maxKeyHistory")!.value);
   /** `MAX_VALIDITY_SLOTS`: the longest window the program accepts (216 000, about a day). */
   const MAX_VALIDITY_SLOTS = Number(program.idl.constants.find((c) => c.name === "maxValiditySlots")!.value);
+  /**
+   * Whether the deployed build is the Heir-enabled one (`--features succession`, docs/SUCCESSION.md):
+   * another program id, and a version-3 vault that is 200 bytes longer. Everything else in this
+   * suite holds for both builds, which is the point of running it against both.
+   */
+  const SUCCESSION = program.idl.instructions.some((i) => i.name === "checkin");
 
   /** A window issued now, open for 5 000 slots. */
   const FAR = () => window(provider);
@@ -139,7 +145,7 @@ describe("lamport-vault", () => {
   it("create", async () => {
     vault = await createVault(keyA);
     const v = await fetchVault(vault);
-    expect(v.version).to.eq(2);
+    expect(v.version).to.eq(SUCCESSION ? 3 : 2);
     expect(Buffer.from(v.lmsPubkey)).to.deep.eq(keyA.pubkey());
     expect(v.spent).to.eq(0);
     expect(v.generation).to.eq(0);
@@ -148,7 +154,7 @@ describe("lamport-vault", () => {
     expect(v.usedKeys).to.deep.eq([]);
     expect(v.createdSlot.toNumber()).to.be.greaterThan(0);
     const info = await connection.getAccountInfo(vault, "confirmed");
-    expect(info!.data.length).to.eq(8 + 1 + 1 + 32 + 56 + 4 + 4 + 8 + (4 + 128) + 4);
+    expect(info!.data.length).to.eq(8 + 1 + 1 + 32 + 56 + 4 + 4 + 8 + (SUCCESSION ? 200 : 0) + (4 + 128) + 4);
   });
 
   it("bad typecodes", async () => {
@@ -712,7 +718,7 @@ describe("lamport-vault", () => {
     const { lms } = loadSdk();
     const sdkKey = lms.LmsPrivateKey.generate({ lmsType: LMS_H5, lmotsType: 3, seed: keyT.seed, I: keyT.i });
     expect(Buffer.from(sdkKey.publicKey)).to.deep.eq(keyT.pubkey());
-    const signerT = new sdk.VaultSigner({ rpc: connection, key: sdkKey, payer, journal: "ephemeral", commitment: "confirmed" });
+    const signerT = new sdk.VaultSigner({ rpc: connection, programId: program.programId, key: sdkKey, payer, journal: "ephemeral", commitment: "confirmed" });
     await expectRejects(signerT.createVault(), /closed: a tombstone holds its address/);
     await expectRejects(signerT.nextQ(), /vault is closed/);
     expect(await sdk.vaultAddressState(connection, vaultT, "confirmed")).to.eq("tombstone");
@@ -894,14 +900,14 @@ describe("lamport-vault", () => {
     expect(Number((await spl.getAccount(connection, heirAtaA, "confirmed")).amount)).to.eq(1000);
     expect(await connection.getAccountInfo(auxA, "confirmed")).to.eq(null);
     // Token-2022, through the SDK helper: finds the vault's accounts of the mint and sweeps each.
-    const res = await sdk.sweepClosed(connection, stranger, vaultS, mint22, { commitment: "confirmed" });
+    const res = await sdk.sweepClosed(connection, stranger, vaultS, mint22, { commitment: "confirmed", programId: program.programId });
     expect(res.heir.equals(heir)).to.eq(true);
     expect(res.swept.map((s: { account: PublicKey }) => s.account.toBase58())).to.deep.eq([ata22.toBase58()]);
     expect(res.heirTokenAccount.equals(ataOf(heir, mint22, spl.TOKEN_2022_PROGRAM_ID))).to.eq(true);
     expect(Number((await spl.getAccount(connection, res.heirTokenAccount, "confirmed", spl.TOKEN_2022_PROGRAM_ID)).amount)).to.eq(11);
     expect(await connection.getAccountInfo(ata22, "confirmed")).to.eq(null);
     // Nothing left: the helper finds no account and sends nothing.
-    const again = await sdk.sweepClosed(connection, stranger, vaultS, mintA, { commitment: "confirmed" });
+    const again = await sdk.sweepClosed(connection, stranger, vaultS, mintA, { commitment: "confirmed", programId: program.programId });
     expect(again.swept).to.deep.eq([]);
     // The tombstone is untouched by all of it.
     const tomb = await connection.getAccountInfo(vaultS, "confirmed");
@@ -1000,7 +1006,7 @@ describe("lamport-vault", () => {
     // no memory of the leaves another signer spent; it must take the bitmap from the vault.
     const { vault: sdk, lms } = loadSdk();
     const key = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
-    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed" });
+    const signer = () => new sdk.VaultSigner({ rpc: connection, programId: program.programId, key, payer, journal: "ephemeral", commitment: "confirmed" });
     const live = signer();
     const created = await live.createVault();
     const vaultS = new PublicKey(created.vault.toBase58());
@@ -1021,7 +1027,7 @@ describe("lamport-vault", () => {
     expect(await blind.nextQ()).to.eq(4);
     await expectRejects(blind.execute(transfer), /no journal exists/);
     // The operator who knows every earlier signature landed adopts the chain's count: 0..3 spent, 4 next.
-    const restored = new sdk.VaultSigner({ rpc: connection, key, payer, journal: "ephemeral", commitment: "confirmed", adoptChainState: true });
+    const restored = new sdk.VaultSigner({ rpc: connection, programId: program.programId, key, payer, journal: "ephemeral", commitment: "confirmed", adoptChainState: true });
     expect(await restored.nextQ()).to.eq(4);
     await expectRejects(restored.sign(transfer, { q: 2 }), /already spent on chain/);
     const res = await restored.execute(transfer);
@@ -1121,7 +1127,7 @@ describe("lamport-vault", () => {
     const keyId = sdk.keyFingerprint(key.publicKey);
     expect(keyId).to.eq(sha256(Buffer.from(key.publicKey)).toString("hex"));
     const journalPath = path.join(dir, `${keyId}.json`);
-    const signer = () => new sdk.VaultSigner({ rpc: connection, key, payer, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) });
+    const signer = () => new sdk.VaultSigner({ rpc: connection, programId: program.programId, key, payer, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) });
     const live = signer();
     expect(live.journal.path).to.eq(journalPath);
     const created = await live.createVault();
@@ -1156,8 +1162,8 @@ describe("lamport-vault", () => {
     expect(Buffer.from(v.lmsPubkey)).to.deep.eq(Buffer.from(next.publicKey));
     expect(JSON.parse(fs.readFileSync(journalPath, "utf8"))).to.deep.eq(record(1, 0, [0, 31]));
     // The old key's journal cannot be handed to the new key.
-    expect(() => new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) })).to.throw(/one journal per LMS key/);
-    const fresh = new sdk.VaultSigner({ rpc: connection, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(next.publicKey, { dir }) });
+    expect(() => new sdk.VaultSigner({ rpc: connection, programId: program.programId, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(key.publicKey, { dir }) })).to.throw(/one journal per LMS key/);
+    const fresh = new sdk.VaultSigner({ rpc: connection, programId: program.programId, key: next, payer, vault: vaultJ, commitment: "confirmed", journal: new sdk.FileLeafJournal(next.publicKey, { dir }) });
     const r2 = await fresh.execute(transfer);
     expect(r2.q).to.eq(0);
     expect(r2.generation).to.eq(1);

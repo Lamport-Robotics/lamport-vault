@@ -18,7 +18,19 @@ import { type Action, decodeAction, encodeAction, type ValidityWindow } from "./
 import { ByteReader, ByteWriter } from "./borsh.ts";
 import { IX } from "./discriminator.ts";
 import { TOKEN_PROGRAM_ID } from "./pda.ts";
-import { LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID } from "./programIds.ts";
+
+/**
+ * The Heir-enabled vault: `programs/lamport-vault` built with the `succession` feature, which is a
+ * separate program with its own id (docs/SUCCESSION.md). Nothing is deployed yet: this id is a
+ * placeholder with no private key, the SHA-256 of `lamport-heir/placeholder-program-id/heir-vault/v1`.
+ * It changes when the program is first deployed.
+ *
+ * These two ids live in this file, and not in `programIds.ts`, so that a bundle which never
+ * touches succession (the cold signer) does not carry them.
+ */
+export const LAMPORT_VAULT_HEIR_PROGRAM_ID = new PublicKey("HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb");
+/** The `short-clocks` test build of the Heir-enabled vault, in which a day lasts a second. Placeholder, as above. */
+export const LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID = new PublicKey("DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS");
 
 /** How long a day lasts on a program's succession clock. */
 export interface SuccessionClock {

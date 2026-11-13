@@ -23,11 +23,11 @@ import {
 import { IX } from "../src/discriminator.ts";
 import { vaultMessage } from "../src/message.ts";
 import { findVaultPda, vaultId } from "../src/pda.ts";
-import { LAMPORT_VAULT_HEIR_PROGRAM_ID, LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID } from "../src/programIds.ts";
 import {
   checkinCountsUntil,
   encodeHeirAction,
-  type HeirAction,
+  LAMPORT_VAULT_HEIR_PROGRAM_ID,
+  LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID,
   SET_SUCCESSION_ACTION_SIZE,
   SET_SUCCESSION_VARIANT,
   SHORT_SUCCESSION_CLOCK,
@@ -38,6 +38,7 @@ import {
   successionLimits,
   successionReleaseAt,
   successionStatus,
+  type HeirAction,
 } from "../src/succession.ts";
 
 const PK_11 = new PublicKey(new Uint8Array(32).fill(0x11));

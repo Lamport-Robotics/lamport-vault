@@ -7,6 +7,7 @@ import { LMS_SHA256_M32_H10, LMS_SHA256_M32_H15, LMS_SHA256_M32_H5, lmsParams, p
 import { sha256 } from "@noble/hashes/sha2.js";
 import { PublicKey } from "@solana/web3.js";
 import { ByteReader, ByteWriter } from "./borsh.ts";
+import { readBool, readI64, writeBool, writeI64 } from "./borshExtra.ts";
 import { ACCOUNT } from "./discriminator.ts";
 
 /** `Vault` layout version of the vault program. */
@@ -394,31 +395,28 @@ function readSuccession(r: ByteReader): SuccessionState {
     claim: r.pubkey(),
     windowSecs: r.u64(),
     waitSecs: r.u64(),
-    lastSignedTs: r.i64(),
-    lastCheckinTs: r.i64(),
+    lastSignedTs: readI64(r),
+    lastCheckinTs: readI64(r),
     checkinKey: r.pubkey(),
     contactKey: r.pubkey(),
-    contactUsed: r.bool(),
-    extendedUntilTs: r.i64(),
-    waitOpen: r.bool(),
-    waitStartedTs: r.i64(),
+    contactUsed: readBool(r),
+    extendedUntilTs: readI64(r),
+    waitOpen: readBool(r),
+    waitStartedTs: readI64(r),
     reserved: r.fixed(54),
   };
 }
 
 function writeSuccession(w: ByteWriter, s: SuccessionState): void {
-  w.pubkey(s.claim)
-    .u64(s.windowSecs)
-    .u64(s.waitSecs)
-    .i64(s.lastSignedTs)
-    .i64(s.lastCheckinTs)
-    .pubkey(s.checkinKey)
-    .pubkey(s.contactKey)
-    .bool(s.contactUsed)
-    .i64(s.extendedUntilTs)
-    .bool(s.waitOpen)
-    .i64(s.waitStartedTs)
-    .fixed(s.reserved, 54);
+  w.pubkey(s.claim).u64(s.windowSecs).u64(s.waitSecs);
+  writeI64(w, s.lastSignedTs);
+  writeI64(w, s.lastCheckinTs);
+  w.pubkey(s.checkinKey).pubkey(s.contactKey);
+  writeBool(w, s.contactUsed);
+  writeI64(w, s.extendedUntilTs);
+  writeBool(w, s.waitOpen);
+  writeI64(w, s.waitStartedTs);
+  w.fixed(s.reserved, 54);
 }
 
 /**

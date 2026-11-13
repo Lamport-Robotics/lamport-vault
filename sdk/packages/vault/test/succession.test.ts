@@ -24,12 +24,13 @@ import {
 } from "../src/accounts.ts";
 import { ACTION_SIZES, decodeAction, encodeAction, MAX_ACTION_BYTES } from "../src/action.ts";
 import { ByteReader, ByteWriter } from "../src/borsh.ts";
+import { readBool, readI64, writeBool, writeI64 } from "../src/borshExtra.ts";
 import { IX, instructionDiscriminator } from "../src/discriminator.ts";
 import { executeRemainingAccounts } from "../src/instructions.ts";
 import { MemoryLeafJournal } from "../src/journal.ts";
 import { vaultMessage } from "../src/message.ts";
 import { findVaultPdaForKey, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, vaultId } from "../src/pda.ts";
-import { LAMPORT_VAULT_HEIR_PROGRAM_ID, LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID, LAMPORT_VAULT_PROGRAM_ID } from "../src/programIds.ts";
+import { LAMPORT_VAULT_PROGRAM_ID } from "../src/programIds.ts";
 import { VaultSigner } from "../src/signer.ts";
 import {
   checkinCountsUntil,
@@ -54,6 +55,8 @@ import {
   type SuccessionPlan,
   successionReleaseAt,
   successionStatus,
+  LAMPORT_VAULT_HEIR_PROGRAM_ID,
+  LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID,
 } from "../src/succession.ts";
 import { buildSuccessionKat } from "../scripts/succession-kat.ts";
 import { MockChain } from "./mock.ts";
@@ -207,10 +210,28 @@ describe("the version-3 vault", () => {
 
   it("reads and writes signed 64-bit times", () => {
     for (const x of [0n, 1n, -1n, T0, -T0, (1n << 63n) - 1n, -(1n << 63n)]) {
-      expect(new ByteReader(new ByteWriter().i64(x).bytes()).i64()).toBe(x);
+      expect(readI64(new ByteReader(writeI64(new ByteWriter(), x).bytes()))).toBe(x);
     }
-    expect(() => new ByteWriter().i64(1n << 63n)).toThrow(RangeError);
-    expect(toHex(new ByteWriter().i64(-1n).bytes())).toBe("ff".repeat(8));
+    expect(() => writeI64(new ByteWriter(), 1n << 63n)).toThrow(RangeError);
+    expect(() => writeI64(new ByteWriter(), -(1n << 63n) - 1n)).toThrow(RangeError);
+    expect(toHex(writeI64(new ByteWriter(), -1n).bytes())).toBe("ff".repeat(8));
+    expect(readI64(new ByteReader(writeI64(new ByteWriter(), 7).bytes()))).toBe(7n);
+  });
+
+  it("reads and writes bools as one byte, 0 or 1", () => {
+    expect(toHex(writeBool(writeBool(new ByteWriter(), true), false).bytes())).toBe("0100");
+    expect(readBool(new ByteReader(Uint8Array.of(1)))).toBe(true);
+    expect(readBool(new ByteReader(Uint8Array.of(0)))).toBe(false);
+    expect(() => readBool(new ByteReader(Uint8Array.of(2)))).toThrow(/bool/);
+  });
+
+  it("keeps the Borsh classes the cold signer bundles as they were", () => {
+    // web/signer.html bundles ByteWriter and ByteReader whole; a method added to either changes
+    // that file. Succession's extra field types are functions in borshExtra.ts instead.
+    for (const name of ["i64", "bool"]) {
+      expect(name in ByteWriter.prototype, `ByteWriter.${name}`).toBe(false);
+      expect(name in ByteReader.prototype, `ByteReader.${name}`).toBe(false);
+    }
   });
 });
 

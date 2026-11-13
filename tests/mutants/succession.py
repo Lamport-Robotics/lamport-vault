@@ -129,6 +129,30 @@ def failed_tests(output):
     return [l.split()[1] for l in output.splitlines() if l.startswith("test ") and l.rstrip().endswith("FAILED")]
 
 
+def tests_run(output):
+    return len([l for l in output.splitlines() if l.startswith("test ") and " ... " in l])
+
+
+def baseline():
+    """The untouched program must build and pass every test before a mutant can be called caught.
+
+    A mutant counts as caught when a test fails. Without this, a missing build, a stale file or a
+    broken machine would "catch" every one of them.
+    """
+    build = sh(BUILD, ROOT)
+    if build.returncode != 0:
+        print("the untouched program does not build:", build.stderr[-400:])
+        return False
+    unit = sh("cargo test -p lamport-vault --features succession 2>&1", ROOT).stdout
+    svm = sh("cargo test --features succession 2>&1", os.path.join(ROOT, "tests", "svm")).stdout
+    ran, failed = tests_run(unit) + tests_run(svm), failed_tests(unit) + failed_tests(svm)
+    if tests_run(unit) == 0 or tests_run(svm) == 0 or failed:
+        print(f"the untouched program must pass every test first: {tests_run(unit)} unit and {tests_run(svm)} on-chain tests ran, {len(failed)} failed {failed[:5]}")
+        return False
+    print(f"baseline  {ran} tests pass on the untouched program", flush=True)
+    return True
+
+
 def main():
     only = sys.argv[1:]
     shard, shards = 1, 1
@@ -139,6 +163,8 @@ def main():
             print(f"--shard {shard}/{shards}: the first number runs from 1 to the second")
             return 2
         del only[at:at + 2]
+    if not baseline():
+        return 1
     bad = []
     ran = 0
     for index, (name, file, old, new) in enumerate(MUTANTS):

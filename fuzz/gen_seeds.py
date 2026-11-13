@@ -46,4 +46,14 @@ write("action_decode", "short", bytes([0]) + pk32[:10])
 for i, pat in enumerate([bytes(range(256)), bytes([0] * 64), bytes([0xff] * 64), bytes([1, 2, 3, 4, 5, 6, 7, 8] * 16)]):
     write("key_history", f"seed{i}", pat)
     write("leaf_bitmap", f"seed{i}", pat)
+# The succession targets (built with --features succession). `succession_action` takes an Arbitrary
+# enum whose raw variants carry bytes; the action vectors of kat/succession_encoding.json give it
+# real encodings to start from. `succession_clock` is all structure: byte patterns only.
+succ = json.load(open(os.path.join(kat, "succession_encoding.json")))
+for name, vec in succ["actions"]["vectors"].items():
+    write("succession_action", name, bytes.fromhex(vec["action_hex"]))
+write("succession_action", "short", bytes([5]) + pk32[:10])
+write("succession_action", "bad_variant", bytes([6]) + pk32)
+for i, pat in enumerate([bytes(range(256)), bytes([0] * 64), bytes([0xff] * 64), bytes([1, 2, 3, 4, 5, 6, 7, 8] * 16)]):
+    write("succession_clock", f"seed{i}", pat)
 print(f"{len(fixtures)} fixtures; seeds written under {os.path.join(here, 'seeds')}")

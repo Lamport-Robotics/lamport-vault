@@ -5,6 +5,8 @@
 #
 # Targets live in fuzz/ (its own workspace); seeds come from kat/ via
 # fuzz/gen_seeds.py. A crash uploads the reproducer as an artifact.
+# succession_action and succession_clock fuzz the build with the `succession`
+# feature; the others fuzz the vault as it is.
 name: fuzz
 
 on:
@@ -43,6 +45,13 @@ jobs:
       fail-fast: false
       matrix:
         target: [lms_parse, lms_verify, action_decode, key_history, leaf_bitmap]
+        features: [""]
+        # the succession targets fuzz the build with that feature (docs/SUCCESSION.md)
+        include:
+          - target: succession_action
+            features: succession
+          - target: succession_clock
+            features: succession
     env:
       # 5 min smoke on push/PR, 2 h on the weekly schedule, user-chosen on dispatch.
       SECONDS: ${{ github.event_name == 'schedule' && '7200' || (github.event_name == 'workflow_dispatch' && inputs.seconds) || '300' }}
@@ -77,18 +86,18 @@ jobs:
           mkdir -p corpus/${{ matrix.target }}
 
       - name: Build
-        run: cd fuzz && cargo +nightly fuzz build ${{ matrix.target }}
+        run: cd fuzz && cargo +nightly fuzz build ${{ matrix.features && format('--features {0}', matrix.features) || '' }} ${{ matrix.target }}
 
       - name: Run ${{ matrix.target }} for $SECONDS s
         run: |
           cd fuzz
-          cargo +nightly fuzz run ${{ matrix.target }} \
+          cargo +nightly fuzz run ${{ matrix.features && format('--features {0}', matrix.features) || '' }} ${{ matrix.target }} \
             corpus/${{ matrix.target }} seeds/${{ matrix.target }} \
             -- -max_total_time=$SECONDS -max_len=16384 -timeout=30 -print_final_stats=1
 
       - name: Minimise corpus (weekly only)
         if: github.event_name == 'schedule'
-        run: cd fuzz && cargo +nightly fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+        run: cd fuzz && cargo +nightly fuzz cmin ${{ matrix.features && format('--features {0}', matrix.features) || '' }} ${{ matrix.target }} corpus/${{ matrix.target }}
 
       - name: Upload crash artifacts
         if: failure()

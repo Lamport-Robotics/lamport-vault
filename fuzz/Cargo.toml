@@ -30,6 +30,12 @@ anchor-lang = "0.32.1"
 lamport-lms = { path = "../programs/lms", features = ["sign"] }
 lamport-vault = { path = "../programs/lamport-vault", features = ["no-entrypoint"] }
 
+# The two succession targets fuzz the Heir-enabled build (docs/SUCCESSION.md) and need this
+# feature: `cargo +nightly fuzz run --features succession succession_clock ...`. The other targets
+# are built without it, against the vault as it is.
+[features]
+succession = ["lamport-vault/succession"]
+
 [[bin]]
 name = "lms_parse"
 path = "fuzz_targets/lms_parse.rs"
@@ -61,6 +67,22 @@ bench = false
 [[bin]]
 name = "leaf_bitmap"
 path = "fuzz_targets/leaf_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "succession_action"
+path = "fuzz_targets/succession_action.rs"
+required-features = ["succession"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "succession_clock"
+path = "fuzz_targets/succession_clock.rs"
+required-features = ["succession"]
 test = false
 doc = false
 bench = false

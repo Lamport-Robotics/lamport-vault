@@ -31,6 +31,10 @@ jobs:
         with:
           key: ${{ matrix.succession && 'succession' || 'default' }}
       - run: cargo test --workspace --features lamport-lms/sign${{ matrix.succession && ',lamport-vault/succession' || '' }} --locked
+      # `short-clocks` is the succession build in which a day lasts one second, for devnet tests
+      # (docs/SUCCESSION.md). The same rules have to hold in it.
+      - if: matrix.succession
+        run: cargo test --workspace --features lamport-lms/sign,lamport-vault/short-clocks --locked
 
   sdk:
     runs-on: ubuntu-latest

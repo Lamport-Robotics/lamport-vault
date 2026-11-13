@@ -15,7 +15,7 @@ resolver = "3"
 # id, its version-3 vault, and the succession tests. Use it when the .so was built with the same
 # feature: `anchor build -- --features succession`, then `cargo test --features succession`.
 [features]
-succession = []
+succession = ["dep:spl-token-2022-interface", "dep:spl-associated-token-account-interface"]
 
 # The tests sign thousands of LMS signatures and run the program in a VM: optimise the
 # dependencies, as the program workspace does, and keep debug info for the tests themselves.
@@ -38,4 +38,7 @@ solana-system-interface = { version = "3.2", features = ["bincode"] }
 solana-transaction = "4.1"
 solana-transaction-error = "3.4"
 sha2 = "0.10"
+# Builders for Token-2022's extension instructions, used only by the succession token tests.
+spl-token-2022-interface = { version = "2.1", optional = true }
+spl-associated-token-account-interface = { version = "2", optional = true }
 lamport-lms = { path = "../../programs/lms", features = ["sign"] }

@@ -80,7 +80,7 @@ pub enum Action {
         issued_slot: u64,
         /// Last slot at which the action may execute; at most `issued_slot + MAX_VALIDITY_SLOTS`.
         expiry_slot: u64,
-    },
+    }, #[cfg(feature = "succession")] #[doc = "Arm, change or clear the succession plan (`crate::succession`). Variant 5, 129 bytes."] SetSuccession(crate::succession::SetSuccession),
 }
 
 impl Action {
@@ -106,7 +106,7 @@ impl Action {
             | Action::TransferToken { issued_slot, expiry_slot, .. }
             | Action::Rotate { issued_slot, expiry_slot, .. }
             | Action::Close { issued_slot, expiry_slot, .. }
-            | Action::TransferTokenFrom { issued_slot, expiry_slot, .. } => (*issued_slot, *expiry_slot),
+            | Action::TransferTokenFrom { issued_slot, expiry_slot, .. } => (*issued_slot, *expiry_slot), #[cfg(feature = "succession")] Action::SetSuccession(plan) => (plan.issued_slot, plan.expiry_slot),
         }
     }
 

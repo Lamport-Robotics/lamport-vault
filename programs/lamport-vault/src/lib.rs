@@ -24,7 +24,7 @@ pub use action::Action;
 pub use error::VaultError;
 pub use state::{SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_ACTION_LEN};
 
-declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
+#[cfg(not(feature = "succession"))] declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH"); #[cfg(all(feature = "succession", not(feature = "short-clocks")))] declare_id!("HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb"); #[cfg(feature = "short-clocks")] declare_id!("DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS");
 
 /// Seed prefix of the `Vault` PDA: `["vault", vault_id]`.
 pub const VAULT_SEED: &[u8] = b"vault";
@@ -406,9 +406,9 @@ fn verify_and_act<'info>(
             // Anchor writes `vault` back at exit; with this version byte its
             // serializer writes nothing (see `AccountSerialize for Vault`).
             vault.version = Tombstone::VERSION;
-        }
+        } #[cfg(feature = "succession")] Action::SetSuccession(plan) => crate::succession::set_succession(vault, &vault_key, &plan, remaining)?,
     }
-    Ok(())
+    #[cfg(feature = "succession")] crate::succession::after_signed_action(vault)?; Ok(())
 }
 
 #[program]
@@ -450,7 +450,7 @@ pub mod lamport_vault {
             generation: 0,
             created_slot: Clock::get()?.slot,
             used: vec![0u8; Vault::bitmap_len(pk.lms_type)],
-            used_keys: Vec::new(),
+            used_keys: Vec::new(), #[cfg(feature = "succession")] succession: Default::default(),
         };
         write_account(&vault_ai, &vault)
     }
@@ -631,7 +631,7 @@ pub mod lamport_vault {
         tomb_ai.sub_lamports(payout)?;
         heir.add_lamports(payout)?;
         Ok(())
-    }
+    } #[cfg(feature = "succession")] pub fn checkin(ctx: Context<Checkin>) -> Result<()> { succession::handle_checkin(ctx) } #[cfg(feature = "succession")] pub fn contact_extend(ctx: Context<ContactExtend>) -> Result<()> { succession::handle_contact_extend(ctx) } #[cfg(feature = "succession")] pub fn start_succession(ctx: Context<StartSuccession>) -> Result<()> { succession::handle_start_succession(ctx) } #[cfg(feature = "succession")] pub fn execute_succession<'info>(ctx: Context<'_, '_, 'info, 'info, ExecuteSuccession<'info>>) -> Result<()> { succession::handle_execute_succession(ctx) }
 }
 
 #[derive(Accounts)]
@@ -788,7 +788,7 @@ mod tests {
             generation: 0,
             created_slot: 0,
             used: vec![0u8; Vault::bitmap_len(lms_type)],
-            used_keys: Vec::new(),
+            used_keys: Vec::new(), #[cfg(feature = "succession")] succession: Default::default(),
         }
     }
 
@@ -830,9 +830,9 @@ mod tests {
         assert_eq!(Vault::bitmap_len(LmsType::Sha256M32H5), 4);
         assert_eq!(Vault::bitmap_len(LmsType::Sha256M32H10), 128);
         assert_eq!(Vault::bitmap_len(LmsType::Sha256M32H15), 4096);
-        assert_eq!(Vault::space(LmsType::Sha256M32H5, 0), 126);
-        assert_eq!(Vault::space(LmsType::Sha256M32H10, 0), 250);
-        assert_eq!(Vault::space(LmsType::Sha256M32H15, 0), 4218);
+        assert_eq!(Vault::space(LmsType::Sha256M32H5, 0), 126 + Vault::EXT);
+        assert_eq!(Vault::space(LmsType::Sha256M32H10, 0), 250 + Vault::EXT);
+        assert_eq!(Vault::space(LmsType::Sha256M32H15, 0), 4218 + Vault::EXT);
         // The biggest vault (H15, full history) is under one realloc step and the 10 KB class.
         assert!(Vault::space(LmsType::Sha256M32H15, 128) <= 10 * 1024);
         assert!(!ACCEPTED_LMS_TYPES.contains(&LmsType::Sha256M32H20));
@@ -875,7 +875,7 @@ mod tests {
             generation: 0,
             created_slot: 0,
             used: vec![0u8; Vault::bitmap_len(key.lms_type)],
-            used_keys: Vec::new(),
+            used_keys: Vec::new(), #[cfg(feature = "succession")] succession: Default::default(),
         }
     }
 
@@ -1021,3 +1021,5 @@ mod tests {
 // line added above existing code changes the default build. succession.yml checks that it does not.
 #[cfg(feature = "succession")]
 pub mod succession;
+#[cfg(feature = "succession")]
+pub use succession::*;

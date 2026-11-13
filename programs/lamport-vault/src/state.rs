@@ -40,7 +40,7 @@ pub struct Vault {
     /// Key generation: how many times the key was replaced. Part of the signed message.
     pub generation: u32,
     /// Slot of creation.
-    pub created_slot: u64,
+    pub created_slot: u64, #[cfg(feature = "succession")] #[doc = "The succession plan and its clock: 200 bytes at offset 114 (`crate::succession`)."] pub succession: crate::succession::Succession,
     /// Used-leaf bitmap of the current key, `2^h / 8` bytes; bit `q` (byte
     /// `q / 8`, bit `q % 8`) set means leaf `q` is spent. Zeroed on `Rotate`.
     pub used: Vec<u8>,
@@ -95,7 +95,7 @@ impl AccountDeserialize for Vault {
 
 impl Vault {
     /// Current layout version.
-    pub const VERSION: u8 = 2;
+#[cfg(not(feature = "succession"))] pub const VERSION: u8 = 2; #[cfg(feature = "succession")] #[doc = "Current layout version: 3, the layout with the succession block."] pub const VERSION: u8 = 3;
     /// Bytes before the two vectors: discriminator and fixed fields.
     pub const FIXED: usize = 8 + 1 + 1 + 32 + LMS_PUBLIC_KEY_LEN + 4 + 4 + 8;
 
@@ -107,7 +107,7 @@ impl Vault {
     /// Account size including the discriminator, for a tree of `lms_type` with
     /// `history` past keys recorded.
     pub const fn space(lms_type: LmsType, history: usize) -> usize {
-        Self::FIXED + (4 + Self::bitmap_len(lms_type)) + (4 + KEY_HASH_LEN * history)
+        Self::FIXED + (4 + Self::bitmap_len(lms_type)) + (4 + KEY_HASH_LEN * history) + Self::EXT
     }
 
     /// The `used_keys` entry for an LMS public key.
@@ -268,4 +268,11 @@ impl SigBuffer {
         self.filled = end as u16;
         Ok(())
     }
+}
+
+#[cfg(not(feature = "succession"))]
+impl Vault {
+    /// Bytes the succession block adds to a vault account: none in this build. With the
+    /// `succession` feature the constant comes from `succession.rs` instead.
+    pub const EXT: usize = 0;
 }

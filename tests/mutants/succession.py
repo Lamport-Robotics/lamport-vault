@@ -6,8 +6,9 @@ crate's unit tests and the LiteSVM suite. Every mutant has to be caught by at le
 mutant that survives is a rule no test defends. Each mutation is a text replacement in
 programs/lamport-vault/src, undone before the next one.
 
-    python3 tests/mutants/succession.py            # all of them
-    python3 tests/mutants/succession.py cap        # only mutants whose name contains "cap"
+    python3 tests/mutants/succession.py                # all of them
+    python3 tests/mutants/succession.py cap            # only mutants whose name contains "cap"
+    python3 tests/mutants/succession.py --shard 2/4    # every fourth mutant, starting with the second (CI)
 
 Needs `cargo build-sbf` on the PATH. Exits non-zero if a mutant survives, or if a pattern no longer
 matches the source (then the list below needs the same edit the source got).
@@ -130,10 +131,22 @@ def failed_tests(output):
 
 def main():
     only = sys.argv[1:]
+    shard, shards = 1, 1
+    if "--shard" in only:
+        at = only.index("--shard")
+        shard, shards = (int(x) for x in only[at + 1].split("/"))
+        if not 1 <= shard <= shards:
+            print(f"--shard {shard}/{shards}: the first number runs from 1 to the second")
+            return 2
+        del only[at:at + 2]
     bad = []
-    for name, file, old, new in MUTANTS:
+    ran = 0
+    for index, (name, file, old, new) in enumerate(MUTANTS):
+        if index % shards != shard - 1:
+            continue
         if only and not any(o in name for o in only):
             continue
+        ran += 1
         path = os.path.join(SRC, file)
         with open(path) as f:
             original = f.read()
@@ -162,6 +175,9 @@ def main():
         finally:
             with open(path, "w") as f:
                 f.write(original)
+    if ran == 0:
+        print("no mutant was selected")
+        return 1
     restored = sh(BUILD, ROOT)
     if restored.returncode != 0:
         print("the restored source does not build:", restored.stderr[-400:])
@@ -169,7 +185,7 @@ def main():
     if bad:
         print(f"{len(bad)} mutant(s) not caught: {bad}")
         return 1
-    print("every mutant was caught")
+    print(f"every mutant was caught ({ran} of {len(MUTANTS)} run)")
     return 0
 
 

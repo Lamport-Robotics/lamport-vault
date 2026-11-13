@@ -1,7 +1,8 @@
 name: succession
 
 # The vault's `succession` feature (Lamport Heir, docs/SUCCESSION.md) is extra code behind a cargo
-# feature. Two things are checked here, with the image and solana-verify version verify.yml pins:
+# feature. Three things are checked here, the first two with the image and solana-verify version
+# verify.yml pins:
 #
 #   default build unchanged   on a pull request from a branch named succession*: the DEFAULT build
 #                             of each program at the pull request is byte-for-byte the default
@@ -11,11 +12,16 @@ name: succession
 #                             those branches.
 #   succession build          the build WITH the feature: hash and size in the job summary, the
 #                             .so as an artifact. It is a different program with its own id.
+#   every mutant is caught    tests/mutants/succession.py breaks the succession code one rule at a
+#                             time and requires the unit tests or the LiteSVM suite to notice each
+#                             time. Split four ways, since every mutant is a rebuild.
 
 on:
   pull_request:
     paths:
       - "programs/**"
+      - "tests/svm/**"
+      - "tests/mutants/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/succession.yml"
@@ -25,6 +31,10 @@ permissions:
   contents: read
 
 env:
+  # for the mutation check, which builds on the runner as anchor.yml does
+  AGAVE_VERSION: "2.3.13"
+  AGAVE_INSTALL_SHA256: "44f37013c80bf1122067b250da38339a0b061dafde1f4162f037b4ce0008afa5"
+  PLATFORM_TOOLS: v1.56
   SOLANA_VERIFY_VERSION: "0.5.2"
   # 2.3.13, pinned by digest (the same image as verify.yml).
   BASE_IMAGE: solanafoundation/solana-verifiable-build@sha256:0cf72459e089f3a928efd48b718d81817a8c1c380229edee2099dd651aaef3b9
@@ -143,3 +153,58 @@ jobs:
           name: lamport_vault-succession-${{ github.sha }}
           path: target/deploy/lamport_vault.so
           if-no-files-found: error
+
+  mutants:
+    name: every mutant is caught (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # one cache for the four shards: they build the same things
+          key: succession-mutants
+          workspaces: |
+            . -> target
+            tests/svm -> target
+          cache-targets: true
+
+      - name: Cache platform-tools and the SBF toolchain
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/solana
+          key: platform-tools-${{ env.PLATFORM_TOOLS }}-${{ runner.os }}
+          restore-keys: |
+            platform-tools-${{ env.PLATFORM_TOOLS }}-
+
+      - name: Cache agave ${{ env.AGAVE_VERSION }}
+        id: agave-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/solana/install
+          key: agave-${{ env.AGAVE_VERSION }}-${{ runner.os }}
+
+      - name: Install agave ${{ env.AGAVE_VERSION }}
+        if: steps.agave-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://release.anza.xyz/v${AGAVE_VERSION}/install" -o /tmp/agave-install.sh
+          echo "${AGAVE_INSTALL_SHA256}  /tmp/agave-install.sh" | sha256sum -c -
+          sh /tmp/agave-install.sh
+
+      - name: Add agave to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      # The script rebuilds the program for every mutant and runs `cargo test` in the workspace
+      # and in tests/svm, whose rust-toolchain.toml pins the toolchain litesvm needs.
+      - name: Mutation check, shard ${{ matrix.shard }} of 4
+        run: python3 tests/mutants/succession.py --shard ${{ matrix.shard }}/4

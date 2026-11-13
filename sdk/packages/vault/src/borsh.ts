@@ -35,6 +35,18 @@ export class ByteWriter {
     return this.raw(out);
   }
 
+  /** Signed 64-bit, two's complement, little-endian (Borsh `i64`). */
+  i64(x: bigint | number): this {
+    const v = typeof x === "number" ? BigInt(x) : x;
+    if (v < -(1n << 63n) || v >= 1n << 63n) throw new RangeError(`i64 out of range: ${v}`);
+    return this.u64(BigInt.asUintN(64, v));
+  }
+
+  /** Borsh `bool`: one byte, 0 or 1. */
+  bool(x: boolean): this {
+    return this.u8(x ? 1 : 0);
+  }
+
   pubkey(pk: PublicKey): this {
     return this.raw(pk.toBytes());
   }
@@ -108,6 +120,18 @@ export class ByteReader {
     for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(this.data[this.offset + i]!);
     this.offset += 8;
     return v;
+  }
+
+  /** Signed 64-bit, two's complement, little-endian (Borsh `i64`). */
+  i64(): bigint {
+    return BigInt.asIntN(64, this.u64());
+  }
+
+  /** Borsh `bool`: one byte, 0 or 1; anything else is refused. */
+  bool(): boolean {
+    const b = this.u8();
+    if (b > 1) throw new Error(`decode: bool byte is ${b}`);
+    return b === 1;
   }
 
   pubkey(): PublicKey {

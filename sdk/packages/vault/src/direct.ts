@@ -28,7 +28,7 @@ import {
   signBytes,
 } from "@solana/kit";
 import { type Commitment, PublicKey, SystemProgram, TransactionInstruction, type AccountMeta } from "@solana/web3.js";
-import { type Action, encodeAction } from "./action.ts";
+import { encodeHeirAction, type HeirAction } from "./succession.ts";
 import { ByteWriter } from "./borsh.ts";
 import { IX } from "./discriminator.ts";
 import { type CloseTokenAccount, EXECUTE_COMPUTE_UNITS, executeRemainingAccounts } from "./instructions.ts";
@@ -55,8 +55,8 @@ export interface ExecuteDirectParams {
   vault: PublicKey;
   /** Signs the transaction; on `Rotate` also pays the vault's 16-byte rent delta. */
   payer: PublicKey;
-  action: Action;
-  /** The LMS signature over `vaultMessage(vault, generation, encodeAction(action))`. */
+  action: HeirAction;
+  /** The LMS signature over `vaultMessage(vault, generation, encodeHeirAction(action))`. */
   signature: Uint8Array;
   /** Token program for TransferToken (Token or Token-2022). Default: Token. */
   tokenProgram?: PublicKey;
@@ -73,7 +73,7 @@ export interface ExecuteDirectParams {
  * the same remaining accounts as `execute`. Data = discriminator || vec<u8> action || vec<u8> signature.
  */
 export function executeDirectInstruction(p: ExecuteDirectParams): TransactionInstruction {
-  const actionBytes = encodeAction(p.action);
+  const actionBytes = encodeHeirAction(p.action);
   if (actionBytes.length === 0 || actionBytes.length > 256) throw new Error("action must be 1..256 bytes");
   const data = new ByteWriter().raw(IX.executeDirect).vecU8(actionBytes).vecU8(p.signature).bytes();
   return new TransactionInstruction({

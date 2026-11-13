@@ -1,0 +1,523 @@
+{
+  "source": "@lamport-robotics/vault (this repository), scripts/succession-kat.ts",
+  "note": "The Heir-enabled program: programs/lamport-vault built with the `succession` feature. The program ids are placeholders with no private key until a deployment exists.",
+  "program_ids": {
+    "lamport_vault_heir": "HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb",
+    "lamport_vault_heir_short_clocks": "DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS"
+  },
+  "inputs": {
+    "pk_11": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+    "pk_44": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+    "pk_55": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+    "h5_pubkey_hex": "000000050000000300112233445566778899aabbccddeeffcd079a17aad0d1f9554c1812f20a4d465dd0503acd83608f890a58d715e20253",
+    "h10_pubkey_hex": "00000006000000034c616d706f727420526f626f7469637363aa0e1c3a5949b62fc83d2506d79688f5116d25fbd201c70a63bf3bec9a8521",
+    "issued_slot": "305397760",
+    "expiry_slot": "305419896",
+    "generation": 1,
+    "t0": "1800000000"
+  },
+  "discriminators": {
+    "checkin": "dfafa51b7b0736fc",
+    "contact_extend": "388252be1df02138",
+    "start_succession": "1b27eb49a8bd24de",
+    "execute_succession": "409e06ddf8bfc924"
+  },
+  "limits": {
+    "clock": {
+      "day_secs": "86400",
+      "min_window_secs": "7776000",
+      "min_wait_secs": "2592000",
+      "max_duration_secs": "3153600000",
+      "checkin_cap_secs": "63072000",
+      "contact_extension_secs": "7776000"
+    },
+    "short_clocks": {
+      "day_secs": "1",
+      "min_window_secs": "90",
+      "min_wait_secs": "30",
+      "max_duration_secs": "36500",
+      "checkin_cap_secs": "730",
+      "contact_extension_secs": "90"
+    }
+  },
+  "errors": {
+    "NotArmed": 6100,
+    "WrongCheckinKey": 6101,
+    "CheckinPastCap": 6102,
+    "WrongContactKey": 6103,
+    "ContactAlreadyUsed": 6104,
+    "WaitAlreadyOpen": 6105,
+    "BeforeDeadline": 6106,
+    "NoWaitOpen": 6107,
+    "WaitNotOver": 6108,
+    "WindowOutOfRange": 6109,
+    "WaitOutOfRange": 6110,
+    "ClearCarriesPlan": 6111,
+    "ClaimAccountMissing": 6112,
+    "ClaimIsTheVault": 6113,
+    "ClaimNotUsable": 6114,
+    "WrongClaim": 6115,
+    "Overflow": 6116
+  },
+  "pdas": {
+    "vault_id_hex": "36bfe00f25cee3b40a6e4842e3a77988ea05b01d62196682d52d13a773de435a",
+    "vault": {
+      "address": "GEACW8YKJUVJiqELYwNavdCZcPg2gRhnnrihZBLNZ5ZT",
+      "bump": 255
+    }
+  },
+  "actions": {
+    "variant": 5,
+    "size": 129,
+    "vectors": {
+      "set_succession": {
+        "action": {
+          "kind": "SetSuccession",
+          "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "windowSecs": "31536000",
+          "waitSecs": "5184000",
+          "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+          "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+          "issuedSlot": "305397760",
+          "expirySlot": "305419896"
+        },
+        "action_hex": "0511111111111111111111111111111111111111111111111111111111111111118033e10100000000001a4f00000000004444444444444444444444444444444444444444444444444444444444444444555555555555555555555555555555555555555555555555555555555555555500003412000000007856341200000000",
+        "message_hex": "339a937692f9ecc8db2061537759d5bd0c67e95fb3ff8d87da6755b4cc9ebcc5"
+      },
+      "set_succession_no_keys": {
+        "action": {
+          "kind": "SetSuccession",
+          "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "windowSecs": "7776000",
+          "waitSecs": "2592000",
+          "checkinKey": "11111111111111111111111111111111",
+          "contactKey": "11111111111111111111111111111111",
+          "issuedSlot": "305397760",
+          "expirySlot": "305419896"
+        },
+        "action_hex": "05111111111111111111111111111111111111111111111111111111111111111100a7760000000000008d2700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003412000000007856341200000000",
+        "message_hex": "9eceb633d612bbe591b1ce0462e76e0528c1d3540a32f79cbcc67b9d5c62e503"
+      },
+      "clear_succession": {
+        "action": {
+          "kind": "SetSuccession",
+          "claim": "11111111111111111111111111111111",
+          "windowSecs": "0",
+          "waitSecs": "0",
+          "checkinKey": "11111111111111111111111111111111",
+          "contactKey": "11111111111111111111111111111111",
+          "issuedSlot": "305397760",
+          "expirySlot": "305419896"
+        },
+        "action_hex": "050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003412000000007856341200000000",
+        "message_hex": "4bd670cb35990320e0252ac57411f2af79d8f0467e45646f55363a25d9d5a2f5"
+      },
+      "transfer_sol": {
+        "action": {
+          "kind": "TransferSol",
+          "to": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "lamports": "1500000000",
+          "issuedSlot": "305397760",
+          "expirySlot": "305419896"
+        },
+        "action_hex": "001111111111111111111111111111111111111111111111111111111111111111002f68590000000000003412000000007856341200000000",
+        "message_hex": "e10c8467c8d30535fde974be9d4d9e7ff500c1a26ae528fd3aa6ca4152f75a80"
+      },
+      "close": {
+        "action": {
+          "kind": "Close",
+          "to": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "issuedSlot": "305397760",
+          "expirySlot": "305419896"
+        },
+        "action_hex": "03111111111111111111111111111111111111111111111111111111111111111100003412000000007856341200000000",
+        "message_hex": "fbf0b8c45171ac1be1c79d3770cd6ac20e27f819d7d65da33faef155c9499230"
+      }
+    }
+  },
+  "accounts": {
+    "vault_version": 3,
+    "block_offset": 114,
+    "block_size": 200,
+    "vault_hex": "d308e82b0298757703ff36bfe00f25cee3b40a6e4842e3a77988ea05b01d62196682d52d13a773de435a000000050000000300112233445566778899aabbccddeeffcd079a17aad0d1f9554c1812f20a4d465dd0503acd83608f890a58d715e202530200000001000000443322110000000011111111111111111111111111111111111111111111111111111111111111118033e10100000000001a4f000000000000d2496b0000000000a4596b0000000044444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555010000dd6d00000000018051de6d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000500000001000000d93af4c881f5a67b746cf1b989f7f95e",
+    "vault": {
+      "version": 3,
+      "bump": 255,
+      "vaultId": "36bfe00f25cee3b40a6e4842e3a77988ea05b01d62196682d52d13a773de435a",
+      "lmsPubkey": "000000050000000300112233445566778899aabbccddeeffcd079a17aad0d1f9554c1812f20a4d465dd0503acd83608f890a58d715e20253",
+      "spent": 2,
+      "generation": 1,
+      "createdSlot": "287454020",
+      "succession": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "1801036800",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": true,
+        "extendedUntilTs": "1843200000",
+        "waitOpen": true,
+        "waitStartedTs": "1843286400",
+        "reserved": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "used": "05000000",
+      "usedKeys": [
+        "d93af4c881f5a67b746cf1b989f7f95e"
+      ]
+    },
+    "sizes": {
+      "vault_h5": 326,
+      "vault_h10": 450,
+      "vault_h15": 4418
+    }
+  },
+  "clock": [
+    {
+      "name": "no plan",
+      "state": {
+        "claim": "11111111111111111111111111111111",
+        "windowSecs": "0",
+        "waitSecs": "0",
+        "lastSignedTs": "0",
+        "lastCheckinTs": "0",
+        "checkinKey": "11111111111111111111111111111111",
+        "contactKey": "11111111111111111111111111111111",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1800000000",
+      "activity": "0",
+      "deadline": "0",
+      "release_at": null,
+      "checkin_counts_until": "63072000",
+      "phase": "unarmed",
+      "earliest_release": null
+    },
+    {
+      "name": "armed a moment ago",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1800000000",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1836720001"
+    },
+    {
+      "name": "at the deadline, which is not past it",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1831536000",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1836720001"
+    },
+    {
+      "name": "one second past the deadline",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1831536001",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "overdue",
+      "earliest_release": "1836720001"
+    },
+    {
+      "name": "a check-in moved the window",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "1825920000",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1834560000",
+      "activity": "1825920000",
+      "deadline": "1857456000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1862640001"
+    },
+    {
+      "name": "a check-in exactly at the cap",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "1863072000",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1863072000",
+      "activity": "1863072000",
+      "deadline": "1894608000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1899792001"
+    },
+    {
+      "name": "a check-in field past the cap counts only to the cap",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "2232000000",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1877760000",
+      "activity": "1863072000",
+      "deadline": "1894608000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1899792001"
+    },
+    {
+      "name": "a check-in older than the last signed action",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "1795680000",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1800864000",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1836720001"
+    },
+    {
+      "name": "the contact's extension is the later deadline",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "7776000",
+        "waitSecs": "2592000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": true,
+        "extendedUntilTs": "1834560000",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1834473600",
+      "activity": "1800000000",
+      "deadline": "1834560000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "1837152001"
+    },
+    {
+      "name": "an extension that the window has outrun",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": true,
+        "extendedUntilTs": "1808640000",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1831622400",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "overdue",
+      "earliest_release": "1836806400"
+    },
+    {
+      "name": "waiting, not over",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": true,
+        "waitStartedTs": "1831968000"
+      },
+      "now": "1834560000",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": "1837152000",
+      "checkin_counts_until": "1863072000",
+      "phase": "waiting",
+      "earliest_release": "1837152000"
+    },
+    {
+      "name": "waiting, over to the second",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": true,
+        "waitStartedTs": "1831968000"
+      },
+      "now": "1837152000",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": "1837152000",
+      "checkin_counts_until": "1863072000",
+      "phase": "releasable",
+      "earliest_release": "1837152000"
+    },
+    {
+      "name": "waiting, one second short",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "31536000",
+        "waitSecs": "5184000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": true,
+        "waitStartedTs": "1831968000"
+      },
+      "now": "1837151999",
+      "activity": "1800000000",
+      "deadline": "1831536000",
+      "release_at": "1837152000",
+      "checkin_counts_until": "1863072000",
+      "phase": "waiting",
+      "earliest_release": "1837152000"
+    },
+    {
+      "name": "the shortest plan",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "7776000",
+        "waitSecs": "2592000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "1807776001",
+      "activity": "1800000000",
+      "deadline": "1807776000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "overdue",
+      "earliest_release": "1810368001"
+    },
+    {
+      "name": "the longest plan",
+      "state": {
+        "claim": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+        "windowSecs": "3153600000",
+        "waitSecs": "3153600000",
+        "lastSignedTs": "1800000000",
+        "lastCheckinTs": "0",
+        "checkinKey": "5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5",
+        "contactKey": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+        "contactUsed": false,
+        "extendedUntilTs": "0",
+        "waitOpen": false,
+        "waitStartedTs": "0"
+      },
+      "now": "4953600000",
+      "activity": "1800000000",
+      "deadline": "4953600000",
+      "release_at": null,
+      "checkin_counts_until": "1863072000",
+      "phase": "quiet",
+      "earliest_release": "8107200001"
+    }
+  ]
+}

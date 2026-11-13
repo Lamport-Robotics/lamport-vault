@@ -19,7 +19,7 @@ import {
   TransactionInstruction,
   type AccountMeta,
 } from "@solana/web3.js";
-import { type Action, encodeAction } from "./action.ts";
+import { encodeHeirAction, type HeirAction } from "./succession.ts";
 import { ByteWriter } from "./borsh.ts";
 import { chunkSignature, MAX_CHUNK_BYTES, type SigChunk } from "./chunk.ts";
 import { IX } from "./discriminator.ts";
@@ -159,7 +159,7 @@ export interface ExecuteParams {
   /** the buffer's rent payer, receives the refund */
   payer: PublicKey;
   /** the action the buffer was opened with; decides the remaining accounts */
-  action: Action;
+  action: HeirAction;
   /** Token program for TransferToken (Token or Token-2022). Default: Token. */
   tokenProgram?: PublicKey;
   /** For `Close`: empty token accounts owned by the vault to close to `to` in the same instruction. */
@@ -173,7 +173,7 @@ export interface ExecuteParams {
 /** Remaining accounts `execute` needs for an action (docs/DESIGN.md "Actions", program `execute` doc). */
 export function executeRemainingAccounts(
   vault: PublicKey,
-  action: Action,
+  action: HeirAction,
   tokenProgram = TOKEN_PROGRAM_ID,
   closeTokenAccounts: CloseTokenAccount[] = [],
   source?: PublicKey,
@@ -192,6 +192,9 @@ export function executeRemainingAccounts(
       // the signature names the source; a different `source` here would only fail on chain (WrongSource)
       if (source && !source.equals(action.from)) throw new Error(`source ${source.toBase58()} differs from the signed action's from ${action.from.toBase58()}`);
       return [w(action.from), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
+    case "SetSuccession":
+      // the program has to see the claim account to refuse an unusable one; a clear names none
+      return action.claim.equals(PublicKey.default) ? [] : [r(action.claim)];
   }
 }
 
@@ -227,7 +230,7 @@ export interface StagedExecutionParams {
   vault: PublicKey;
   payer: PublicKey;
   nonce: bigint;
-  action: Action;
+  action: HeirAction;
   signature: Uint8Array;
   /** Bytes to put in `open_sig_buffer`; default: as many as fit ("auto"); 0 for none. */
   firstChunkSize?: number | "auto";
@@ -240,7 +243,7 @@ export interface StagedExecutionParams {
 }
 
 export function buildStagedExecution(p: StagedExecutionParams): StagedExecution {
-  const actionBytes = encodeAction(p.action);
+  const actionBytes = encodeHeirAction(p.action);
   const base = { programId: p.programId, vault: p.vault, payer: p.payer, nonce: p.nonce, action: actionBytes, sigLen: p.signature.length };
   const firstLen = p.firstChunkSize === undefined || p.firstChunkSize === "auto" ? openSigBufferFirstChunkCapacity(base) : p.firstChunkSize;
   if (firstLen < 0 || firstLen > p.signature.length) throw new RangeError("firstChunkSize out of range");

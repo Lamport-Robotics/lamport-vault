@@ -22,6 +22,11 @@ export const IX = {
   /** Permissionless: moves a closed vault's stranded token balance to the tombstone's heir. */
   sweepClosed: instructionDiscriminator("sweep_closed"),
   sweepClosedSol: instructionDiscriminator("sweep_closed_sol"),
+  // lamport-vault built with the `succession` feature (the Heir-enabled program)
+  checkin: instructionDiscriminator("checkin"),
+  contactExtend: instructionDiscriminator("contact_extend"),
+  startSuccession: instructionDiscriminator("start_succession"),
+  executeSuccession: instructionDiscriminator("execute_succession"),
   // pq-registry
   commit: instructionDiscriminator("commit"),
   openPqBuffer: instructionDiscriminator("open_pq_buffer"),

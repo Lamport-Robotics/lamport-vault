@@ -468,6 +468,24 @@ describe("VaultSigner and SetSuccession", () => {
     expect((await leavesSigned()).length).toBe(4);
   });
 
+  it("refuses a vault whose own plan names this vault, and the ids nothing can be credited to", async () => {
+    const { rpc, vault, signer, leavesSigned } = world(LAMPORT_VAULT_HEIR_PROGRAM_ID, 3);
+    const other = Keypair.generate().publicKey;
+    const otherVault = (claim: PublicKey) =>
+      encodeVault({ version: 3, bump: 0, vaultId: new Uint8Array(32), lmsPubkey: key.publicKey, spent: 0, generation: 0, createdSlot: 1n, succession: { ...emptySuccession(), claim, windowSecs: 90n * DAY, waitSecs: 30n * DAY }, used: new Uint8Array(4), usedKeys: [] });
+    // the other vault already names this one: each tombstone would send a release back to the other
+    rpc.others.set(other.toBase58(), { owner: LAMPORT_VAULT_HEIR_PROGRAM_ID, data: otherVault(vault) });
+    await expect(signer.sign({ kind: "SetSuccession", ...plan({ claim: other }) })).rejects.toThrow(/whose own plan names this vault.*ClaimNotUsable/);
+    for (const id of ["Sysvar1111111111111111111111111111111111111", "NativeLoader1111111111111111111111111111111", "BPFLoaderUpgradeab1e11111111111111111111111"]) {
+      await expect(signer.sign({ kind: "SetSuccession", ...plan({ claim: new PublicKey(id) }) }), id).rejects.toThrow(/ClaimNotUsable/);
+    }
+    expect(await leavesSigned()).toEqual([]);
+    // a vault that names somebody else is an ordinary claim address
+    rpc.others.set(other.toBase58(), { owner: LAMPORT_VAULT_HEIR_PROGRAM_ID, data: otherVault(Keypair.generate().publicKey) });
+    await signer.sign({ kind: "SetSuccession", ...plan({ claim: other }) });
+    expect((await leavesSigned()).length).toBe(1);
+  });
+
   it("refuses a claim address that has no account and no key, unless told to sign anyway", async () => {
     const { rpc, vault, signer, leavesSigned } = world(LAMPORT_VAULT_HEIR_PROGRAM_ID, 3);
     // A program-derived address: off the curve, so no key exists for it. Until a program creates an

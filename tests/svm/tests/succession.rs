@@ -178,6 +178,44 @@ fn the_claim_account_must_be_shown_and_must_be_able_to_receive() {
 }
 
 #[test]
+fn two_vaults_cannot_name_each_other() {
+    // If vault A released to vault B and B released back to A, each tombstone would name the other
+    // and the funds would pass between them for ever. Whichever of the two plans is signed second
+    // is refused.
+    let mut w = world();
+    let this_vault = w.b.vault;
+    let plan = w.plan(90, 30);
+    // another vault of this program, built in its own VM, whose plan already names this one
+    let mut other = Bench::with_key(7);
+    other.set_plan(&Plan { claim: this_vault, ..plan.clone() }).expect("the first of the two plans is an ordinary one");
+    assert_eq!(other.plan().claim, this_vault);
+    w.b.put(&other.vault, &PROGRAM_ID, other.data(&other.vault));
+
+    let spent = w.b.vault_state().spent;
+    assert_eq!(code(w.b.set_plan(&Plan { claim: other.vault, ..plan.clone() })), err::CLAIM_NOT_USABLE);
+    assert!(!w.b.plan().is_armed());
+    assert_eq!(w.b.vault_state().spent, spent, "and the refusal costs no leaf");
+
+    // once the other vault names somebody else, it is an ordinary claim address again
+    other.set_plan(&Plan { claim: Keypair::new().pubkey(), ..plan.clone() }).unwrap();
+    w.b.put(&other.vault, &PROGRAM_ID, other.data(&other.vault));
+    w.b.set_plan(&Plan { claim: other.vault, ..plan.clone() }).expect("a vault that names somebody else");
+}
+
+#[test]
+fn the_ids_of_loaders_and_of_the_sysvar_owner_are_not_claim_addresses() {
+    // No account exists at these addresses, so they look like unused wallets; nothing can ever be
+    // credited to them.
+    let mut w = world();
+    let plan = w.plan(90, 30);
+    for id in ["Sysvar1111111111111111111111111111111111111", "NativeLoader1111111111111111111111111111111", "LoaderV411111111111111111111111111111111111"] {
+        let claim = Pubkey::from_str_const(id);
+        assert_eq!(code(w.b.set_plan(&Plan { claim, ..plan.clone() })), err::CLAIM_NOT_USABLE, "{id}");
+    }
+    assert!(!w.b.plan().is_armed());
+}
+
+#[test]
 fn the_last_free_leaf_cannot_set_a_plan() {
     let mut w = world();
     // mark 31 of the 32 leaves spent, as 31 signed actions would have
@@ -410,7 +448,28 @@ fn an_extension_used_late_still_buys_ninety_days_and_cancels_the_wait() {
 }
 
 #[test]
-fn the_extension_ends_when_the_owner_is_active_and_a_restated_plan_grants_another() {
+fn a_check_in_never_brings_the_deadline_forward() {
+    // The contact extends on day 1 of a 90-day window: the deadline goes to day 180. A check-in on
+    // day 2 must not pull it back to day 92. The check-in key can delay a release, nothing else.
+    let mut w = world();
+    let armed_at = w.arm(90, 30);
+    let (contact, checkin) = (w.contact.insecure_clone(), w.checkin.insecure_clone());
+    w.b.set_time(armed_at + DAY);
+    w.b.contact_extend(&contact).unwrap();
+    w.b.set_time(armed_at + 2 * DAY);
+    w.b.checkin(&checkin).unwrap();
+    assert_eq!(w.b.plan().extended_until_ts, armed_at + 180 * DAY, "the extension stands");
+    // so nobody can open a waiting period on day 93, or on day 180; only after it
+    for day in [93, 150, 180] {
+        w.b.set_time(armed_at + day * DAY);
+        assert_eq!(code(w.b.start()), err::BEFORE_DEADLINE, "day {day}");
+    }
+    w.b.set_time(armed_at + 180 * DAY + 1);
+    w.b.start().expect("after the extended deadline");
+}
+
+#[test]
+fn the_extension_ends_when_the_owner_signs_and_a_restated_plan_grants_another() {
     let mut w = world();
     let armed_at = w.arm(90, 30);
     let (contact, checkin) = (w.contact.insecure_clone(), w.checkin.insecure_clone());
@@ -420,9 +479,13 @@ fn the_extension_ends_when_the_owner_is_active_and_a_restated_plan_grants_anothe
     w.b.set_time(armed_at + 100 * DAY);
     w.b.checkin(&checkin).unwrap();
     let s = w.b.plan();
-    assert_eq!(s.extended_until_ts, 0, "the owner is back: the extension is over");
+    assert_eq!(s.extended_until_ts, armed_at + 180 * DAY, "a check-in leaves the extension alone");
     assert!(s.contact_used);
     assert_eq!(code(w.b.contact_extend(&contact)), err::CONTACT_ALREADY_USED);
+    // a signature with the vault is the owner themselves: that ends it
+    w.b.sign_of_life().unwrap();
+    assert_eq!(w.b.plan().extended_until_ts, 0, "the owner signed: the extension is over");
+    assert!(w.b.plan().contact_used, "and it stays spent until the plan is set again");
 
     // the owner restates the plan with the same contact: one more extension
     let p = w.plan(90, 30);

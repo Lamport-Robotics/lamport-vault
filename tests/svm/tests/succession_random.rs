@@ -125,7 +125,6 @@ impl Model {
             return Err(err::CHECKIN_PAST_CAP);
         }
         self.last_checkin = now;
-        self.extended_until = 0;
         self.wait_open = false;
         self.wait_started = 0;
         Ok(())

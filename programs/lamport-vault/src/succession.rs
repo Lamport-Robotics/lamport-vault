@@ -66,7 +66,8 @@ pub struct Succession {
     /// Whether the contact has used their one extension under the plan as last set.
     pub contact_used: bool,
     /// The contact's extension: the deadline is not before this. 0 when none is in force. It ends
-    /// the next time the owner is active.
+    /// the next time the owner signs with the vault. A check-in does not end it: the check-in key
+    /// must never be able to bring a deadline forward.
     pub extended_until_ts: i64,
     /// Whether a waiting period is open.
     pub wait_open: bool,
@@ -160,15 +161,18 @@ impl Succession {
         Ok(())
     }
 
-    /// A check-in signed by `signer` at `now`. Counts as activity, cancels an open waiting period
-    /// and ends the contact's extension, but only while it is within the cap; past the cap it
-    /// fails with [`SuccessionError::CheckinPastCap`] and a signed action is due.
+    /// A check-in signed by `signer` at `now`. Counts as activity and cancels an open waiting
+    /// period, but only while it is within the cap; past the cap it fails with
+    /// [`SuccessionError::CheckinPastCap`] and a signed action is due.
+    ///
+    /// It can only move the deadline later. In particular it leaves the contact's extension
+    /// alone: clearing it would let whoever holds the check-in key pull an extended deadline back
+    /// to `now + window`, and the contact has only one extension to give.
     pub fn checkin(&mut self, signer: &Pubkey, now: i64) -> Result<()> {
         require!(self.is_armed(), SuccessionError::NotArmed);
         require!(self.checkin_key != Pubkey::default() && *signer == self.checkin_key, SuccessionError::WrongCheckinKey);
         require!(now <= add(self.last_signed_ts, CHECKIN_CAP_SECS)?, SuccessionError::CheckinPastCap);
         self.last_checkin_ts = now;
-        self.extended_until_ts = 0;
         self.cancel_wait();
         Ok(())
     }
@@ -352,9 +356,14 @@ const UNUSABLE_OWNERS: [Pubkey; 6] = [
 ];
 
 /// Refuses a claim address that could never receive the vault: the vault itself, a program, a
-/// token account or mint (SOL sent there is stuck), a sysvar, or one of this program's own accounts
-/// other than an open vault. A plain address, another vault and any other program's account pass:
-/// what the owner names beyond that is theirs to choose.
+/// token account or mint (SOL sent there is stuck), a sysvar, the address of a loader or of the
+/// sysvar owner, or one of this program's own accounts other than an open vault. An open vault
+/// whose own plan names this vault is refused too: two vaults that name each other would hand a
+/// release back and forth between their tombstones for ever. A plain address, another vault and
+/// any other program's account pass: what the owner names beyond that is theirs to choose.
+///
+/// The check on another vault's plan sees one step. A longer ring (A names B, B names C, C names
+/// A) is not caught here; whoever arms vaults for an owner has to look.
 ///
 /// This runs when the plan is set. An address that turns unusable later would block the release,
 /// which is one reason to name an account that cannot change, such as a claim-program plan.
@@ -362,9 +371,14 @@ pub fn check_claim(claim: &AccountInfo, vault_key: &Pubkey) -> Result<()> {
     require_keys_neq!(claim.key(), *vault_key, SuccessionError::ClaimIsTheVault);
     require!(!claim.executable, SuccessionError::ClaimNotUsable);
     require!(!is_token_program(claim.owner) && !UNUSABLE_OWNERS.contains(claim.owner), SuccessionError::ClaimNotUsable);
+    // The same ids as addresses: nothing can ever be credited to them.
+    require!(!UNUSABLE_OWNERS.contains(claim.key), SuccessionError::ClaimNotUsable);
     if *claim.owner == crate::ID {
         let data = claim.try_borrow_data()?;
         require!(data.len() >= 8 && data[..8] == *<Vault as Discriminator>::DISCRIMINATOR, SuccessionError::ClaimNotUsable);
+        // `claim` is the first field of the other vault's succession block, at `Vault::FIXED`.
+        let names_this_vault = data.len() >= Vault::FIXED + 32 && data[Vault::FIXED..Vault::FIXED + 32] == vault_key.to_bytes();
+        require!(!names_this_vault, SuccessionError::ClaimNotUsable);
     }
     Ok(())
 }
@@ -739,12 +753,34 @@ mod tests {
     }
 
     #[test]
-    fn the_extension_ends_when_the_owner_is_next_active_and_a_new_plan_grants_another() {
+    fn a_check_in_never_brings_the_deadline_forward() {
+        // The contact extends early: the deadline goes from T0+90d to T0+180d.
+        let mut s = armed(90, 30);
+        s.contact_extend(&key(3), T0 + D).unwrap();
+        assert_eq!(s.deadline().unwrap(), T0 + 180 * D);
+        // A check-in the next day (the owner, or whoever holds that key) must not pull it back to
+        // T0+92d: the check-in key can delay a release and do nothing else.
+        s.checkin(&key(2), T0 + 2 * D).unwrap();
+        assert_eq!(s.extended_until_ts, T0 + 180 * D, "the extension stands");
+        assert_eq!(s.deadline().unwrap(), T0 + 180 * D);
+        // every later check-in can only leave the deadline where it is or move it later
+        let mut last = s.deadline().unwrap();
+        for day in [3, 50, 89, 90, 91, 120, 179, 200] {
+            s.checkin(&key(2), T0 + day * D).unwrap();
+            let d = s.deadline().unwrap();
+            assert!(d >= last, "day {day}: {d} < {last}");
+            assert!(d >= T0 + (day + 90) * D);
+            last = d;
+        }
+    }
+
+    #[test]
+    fn the_extension_ends_when_the_owner_signs_and_a_new_plan_grants_another() {
         let mut s = armed(90, 30);
         s.contact_extend(&key(3), T0 + 80 * D).unwrap();
         assert_eq!(s.deadline().unwrap(), T0 + 180 * D);
         s.checkin(&key(2), T0 + 100 * D).unwrap();
-        assert_eq!(s.deadline().unwrap(), T0 + 190 * D, "back to activity + window");
+        assert_eq!(s.deadline().unwrap(), T0 + 190 * D, "the check-in moved it later still");
         assert_eq!(code(s.contact_extend(&key(3), T0 + 101 * D)), e(SuccessionError::ContactAlreadyUsed), "still used");
 
         let mut s = armed(90, 30);
@@ -811,6 +847,19 @@ mod tests {
         assert_eq!(code(claim_check(key(1), crate::ID, false, &tombstone, &vault)), unusable, "a closed vault");
         assert_eq!(code(claim_check(key(1), crate::ID, false, &[], &vault)), unusable, "an empty account of this program");
         assert_eq!(code(claim_check(key(1), crate::ID, false, &[1, 2, 3, 4, 5, 6, 7, 8, 9], &vault)), unusable, "a signature buffer or anything else");
+        // another open vault whose own plan names this vault: the two would trap a release between them
+        let mut ring = <Vault as Discriminator>::DISCRIMINATOR.to_vec();
+        ring.resize(Vault::FIXED, 3);
+        ring.extend_from_slice(vault.as_ref());
+        ring.extend_from_slice(&[0u8; 168]);
+        assert_eq!(code(claim_check(key(1), crate::ID, false, &ring, &vault)), unusable, "a vault that names this one");
+        let mut elsewhere = ring.clone();
+        elsewhere[Vault::FIXED] ^= 1;
+        assert!(claim_check(key(1), crate::ID, false, &elsewhere, &vault).is_ok(), "a vault that names somebody else");
+        // the ids of the loaders and of the sysvar owner, used as addresses: nothing can be credited there
+        for id in UNUSABLE_OWNERS {
+            assert_eq!(code(claim_check(id, system, false, &[], &vault)), unusable, "address {id}");
+        }
     }
 
     #[test]

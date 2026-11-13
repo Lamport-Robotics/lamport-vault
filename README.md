@@ -50,6 +50,17 @@ vault is closed and a new one created with a fresh key.
 Key derivation from the 24 words, `issued_slot` and the v2 derivation: `docs/SPEC-DERIVATION.md`,
 `docs/DESIGN.md`.
 
+## succession (a separate build)
+
+`--features succession` builds a different program with its own id: the vault plus an inactivity
+clock, for [Lamport Heir](https://github.com/Lamport-Robotics/lamport-heir). The owner signs where
+the vault should go. If they then sign nothing and check in nowhere for the window they chose (90
+days or more), anyone can open a waiting period (30 days or more); any signature or check-in
+cancels it; when it runs out anyone can release the vault to that address, the way a signed `Close`
+would. No key is added to the funds path. Without the feature the vault builds to the same bytes as
+before, and CI compares them on every succession pull request. Not deployed anywhere, not audited.
+`docs/SUCCESSION.md`.
+
 ## devnet
 
 lamport_vault `B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH`

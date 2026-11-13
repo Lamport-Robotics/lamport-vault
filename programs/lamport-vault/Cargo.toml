@@ -25,6 +25,10 @@ small-history = []
 # default build must stay byte-identical to a build without this feature (CI: succession.yml).
 # A build with it is a separate program under its own id, never an upgrade of the vault.
 succession = []
+# Test build of the succession clock: a day lasts one second, so a whole cycle (window, waiting
+# period, release) fits in a devnet test. It compiles in a program id of its own, so it can never
+# be deployed as the real program. Never use it for anything that holds value.
+short-clocks = ["succession"]
 custom-heap = []
 custom-panic = []
 

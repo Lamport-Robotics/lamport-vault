@@ -3,6 +3,11 @@
 //! messages, PDA derivation under this program's id, Anchor discriminators,
 //! instruction data and account layouts. A mismatch here means the SDK and the
 //! program would disagree on the wire.
+//!
+//! These vectors are the vault's: its program id and its version-2 account. A build with the
+//! `succession` feature is another program with another id and layout, and has its own vectors
+//! and its own file, `succession_encoding.rs`.
+#![cfg(not(feature = "succession"))]
 
 use anchor_lang::prelude::*;
 use anchor_lang::{AccountDeserialize, AccountSerialize, Discriminator, InstructionData};

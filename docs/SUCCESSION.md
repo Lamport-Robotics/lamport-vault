@@ -171,7 +171,10 @@ release_at = wait_started_ts + wait_secs
 A signed action like the other five: it costs a one-time leaf and goes through the same
 `upload_sig` / `execute` (or `execute_direct`) path. Its one remaining account is the claim account,
 which the program refuses if it is the vault itself, a program, a token account or mint, a sysvar,
-or one of this program's own accounts other than an open vault. An all-zero `claim` clears the
+the id of a loader or of the sysvar owner, or one of this program's own accounts other than an
+open vault. An open vault whose own plan names this vault is refused too: two vaults that name each
+other would hand a release back and forth between their tombstones for ever. (The program sees one
+step. A longer ring of vaults is not caught on chain.) An all-zero `claim` clears the
 plan and must carry zeros in every other plan field.
 
 The program accepts an address with nothing at it, because a wallet that has never been used looks
@@ -193,7 +196,7 @@ extension. `Close` leaves a tombstone, as before.
 
 | instruction | signer | accounts | what it does |
 |---|---|---|---|
-| `checkin` | the check-in key | vault (w), check-in key (s) | counts as activity while within 730 days of the last signed action; cancels an open waiting period and ends the extension |
+| `checkin` | the check-in key | vault (w), check-in key (s) | counts as activity while within 730 days of the last signed action; cancels an open waiting period. It can only move the deadline later: the contact's extension stays until the owner signs |
 | `contact_extend` | the contact key | vault (w), contact key (s) | once per plan: `extended_until_ts = max(deadline, now) + 90 days`; cancels an open waiting period |
 | `start_succession` | none | vault (w) | opens the waiting period once `now > deadline` |
 | `execute_succession` | none | vault (w), claim (w), then `[token account, token program]` pairs | once `now >= release_at`: releases the vault to `claim` |
@@ -240,16 +243,16 @@ The token-account checks in `execute_succession` return the vault's own errors, 
 
 | what | where | count |
 |---|---|---|
-| the clock rules, with no chain | unit tests in `src/succession.rs` | 15 |
+| the clock rules, with no chain | unit tests in `src/succession.rs` | 16 |
 | byte layouts against the shared vectors | `programs/lamport-vault/tests/succession_encoding.rs` | 5 |
-| every instruction on chain, each with its refusals | `tests/svm/tests/succession.rs` | 22 |
+| every instruction on chain, each with its refusals | `tests/svm/tests/succession.rs` | 25 |
 | `execute_succession` equals a signed `Close` | `tests/svm/tests/succession_close.rs` | 2 (120 random vault states) |
 | random sequences of signatures, check-ins, extensions and clock jumps against a model | `tests/svm/tests/succession_random.rs` | 400 sequences |
 | Token-2022 extensions through a release and the sweeps | `tests/svm/tests/succession_tokens.rs` | 13 |
-| the SDK: encodings, the clock, the signer's refusals | `sdk/packages/vault/test/succession.test.ts` | 26 |
+| the SDK: encodings, the clock, the signer's refusals | `sdk/packages/vault/test/succession.test.ts` | 30 |
 | the SDK's signer and builders against a real validator | `tests/succession.ts` (localnet, feature build only) | 8 |
 | fuzzing | `fuzz/fuzz_targets/succession_action.rs`, `succession_clock.rs` | in `fuzz.yml` |
-| mutation check | `tests/mutants/succession.py` | 38 mutants |
+| mutation check | `tests/mutants/succession.py` | 40 mutants |
 
 The on-chain tests run the real `.so` in LiteSVM, which can set the clock; the test validator
 cannot jump 90 days. The random test keeps counters and fails if a run never reached a release, a
@@ -257,7 +260,7 @@ cancelled waiting period, a capped check-in and the other states it is meant to 
 
 The mutation check breaks the code one rule at a time (a comparison off by one, a missing check, a
 clock that is not reset), rebuilds, and runs the unit tests and the LiteSVM suite. Every mutant
-must be caught; one that survives is a rule no test defends. It rebuilds the program 38 times, so
+must be caught; one that survives is a rule no test defends. It rebuilds the program 40 times, so
 it has its own job in the `succession` workflow, split four ways:
 
 ```sh

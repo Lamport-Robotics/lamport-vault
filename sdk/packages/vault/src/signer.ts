@@ -626,8 +626,15 @@ export class VaultSigner {
         if (claim?.executable || (owner && (TOKEN_PROGRAM_IDS.has(owner) || UNUSABLE_CLAIM_OWNERS.includes(owner)))) {
           throw new Error(`claim address ${request.claim.toBase58()} cannot receive a release: it is a program, a token account or mint, or a sysvar (ClaimNotUsable)`);
         }
+        if (UNUSABLE_CLAIM_OWNERS.includes(request.claim.toBase58())) {
+          throw new Error(`claim address ${request.claim.toBase58()} is a loader's or the sysvar owner's id: nothing can be credited to it (ClaimNotUsable)`);
+        }
         if (claim && claim.owner.equals(this.programId) && !isLiveVault(new Uint8Array(claim.data))) {
           throw new Error(`claim address ${request.claim.toBase58()} is an account of the vault program that is not an open vault (ClaimNotUsable)`);
+        }
+        // Two vaults that name each other would hand a release back and forth between their tombstones for ever.
+        if (claim && claim.owner.equals(this.programId) && decodeVault(new Uint8Array(claim.data)).succession?.claim.equals(this.vault)) {
+          throw new Error(`claim address ${request.claim.toBase58()} is a vault whose own plan names this vault: a release would be trapped between the two (ClaimNotUsable)`);
         }
         // The program accepts an address with nothing at it: a wallet that has never been used looks
         // like that. But when such an address is also off the curve, no key exists for it. It is a

@@ -109,7 +109,6 @@ impl Model {
             return false;
         }
         self.last_checkin = now;
-        self.extended_until = 0;
         self.wait_open = false;
         self.wait_started = 0;
         true

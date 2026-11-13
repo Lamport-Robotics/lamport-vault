@@ -244,42 +244,101 @@ pub struct SetSuccession {
 }
 
 /// Succession's own errors, numbered from 6100 so the vault's codes stay where they are.
-#[error_code(offset = 6100)]
+///
+/// Written out by hand rather than with `#[error_code]`: Anchor's IDL has room for one error enum
+/// per program, and a second one would replace the vault's own list there. What `require!` and
+/// `err!` need of an error type is below; these codes are not in the IDL, the SDK lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
 pub enum SuccessionError {
-    #[msg("no succession plan is armed")]
-    NotArmed,
-    #[msg("the signer is not the plan's check-in key")]
+    /// No succession plan is armed.
+    NotArmed = 6100,
+    /// The signer is not the plan's check-in key.
     WrongCheckinKey,
-    #[msg("a check-in no longer counts: two years have passed since the last signed action, and one is due")]
+    /// A check-in no longer counts: two years have passed since the last signed action.
     CheckinPastCap,
-    #[msg("the signer is not the plan's contact key")]
+    /// The signer is not the plan's contact key.
     WrongContactKey,
-    #[msg("the contact has already used their one extension")]
+    /// The contact has already used their one extension.
     ContactAlreadyUsed,
-    #[msg("a waiting period is already open")]
+    /// A waiting period is already open.
     WaitAlreadyOpen,
-    #[msg("the deadline has not passed: the owner was active within the window")]
+    /// The deadline has not passed.
     BeforeDeadline,
-    #[msg("no waiting period is open")]
+    /// No waiting period is open.
     NoWaitOpen,
-    #[msg("the waiting period is not over")]
+    /// The waiting period is not over.
     WaitNotOver,
-    #[msg("the window must be between 90 days and 100 years")]
+    /// The window is outside 90 days to 100 years.
     WindowOutOfRange,
-    #[msg("the waiting period must be between 30 days and 100 years")]
+    /// The waiting period is outside 30 days to 100 years.
     WaitOutOfRange,
-    #[msg("clearing the plan takes no window, wait or keys")]
+    /// A clear that still carries a window, a waiting period or a key.
     ClearCarriesPlan,
-    #[msg("the claim account must be passed as the first remaining account")]
+    /// The claim account was not passed as the first remaining account.
     ClaimAccountMissing,
-    #[msg("the claim address is the vault itself")]
+    /// The claim address is the vault itself.
     ClaimIsTheVault,
-    #[msg("the claim address cannot receive a release: a program, a token account or mint, a sysvar, or an account of this program that is not an open vault")]
+    /// The claim address cannot receive a release.
     ClaimNotUsable,
-    #[msg("this is not the plan's claim address")]
+    /// Not the plan's claim address.
     WrongClaim,
-    #[msg("arithmetic overflow")]
+    /// Arithmetic overflow.
     Overflow,
+}
+
+impl SuccessionError {
+    /// The variant's name, as Anchor logs it.
+    pub fn name(&self) -> String {
+        format!("{self:?}")
+    }
+
+    /// The message Anchor logs with the error.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::NotArmed => "no succession plan is armed",
+            Self::WrongCheckinKey => "the signer is not the plan's check-in key",
+            Self::CheckinPastCap => "a check-in no longer counts: two years have passed since the last signed action, and one is due",
+            Self::WrongContactKey => "the signer is not the plan's contact key",
+            Self::ContactAlreadyUsed => "the contact has already used their one extension",
+            Self::WaitAlreadyOpen => "a waiting period is already open",
+            Self::BeforeDeadline => "the deadline has not passed: the owner was active within the window",
+            Self::NoWaitOpen => "no waiting period is open",
+            Self::WaitNotOver => "the waiting period is not over",
+            Self::WindowOutOfRange => "the window must be between 90 days and 100 years",
+            Self::WaitOutOfRange => "the waiting period must be between 30 days and 100 years",
+            Self::ClearCarriesPlan => "clearing the plan takes no window, wait or keys",
+            Self::ClaimAccountMissing => "the claim account must be passed as the first remaining account",
+            Self::ClaimIsTheVault => "the claim address is the vault itself",
+            Self::ClaimNotUsable => "the claim address cannot receive a release: a program, a token account or mint, a sysvar, or an account of this program that is not an open vault",
+            Self::WrongClaim => "this is not the plan's claim address",
+            Self::Overflow => "arithmetic overflow",
+        }
+    }
+}
+
+impl core::fmt::Display for SuccessionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<SuccessionError> for u32 {
+    fn from(e: SuccessionError) -> u32 {
+        e as u32
+    }
+}
+
+impl From<SuccessionError> for anchor_lang::error::Error {
+    fn from(e: SuccessionError) -> Self {
+        anchor_lang::error::Error::from(anchor_lang::error::AnchorError {
+            error_name: e.name(),
+            error_code_number: e.into(),
+            error_msg: e.to_string(),
+            error_origin: None,
+            compared_values: None,
+        })
+    }
 }
 
 /// Owners whose accounts cannot usefully receive a release: programs' own data, and sysvars.
@@ -450,7 +509,7 @@ mod tests {
     }
 
     const fn e(err: SuccessionError) -> u32 {
-        err as u32 + 6100
+        err as u32
     }
 
     const D: i64 = DAY_SECS as i64;
@@ -490,6 +549,21 @@ mod tests {
         assert_eq!(Vault::EXT, 200);
         assert_eq!(code::<()>(err!(SuccessionError::NotArmed)), 6100);
         assert_eq!(code::<()>(err!(SuccessionError::Overflow)), 6116);
+        assert_eq!(u32::from(SuccessionError::WrongClaim), 6115);
+        // every error says its name and something readable, and `?` on it gives the same code
+        let all = [
+            SuccessionError::NotArmed, SuccessionError::WrongCheckinKey, SuccessionError::CheckinPastCap, SuccessionError::WrongContactKey,
+            SuccessionError::ContactAlreadyUsed, SuccessionError::WaitAlreadyOpen, SuccessionError::BeforeDeadline, SuccessionError::NoWaitOpen,
+            SuccessionError::WaitNotOver, SuccessionError::WindowOutOfRange, SuccessionError::WaitOutOfRange, SuccessionError::ClearCarriesPlan,
+            SuccessionError::ClaimAccountMissing, SuccessionError::ClaimIsTheVault, SuccessionError::ClaimNotUsable, SuccessionError::WrongClaim,
+            SuccessionError::Overflow,
+        ];
+        for (i, err) in all.into_iter().enumerate() {
+            assert_eq!(u32::from(err), 6100 + i as u32, "{err:?}");
+            assert!(!err.name().is_empty() && err.to_string().len() > 10);
+            let via_question_mark: Result<()> = Err(err).map_err(Into::into);
+            assert_eq!(code(via_question_mark), 6100 + i as u32);
+        }
         assert!(6100 > ERROR_CODE_OFFSET + 37, "clear of the vault's own codes");
         let mut action = Vec::new();
         plan(365, 60).serialize(&mut action).unwrap();

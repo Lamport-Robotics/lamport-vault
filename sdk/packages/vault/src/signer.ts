@@ -282,12 +282,21 @@ export interface SignOpts {
    * `master` (or when no `master` is known). Off by default; see {@link VaultSignerOptions.master}.
    */
   allowForeignKey?: boolean;
+  /**
+   * SetSuccession only: sign for a claim address that has no account on chain and is not a key's
+   * address (it is off the ed25519 curve, as every program-derived address is). Nobody can sign
+   * for such an address, so what a vault releases there is lost unless a program later creates an
+   * account at it. Off by default: create or fund the account first, then sign.
+   */
+  allowUnkeyedClaim?: boolean;
 }
 
 export interface ExecuteOpts extends SendOpts {
   q?: number;
   /** Rotate only: see {@link SignOpts.allowForeignKey}. */
   allowForeignKey?: boolean;
+  /** SetSuccession only: see {@link SignOpts.allowUnkeyedClaim}. */
+  allowUnkeyedClaim?: boolean;
   nonce?: bigint;
   closeTokenAccounts?: CloseTokenAccount[];
   /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
@@ -620,6 +629,16 @@ export class VaultSigner {
         if (claim && claim.owner.equals(this.programId) && !isLiveVault(new Uint8Array(claim.data))) {
           throw new Error(`claim address ${request.claim.toBase58()} is an account of the vault program that is not an open vault (ClaimNotUsable)`);
         }
+        // The program accepts an address with nothing at it: a wallet that has never been used looks
+        // like that. But when such an address is also off the curve, no key exists for it. It is a
+        // program-derived address that no program has set up yet (a plan that was never created, say),
+        // and a release sent there may never be reachable. The program cannot tell; a client can.
+        if (!claim && !PublicKey.isOnCurve(request.claim.toBytes()) && !opts.allowUnkeyedClaim) {
+          throw new Error(
+            `claim address ${request.claim.toBase58()} has no account on chain and is not a key's address: nobody could sign for what is released there. ` +
+              "If it is a program's address (a plan, a multisig vault), create or fund that account first; pass { allowUnkeyedClaim: true } to sign anyway",
+          );
+        }
       }
     }
     if (request.kind === "TransferSol" || request.kind === "Close") {
@@ -681,6 +700,7 @@ export class VaultSigner {
     const signed = await this.sign(request, {
       ...(opts.q !== undefined ? { q: opts.q } : {}),
       ...(opts.allowForeignKey !== undefined ? { allowForeignKey: opts.allowForeignKey } : {}),
+      ...(opts.allowUnkeyedClaim !== undefined ? { allowUnkeyedClaim: opts.allowUnkeyedClaim } : {}),
       // three or four transactions in a row need more than one transaction's worth of slots
       ...(mode !== "direct-v1" ? { minExpirySlots: STAGED_MIN_EXPIRY_SLOTS } : {}),
     });

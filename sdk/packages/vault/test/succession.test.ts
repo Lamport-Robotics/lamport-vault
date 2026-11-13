@@ -468,6 +468,29 @@ describe("VaultSigner and SetSuccession", () => {
     expect((await leavesSigned()).length).toBe(4);
   });
 
+  it("refuses a claim address that has no account and no key, unless told to sign anyway", async () => {
+    const { rpc, vault, signer, leavesSigned } = world(LAMPORT_VAULT_HEIR_PROGRAM_ID, 3);
+    // A program-derived address: off the curve, so no key exists for it. Until a program creates an
+    // account there (a plan that was never set up, say), a release sent to it could not be claimed.
+    const [unkeyed] = PublicKey.findProgramAddressSync([new TextEncoder().encode("plan"), vault.toBytes()], Keypair.generate().publicKey);
+    expect(PublicKey.isOnCurve(unkeyed.toBytes())).toBe(false);
+    await expect(signer.sign({ kind: "SetSuccession", ...plan({ claim: unkeyed }) })).rejects.toThrow(/no account on chain and is not a key's address/);
+    expect(await leavesSigned()).toEqual([]);
+
+    // once an account exists there (whoever owns it), the program's own rules decide, as before
+    rpc.others.set(unkeyed.toBase58(), { owner: Keypair.generate().publicKey, data: Uint8Array.of(1) });
+    await signer.sign({ kind: "SetSuccession", ...plan({ claim: unkeyed }) });
+    rpc.others.delete(unkeyed.toBase58());
+
+    // and the caller who knows better can say so
+    await signer.sign({ kind: "SetSuccession", ...plan({ claim: unkeyed }) }, { allowUnkeyedClaim: true });
+    // an ordinary unused wallet address is on the curve: never refused for having no account
+    const fresh = Keypair.generate().publicKey;
+    expect(PublicKey.isOnCurve(fresh.toBytes())).toBe(true);
+    await signer.sign({ kind: "SetSuccession", ...plan({ claim: fresh }) });
+    expect((await leavesSigned()).length).toBe(3);
+  });
+
   it("holds a plan on the test clock to the test clock's floors", async () => {
     const { signer } = world(LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID, 3);
     await expect(signer.sign({ kind: "SetSuccession", ...plan({ windowSecs: 89n, waitSecs: 30n }) })).rejects.toThrow(/WindowOutOfRange/);

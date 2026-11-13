@@ -174,6 +174,12 @@ which the program refuses if it is the vault itself, a program, a token account 
 or one of this program's own accounts other than an open vault. An all-zero `claim` clears the
 plan and must carry zeros in every other plan field.
 
+The program accepts an address with nothing at it, because a wallet that has never been used looks
+like that. It cannot tell such a wallet from a program-derived address that no program has set up
+yet, for which no key exists: what is released there may never be reachable. The SDK's signer
+refuses that case (an address off the curve with no account) unless told otherwise, and a client
+that names a program's account should check that the account exists and is the one it means.
+
 It takes effect at once. There is no queue: every signed action restarts the window, this one
 included, so nothing can be released sooner than `window_secs + wait_secs` (at least 120 days)
 after any change to the plan. Setting a plan again, even an identical one, gives the contact their
@@ -285,7 +291,8 @@ None of this blocks the release itself, provided such accounts are not passed to
 field for a version 3 account; `successionStatus(state, now)` gives the phase (`unarmed`, `quiet`,
 `overdue`, `waiting`, `releasable`) and the times; `checkSuccessionPlan` applies the program's
 rules before a leaf is spent; `VaultSigner` signs a `SetSuccession` for a version 3 vault and
-refuses one for any other; `checkinInstruction`, `contactExtendInstruction`,
+refuses one for any other, and refuses a claim address that the program would refuse or that has
+neither an account nor a key (`allowUnkeyedClaim` overrides the last); `checkinInstruction`, `contactExtendInstruction`,
 `startSuccessionInstruction` and `executeSuccessionInstruction` build the four instructions.
 `encodeAction` and `decodeAction` are unchanged and still refuse variant 5; `encodeHeirAction` and
 `decodeHeirAction` accept it.

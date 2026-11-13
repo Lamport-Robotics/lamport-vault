@@ -43,11 +43,13 @@ import {
   freeLeavesExcluding,
   hasUsedKey,
   isLeafUsed,
+  isLiveVault,
   leafCount,
   spentLeavesInLane,
   type VaultAccount,
+  VAULT_SUCCESSION_ACCOUNT_VERSION,
 } from "./accounts.ts";
-import { type Action, checkValidityWindow, encodeAction, type ValidityWindow } from "./action.ts";
+import { checkValidityWindow, type ValidityWindow } from "./action.ts";
 import { MAX_CHUNK_BYTES } from "./chunk.ts";
 import { DirectV1Error, DirectV1LandedError, isV1Rejection, keypairV1Signer, sendDirectV1, type V1Config, type V1MessageSigner } from "./direct.ts";
 import { buildStagedExecution, type CloseTokenAccount, createVaultInstruction, EXECUTE_COMPUTE_UNITS, closeSigBufferInstruction } from "./instructions.ts";
@@ -58,6 +60,7 @@ import { registryMessage, vaultMessage } from "./message.ts";
 import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "./programIds.ts";
 import { buildStagedRotatePq, commitInstruction } from "./registry.ts";
+import { checkSuccessionPlan, encodeHeirAction, type HeirAction, successionClockFor, UNUSABLE_CLAIM_OWNERS } from "./succession.ts";
 
 export interface Rpc {
   getAccountInfo(publicKey: PublicKey, commitment?: Commitment): Promise<AccountInfo<Buffer> | null>;
@@ -144,7 +147,7 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
  * An Action whose validity window may be left for the signer to fill: `issuedSlot` defaults to
  * the current slot, `expirySlot` to `issuedSlot + defaultExpirySlots`.
  */
-export type ActionRequest = DistributiveOmit<Action, "issuedSlot" | "expirySlot"> & Partial<ValidityWindow>;
+export type ActionRequest = DistributiveOmit<HeirAction, "issuedSlot" | "expirySlot"> & Partial<ValidityWindow>;
 
 /**
  * How a signed action reaches the chain.
@@ -240,7 +243,7 @@ export interface SignedAction {
   vault: PublicKey;
   /** the vault's key generation the message was bound to */
   generation: number;
-  action: Action;
+  action: HeirAction;
   actionBytes: Uint8Array;
   message: Uint8Array;
   lmsSignature: Uint8Array;
@@ -601,13 +604,31 @@ export class VaultSigner {
     if (freeLeavesExcluding(vault, (x) => reserved.has(x)) <= 1 && request.kind !== "Rotate" && request.kind !== "Close") {
       throw new Error("the last free leaf may only be spent on Rotate or Close (exhaustion rule); rotate to a fresh key first");
     }
+    if (request.kind === "SetSuccession") {
+      // Only the Heir-enabled program has this action; the vault program would refuse it after the
+      // leaf was signed. And a plan the chain would refuse must not cost a leaf either.
+      if (vault.version !== VAULT_SUCCESSION_ACCOUNT_VERSION) {
+        throw new Error(`SetSuccession needs a vault of the Heir-enabled program (layout version ${VAULT_SUCCESSION_ACCOUNT_VERSION}); this vault is version ${vault.version}`);
+      }
+      checkSuccessionPlan(request, this.vault, successionClockFor(this.programId));
+      if (!request.claim.equals(PublicKey.default)) {
+        const claim = await this.rpc.getAccountInfo(request.claim, this.opts.commitment);
+        const owner = claim?.owner.toBase58();
+        if (claim?.executable || (owner && (TOKEN_PROGRAM_IDS.has(owner) || UNUSABLE_CLAIM_OWNERS.includes(owner)))) {
+          throw new Error(`claim address ${request.claim.toBase58()} cannot receive a release: it is a program, a token account or mint, or a sysvar (ClaimNotUsable)`);
+        }
+        if (claim && claim.owner.equals(this.programId) && !isLiveVault(new Uint8Array(claim.data))) {
+          throw new Error(`claim address ${request.claim.toBase58()} is an account of the vault program that is not an open vault (ClaimNotUsable)`);
+        }
+      }
+    }
     if (request.kind === "TransferSol" || request.kind === "Close") {
       // SOL sent to a token account is gone (the token program owns it, nothing can move lamports out)
       const dest = await this.rpc.getAccountInfo(request.to, this.opts.commitment);
       if (dest && TOKEN_PROGRAM_IDS.has(dest.owner.toBase58())) throw new Error(`destination ${request.to.toBase58()} is a token account; SOL sent there cannot be recovered`);
     }
     const action = await this.withWindow(request, opts.minExpirySlots);
-    const actionBytes = encodeAction(action);
+    const actionBytes = encodeHeirAction(action);
     const message = vaultMessage(this.vault, vault.generation, actionBytes, this.programId);
     // Reserve first, durably: if persisting fails, no signature for this leaf ever exists.
     await this.opts.reserve?.(q);
@@ -774,7 +795,7 @@ export class VaultSigner {
    * `issuedSlot + defaultExpirySlots`. A window the chain would refuse (inverted, or longer than
    * `MAX_VALIDITY_SLOTS`) is refused here before any leaf is spent.
    */
-  private async withWindow(request: ActionRequest, minSlots?: number): Promise<Action> {
+  private async withWindow(request: ActionRequest, minSlots?: number): Promise<HeirAction> {
     let { issuedSlot, expirySlot } = request;
     if (issuedSlot === undefined || expirySlot === undefined) {
       const slot = BigInt(await this.rpc.getSlot(this.opts.commitment));
@@ -782,7 +803,7 @@ export class VaultSigner {
       expirySlot ??= issuedSlot + BigInt(Math.max(this.opts.defaultExpirySlots ?? DEFAULT_EXPIRY_SLOTS, minSlots ?? 0));
     }
     checkValidityWindow({ issuedSlot, expirySlot });
-    return { ...request, issuedSlot, expirySlot } as Action;
+    return { ...request, issuedSlot, expirySlot } as HeirAction;
   }
 }
 

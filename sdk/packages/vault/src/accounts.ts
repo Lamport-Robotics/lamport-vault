@@ -9,8 +9,16 @@ import { PublicKey } from "@solana/web3.js";
 import { ByteReader, ByteWriter } from "./borsh.ts";
 import { ACCOUNT } from "./discriminator.ts";
 
-/** Current `Vault` layout version; the decoder refuses anything else. */
+/** `Vault` layout version of the vault program. */
 export const VAULT_ACCOUNT_VERSION = 2;
+/**
+ * `Vault` layout version of the Heir-enabled program (the vault built with the `succession`
+ * feature): version 2 with a 200-byte succession block after `created_slot`.
+ */
+export const VAULT_SUCCESSION_ACCOUNT_VERSION = 3;
+/** Size of the succession block in a version-3 vault, and its offset in the account. */
+export const SUCCESSION_BLOCK_SIZE = 200;
+export const SUCCESSION_BLOCK_OFFSET = 8 + 1 + 1 + 32 + 56 + 4 + 4 + 8;
 /** `Tombstone` layout version (0xFE, a value no `Vault` layout carries). */
 export const TOMBSTONE_ACCOUNT_VERSION = 0xfe;
 /** Size of a `Tombstone` account: discriminator, version, vault_id, closed_slot, heir. */
@@ -36,10 +44,44 @@ export interface VaultAccount {
   /** how many times the key was replaced; part of the signed message */
   generation: number;
   createdSlot: bigint;
+  /** The succession plan and its clock: present exactly when `version` is 3. */
+  succession?: SuccessionState;
   /** used-leaf bitmap, 2^h / 8 bytes; bit q (byte q >> 3, bit q & 7) set = leaf q spent */
   used: Uint8Array;
   /** sha256[0..16] of every past LMS public key, oldest first (not the current one) */
   usedKeys: Uint8Array[];
+}
+
+/**
+ * The succession block of a version-3 vault (`programs/lamport-vault/src/succession.rs`). All zero
+ * until a `SetSuccession` arms a plan. Times are unix seconds as the cluster's clock gives them.
+ * `succession.ts` has the rules that read it.
+ */
+export interface SuccessionState {
+  /** where the vault releases to; the default address means no plan is armed */
+  claim: PublicKey;
+  /** how long the owner may be inactive before a waiting period can be opened */
+  windowSecs: bigint;
+  /** how long an open waiting period lasts before the vault can be released */
+  waitSecs: bigint;
+  /** when the last signed action executed */
+  lastSignedTs: bigint;
+  /** when the last valid check-in executed */
+  lastCheckinTs: bigint;
+  /** a key that may only check in; the default address means none */
+  checkinKey: PublicKey;
+  /** a trusted contact's key that may move the deadline once; the default address means none */
+  contactKey: PublicKey;
+  /** whether the contact has used their one extension under the plan as last set */
+  contactUsed: boolean;
+  /** the contact's extension: the deadline is not before this; 0 when none is in force */
+  extendedUntilTs: bigint;
+  /** whether a waiting period is open */
+  waitOpen: boolean;
+  /** when the open waiting period started; meaningless unless `waitOpen` */
+  waitStartedTs: bigint;
+  /** 54 reserved bytes, zero */
+  reserved: Uint8Array;
 }
 
 /**
@@ -94,9 +136,13 @@ export function bitmapLength(lmsType: number): number {
   return 2 ** lmsParams(lmsType).h / 8;
 }
 
-/** Vault::space: size of a Vault account for a key of `lmsType` with `history` past keys recorded. */
-export function vaultAccountSize(lmsType: number, history = 0): number {
-  return 8 + 1 + 1 + 32 + 56 + 4 + 4 + 8 + (4 + bitmapLength(lmsType)) + (4 + KEY_HASH_LEN * history);
+/**
+ * Vault::space: size of a Vault account for a key of `lmsType` with `history` past keys recorded.
+ * `version` 3 (the Heir-enabled program) adds the succession block.
+ */
+export function vaultAccountSize(lmsType: number, history = 0, version: number = VAULT_ACCOUNT_VERSION): number {
+  const block = version === VAULT_SUCCESSION_ACCOUNT_VERSION ? SUCCESSION_BLOCK_SIZE : 0;
+  return 8 + 1 + 1 + 32 + 56 + 4 + 4 + 8 + block + (4 + bitmapLength(lmsType)) + (4 + KEY_HASH_LEN * history);
 }
 
 /** Number of leaves of the vault's current key, 2^h. */
@@ -249,6 +295,11 @@ function writeUsedKeys(w: ByteWriter, keys: Uint8Array[], max: number): ByteWrit
   return w;
 }
 
+/** True when `data` starts with the `Vault` discriminator: an open vault (of either layout version). */
+export function isLiveVault(data: Uint8Array): boolean {
+  return data.length >= 8 && ACCOUNT.vault.every((b, i) => data[i] === b);
+}
+
 /** True when `data` starts with the `Tombstone` discriminator. */
 export function isTombstone(data: Uint8Array): boolean {
   return data.length >= 8 && ACCOUNT.tombstone.every((b, i) => data[i] === b);
@@ -282,15 +333,14 @@ export function decodeVault(data: Uint8Array): VaultAccount {
   const r = new ByteReader(data);
   checkDiscriminator(r, ACCOUNT.vault, "Vault");
   const version = r.u8();
-  checkVersion(version, VAULT_ACCOUNT_VERSION, "Vault");
+  if (version !== VAULT_ACCOUNT_VERSION && version !== VAULT_SUCCESSION_ACCOUNT_VERSION) {
+    throw new Error(`Vault layout version ${version} is not supported (want ${VAULT_ACCOUNT_VERSION}, or ${VAULT_SUCCESSION_ACCOUNT_VERSION} for the Heir-enabled program)`);
+  }
+  const head = { version, bump: r.u8(), vaultId: r.fixed(32), lmsPubkey: r.fixed(56), spent: r.u32(), generation: r.u32(), createdSlot: r.u64() };
+  const succession = version === VAULT_SUCCESSION_ACCOUNT_VERSION ? readSuccession(r) : undefined;
   const v: VaultAccount = {
-    version,
-    bump: r.u8(),
-    vaultId: r.fixed(32),
-    lmsPubkey: r.fixed(56),
-    spent: r.u32(),
-    generation: r.u32(),
-    createdSlot: r.u64(),
+    ...head,
+    ...(succession ? { succession } : {}),
     used: r.vecU8(),
     usedKeys: readUsedKeys(r, "Vault", VAULT_MAX_KEY_HISTORY),
   };
@@ -310,9 +360,77 @@ export function encodeVault(v: VaultAccount): Uint8Array {
     .fixed(v.lmsPubkey, 56)
     .u32(v.spent)
     .u32(v.generation)
-    .u64(v.createdSlot)
-    .vecU8(v.used);
+    .u64(v.createdSlot);
+  if (v.version === VAULT_SUCCESSION_ACCOUNT_VERSION) {
+    if (!v.succession) throw new RangeError("a version-3 vault carries a succession block");
+    writeSuccession(w, v.succession);
+  } else if (v.succession) {
+    throw new RangeError(`a version-${v.version} vault has no succession block`);
+  }
+  w.vecU8(v.used);
   return writeUsedKeys(w, v.usedKeys, VAULT_MAX_KEY_HISTORY).bytes();
+}
+
+/** An unarmed succession block: every byte zero. */
+export function emptySuccession(): SuccessionState {
+  return {
+    claim: PublicKey.default,
+    windowSecs: 0n,
+    waitSecs: 0n,
+    lastSignedTs: 0n,
+    lastCheckinTs: 0n,
+    checkinKey: PublicKey.default,
+    contactKey: PublicKey.default,
+    contactUsed: false,
+    extendedUntilTs: 0n,
+    waitOpen: false,
+    waitStartedTs: 0n,
+    reserved: new Uint8Array(54),
+  };
+}
+
+function readSuccession(r: ByteReader): SuccessionState {
+  return {
+    claim: r.pubkey(),
+    windowSecs: r.u64(),
+    waitSecs: r.u64(),
+    lastSignedTs: r.i64(),
+    lastCheckinTs: r.i64(),
+    checkinKey: r.pubkey(),
+    contactKey: r.pubkey(),
+    contactUsed: r.bool(),
+    extendedUntilTs: r.i64(),
+    waitOpen: r.bool(),
+    waitStartedTs: r.i64(),
+    reserved: r.fixed(54),
+  };
+}
+
+function writeSuccession(w: ByteWriter, s: SuccessionState): void {
+  w.pubkey(s.claim)
+    .u64(s.windowSecs)
+    .u64(s.waitSecs)
+    .i64(s.lastSignedTs)
+    .i64(s.lastCheckinTs)
+    .pubkey(s.checkinKey)
+    .pubkey(s.contactKey)
+    .bool(s.contactUsed)
+    .i64(s.extendedUntilTs)
+    .bool(s.waitOpen)
+    .i64(s.waitStartedTs)
+    .fixed(s.reserved, 54);
+}
+
+/**
+ * Reads only the succession block out of a vault account's bytes, without parsing the rest:
+ * what a scan with `dataSlice: { offset: SUCCESSION_BLOCK_OFFSET, length: SUCCESSION_BLOCK_SIZE }` returns.
+ */
+export function decodeSuccessionBlock(block: Uint8Array): SuccessionState {
+  if (block.length !== SUCCESSION_BLOCK_SIZE) throw new Error(`a succession block is ${SUCCESSION_BLOCK_SIZE} bytes, got ${block.length}`);
+  const r = new ByteReader(block);
+  const s = readSuccession(r);
+  r.finish();
+  return s;
 }
 
 export function decodeSigBuffer(data: Uint8Array): SigBufferAccount {

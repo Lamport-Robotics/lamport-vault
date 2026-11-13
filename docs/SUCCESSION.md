@@ -45,9 +45,14 @@ So the rule for `programs/lamport-vault/src/*.rs` is: **no existing line moves.*
 - Nothing is added to the default build's dependencies.
 
 `.github/workflows/succession.yml` enforces it: on a pull request from a branch named
-`succession*` it builds the default features at the pull request and at its base, from nothing each
-time, and fails unless the two files are identical. A pull request that means to change the vault
-itself comes from a branch with another name, and updates `docs/VERIFY.md` as before.
+`succession*` it builds the default features of both programs at the pull request and at its base,
+from nothing each time, and fails unless the files are identical. A pull request that means to
+change a program itself comes from a branch with another name, and updates `docs/VERIFY.md` as
+before.
+
+`pq-registry` declares a feature called `succession` too, and it gates nothing there. `anchor build
+-- --features succession` hands the flag to every program in the workspace, as it does with
+`small-history`, so the registry has to know the name.
 
 ## 2. The vault's own tests pass both ways
 

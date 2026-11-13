@@ -2,6 +2,8 @@ node_modules/
 dist/
 target/
 .anchor/
+# scripts/anchor-succession.sh keeps the real Anchor.toml here while it runs
+Anchor.toml.orig
 test-ledger/
 .DS_Store
 *.log

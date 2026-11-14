@@ -26,6 +26,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   type AccountInfo,
+  type AccountMeta,
   type Commitment,
   PublicKey,
   type SendOptions,
@@ -57,10 +58,11 @@ import { cloneState, JournalVaultMismatchError, keyFingerprint, type LeafJournal
 export { StaleSignerError, JournalVaultMismatchError, JournalConflictError } from "./journal.ts";
 export { DirectV1LandedError, isUserRejection } from "./direct.ts";
 import { registryMessage, vaultMessage } from "./message.ts";
-import { findCommitmentPda, findVaultPdaForKey } from "./pda.ts";
+import { associatedTokenAddress, findCommitmentPda, findVaultPdaForKey, TOKEN_2022_PROGRAM_ID } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID } from "./programIds.ts";
 import { buildStagedRotatePq, commitInstruction } from "./registry.ts";
 import { checkSuccessionPlan, encodeHeirAction, type HeirAction, successionClockFor, UNUSABLE_CLAIM_OWNERS } from "./succession.ts";
+import { transferHookAccounts } from "./transferHook.ts";
 
 export interface Rpc {
   getAccountInfo(publicKey: PublicKey, commitment?: Commitment): Promise<AccountInfo<Buffer> | null>;
@@ -301,6 +303,12 @@ export interface ExecuteOpts extends SendOpts {
   closeTokenAccounts?: CloseTokenAccount[];
   /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
+  /**
+   * A token transfer of a Token-2022 mint with a transfer hook: the hook's accounts. Default: a
+   * signer whose `tokenProgram` is Token-2022 reads the mint and resolves them itself, before a
+   * leaf is spent (`transferHookAccounts`); pass `[]` to send none.
+   */
+  extraAccounts?: AccountMeta[];
   /** Overrides the signer's default mode for this call. */
   mode?: ExecuteMode;
   /** In "auto" mode: called with the rejection before the staged flow starts. */
@@ -704,6 +712,9 @@ export class VaultSigner {
    */
   async execute(request: ActionRequest, opts: ExecuteOpts = {}): Promise<ExecuteResult> {
     const mode = opts.mode ?? this.opts.mode ?? "staged";
+    // a transfer hook's accounts first: if they cannot be had, no leaf is spent finding that out
+    const extraAccounts = opts.extraAccounts ?? (await this.hookAccounts(request, opts));
+    if (extraAccounts.length > 0) opts = { ...opts, extraAccounts };
     const signed = await this.sign(request, {
       ...(opts.q !== undefined ? { q: opts.q } : {}),
       ...(opts.allowForeignKey !== undefined ? { allowForeignKey: opts.allowForeignKey } : {}),
@@ -714,6 +725,23 @@ export class VaultSigner {
     const result = await this.send(signed, opts);
     if (signed.action.kind === "Rotate") await this.confirmRotation(signed);
     return result;
+  }
+
+  /**
+   * For a token transfer under Token-2022: the accounts of the mint's transfer hook, if it has
+   * one. Empty for everything else. The payer is never among them: a hook whose list names it is
+   * refused here (`transferHook.ts`).
+   */
+  private async hookAccounts(request: ActionRequest, opts: ExecuteOpts): Promise<AccountMeta[]> {
+    if (request.kind !== "TransferToken" && request.kind !== "TransferTokenFrom") return [];
+    const tokenProgram = this.opts.tokenProgram;
+    if (!tokenProgram?.equals(TOKEN_2022_PROGRAM_ID)) return [];
+    const source = request.kind === "TransferTokenFrom" ? request.from : (opts.source ?? associatedTokenAddress(this.vault, request.mint, tokenProgram));
+    return transferHookAccounts(
+      this.rpc,
+      { mint: request.mint, source, destination: request.to, authority: this.vault, amount: request.amount },
+      { commitment: opts.commitment ?? this.opts.commitment, signers: [this.payer.publicKey] },
+    );
   }
 
   private async send(signed: SignedAction, opts: ExecuteOpts): Promise<ExecuteResult> {
@@ -772,6 +800,7 @@ export class VaultSigner {
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
       ...(opts.source ? { source: opts.source } : {}),
+      ...(opts.extraAccounts ? { extraAccounts: opts.extraAccounts } : {}),
       commitment: opts.commitment ?? this.opts.commitment,
     });
     opts.onTransaction?.(0, 1, res.signature);
@@ -803,6 +832,7 @@ export class VaultSigner {
       ...(this.opts.tokenProgram ? { tokenProgram: this.opts.tokenProgram } : {}),
       ...(opts.closeTokenAccounts ? { closeTokenAccounts: opts.closeTokenAccounts } : {}),
       ...(opts.source ? { source: opts.source } : {}),
+      ...(opts.extraAccounts ? { extraAccounts: opts.extraAccounts } : {}),
     });
     let signatures: string[];
     try {

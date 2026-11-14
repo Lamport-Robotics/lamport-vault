@@ -9,6 +9,11 @@
  *   execute()                                         vault(w) sig_buffer(w) payer(w) + per-action remaining accounts
  *   sweep_closed()                                    payer(ws) tombstone heir(w) heir_token_account(w) vault_token_account(w)
  *                                                     mint token_program system_program associated_token_program
+ *
+ * A token transfer (`TransferToken`, `TransferTokenFrom`, `sweep_closed`) of a Token-2022 mint with
+ * a transfer hook also needs the hook's accounts, after everything else: `extraAccounts`, from
+ * `transferHookAccounts` in `transferHook.ts`. They are never marked as signers here; the program
+ * would not pass a signature on to a hook anyway.
  */
 import {
   ComputeBudgetProgram,
@@ -32,6 +37,8 @@ const w = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: false, isWrit
 const ws = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: true, isWritable: true });
 const s = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: true, isWritable: false });
 const r = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: false, isWritable: false });
+/** A transfer hook's account as it goes into an instruction: writable or not as given, never a signer. */
+const unsigned = (meta: AccountMeta): AccountMeta => ({ pubkey: meta.pubkey, isSigner: false, isWritable: meta.isWritable });
 
 export interface CreateVaultParams {
   programId: PublicKey;
@@ -166,7 +173,11 @@ export interface ExecuteParams {
   closeTokenAccounts?: CloseTokenAccount[];
   /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
-  /** For `TransferToken` on a Token-2022 mint with a transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  /**
+   * For a token transfer of a Token-2022 mint with a transfer hook: the hook's accounts, which the
+   * program hands to the token program after the four it names (`transferHookAccounts` resolves
+   * them). Added unsigned whatever their `isSigner` says.
+   */
   extraAccounts?: AccountMeta[];
 }
 
@@ -183,7 +194,7 @@ export function executeRemainingAccounts(
     case "TransferSol":
       return [w(action.to)];
     case "TransferToken":
-      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
+      return [w(source ?? associatedTokenAddress(vault, action.mint, tokenProgram)), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts.map(unsigned)];
     case "Rotate":
       return [];
     case "Close":
@@ -191,7 +202,7 @@ export function executeRemainingAccounts(
     case "TransferTokenFrom":
       // the signature names the source; a different `source` here would only fail on chain (WrongSource)
       if (source && !source.equals(action.from)) throw new Error(`source ${source.toBase58()} differs from the signed action's from ${action.from.toBase58()}`);
-      return [w(action.from), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts];
+      return [w(action.from), w(action.to), r(action.mint), r(tokenProgram), ...extraAccounts.map(unsigned)];
     case "SetSuccession":
       // the program has to see the claim account to refuse an unusable one; a clear names none
       return action.claim.equals(PublicKey.default) ? [] : [r(action.claim)];
@@ -239,6 +250,8 @@ export interface StagedExecutionParams {
   closeTokenAccounts?: CloseTokenAccount[];
   /** TransferToken: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
+  /** A transfer hook's accounts for the `execute`, see {@link ExecuteParams.extraAccounts}. */
+  extraAccounts?: AccountMeta[];
   computeUnits?: number;
 }
 
@@ -270,6 +283,7 @@ export function buildStagedExecution(p: StagedExecutionParams): StagedExecution 
       ...(p.tokenProgram ? { tokenProgram: p.tokenProgram } : {}),
       ...(p.closeTokenAccounts ? { closeTokenAccounts: p.closeTokenAccounts } : {}),
       ...(p.source ? { source: p.source } : {}),
+      ...(p.extraAccounts ? { extraAccounts: p.extraAccounts } : {}),
     },
     p.computeUnits ?? EXECUTE_COMPUTE_UNITS,
   );
@@ -289,7 +303,7 @@ export interface SweepClosedParams {
   vaultTokenAccount: PublicKey;
   /** Token or Token-2022: the program that owns `mint`. Default: Token. */
   tokenProgram?: PublicKey;
-  /** A Token-2022 transfer hook's program and extra account metas, passed through to the token program. */
+  /** A Token-2022 transfer hook's accounts, see {@link ExecuteParams.extraAccounts}. */
   extraAccounts?: AccountMeta[];
 }
 
@@ -333,7 +347,7 @@ export function sweepClosedInstruction(p: SweepClosedParams): { instruction: Tra
         r(tokenProgram),
         r(SystemProgram.programId),
         r(ASSOCIATED_TOKEN_PROGRAM_ID),
-        ...(p.extraAccounts ?? []),
+        ...(p.extraAccounts ?? []).map(unsigned),
       ],
       data: Buffer.from(IX.sweepClosed),
     }),

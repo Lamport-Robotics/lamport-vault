@@ -92,6 +92,13 @@ pq_registry    48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
 
 Earlier: tag `devnet-1`, commit `63176dc`, vault hash `3f9a9bc3…` at slot 514635841 (same registry).
 
+`main` is ahead of this record. The transfer-hook fix (`docs/DESIGN.md`, "Transfer hooks") changed
+`lamport_vault` on purpose, so `main` no longer builds to `b9c055c3…`; the registry is unchanged. The
+vault on devnet is still the `devnet-2` program above, in which a token whose mint has a Token-2022
+transfer hook cannot leave a vault. The fix is on chain once a build of `main` from `verify.yml` is
+deployed, tagged and written down here. A local `anchor build` of it is 1 008 bytes smaller than the
+one before (340 808 against 341 816), so it fits the 350 000 bytes already allocated.
+
 A laptop `anchor build` of the same source gives another ELF than the Docker build (the registry's
 earlier `3480ae2d…` hash was one); from this tag on, what is on chain is always the CI artifact, so
 `solana-verify verify-from-repo` at the tagged commit is the check that counts.

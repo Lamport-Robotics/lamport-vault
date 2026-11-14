@@ -5,7 +5,7 @@
  *
  * Only a Heir build reaches it (`__HEIR__`). Nothing here runs when the module loads.
  */
-import { PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+import { PublicKey, SYSVAR_CLOCK_PUBKEY, SystemProgram } from "@solana/web3.js";
 import { LAMPORT_VAULT_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, UNUSABLE_CLAIM_OWNERS, decodeVault, isLiveVault, successionStatus } from "@lamport-robotics/vault";
 import { $, EXPLORER_ADDR, el, isPubkey, short, type SignRequest } from "./common.ts";
 import { rpc } from "./rpc.ts";
@@ -36,6 +36,18 @@ export async function claimProblemOnChain(claim: PublicKey, vault: PublicKey, ma
   }
   // a plan's address before the plan exists looks like this. the form never lets it through: the plan is created first
   if (!info && !PublicKey.isOnCurve(claim.toBytes()) && !mayBeUnkeyed) return "Nothing exists at that address and no key can sign for it. If it is a program's address (a plan, a multisig), create that account first.";
+  return null;
+}
+
+/**
+ * something the owner should know about a claim address the form accepts. an address that belongs to a
+ * program and holds only SOL is what a multisig's vault looks like, and also what the address of a plan
+ * that was never created looks like once anyone has sent it a lamport. the form cannot tell which.
+ */
+export async function claimNoteOnChain(claim: PublicKey): Promise<string | null> {
+  if (PublicKey.isOnCurve(claim.toBytes())) return null;
+  const info = await rpc.getAccountInfo(claim, "confirmed");
+  if (info && info.owner.equals(SystemProgram.programId) && info.data.length === 0) return "This address belongs to a program, not to a key, and holds nothing but SOL. Whoever controls that program controls what is released there. If you meant a Lamport Heir plan, this is not one: a plan that exists is an account of the claim program.";
   return null;
 }
 
@@ -98,9 +110,14 @@ export function planForm(ctx: HeirCtx): { node: HTMLElement; read: () => SignReq
     try {
       const a = current();
       btn.setAttribute("disabled", "");
-      if (a.claim !== NO_ADDRESS) { const why = await claimProblemOnChain(new PublicKey(a.claim), ctx.address); if (why) throw new Error(why); }
+      let note: string | null = null;
+      if (a.claim !== NO_ADDRESS) {
+        const why = await claimProblemOnChain(new PublicKey(a.claim), ctx.address); if (why) throw new Error(why);
+        note = await claimNoteOnChain(new PublicKey(a.claim));
+      }
       checked = JSON.stringify(a);
       out.append(el("dl", { class: "spec", style: "margin-top:14px" }, ...planRows(a, ctx.address.toBase58())),
+        ...(note ? [el("div", { class: "notice warn", style: "margin-top:14px" }, note)] : []),
         el("p", { class: "quiet", style: "font-size:12.5px;margin-top:14px" }, "The signer shows these same lines. Sign only if it does."));
     } catch (e) { out.append(el("div", { class: "err" }, String((e as Error).message ?? e))); }
     finally { btn.removeAttribute("disabled"); }

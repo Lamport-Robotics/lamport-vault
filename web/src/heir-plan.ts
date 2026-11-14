@@ -62,7 +62,11 @@ export function planLines(a: PlanRequest, vault: string): [string, string][] {
   if (isClear(a)) return [["action", "remove the inheritance plan from this vault. Nothing is released to anyone until a new plan is signed"]];
   const lim = successionLimits(planClock());
   const total = BigInt(a.windowSecs) + BigInt(a.waitSecs);
-  const who = explainClaim(a, vault)?.rows ?? [["who that is", "this signer only sees an address. Compare it, character by character, with the address you mean; whoever controls it receives the vault"]];
+  const explained = explainClaim(a, vault);
+  // a request with something wrong with it is refused before it gets here (planProblem). if one arrives all
+  // the same, there is no plan to describe: better no lines at all than lines with the claim's row missing
+  if (explained?.problem) throw new Error(explained.problem);
+  const who = explained?.rows ?? [["who that is", "this signer only sees an address. Compare it, character by character, with the address you mean; whoever controls it receives the vault"]];
   const lines: [string, string][] = [
     ["action", "set the inheritance plan of this vault. It replaces any plan the vault has now"],
     ["releases to", a.claim],

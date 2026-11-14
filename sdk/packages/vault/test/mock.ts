@@ -5,6 +5,8 @@
  * the n-th transaction fail at confirmation. Token accounts and mints are a flat table (`mints`,
  * `tokenAccounts`) so `sweep_closed` can be applied too: it checks what the program checks (a
  * tombstone, its heir, the heir's ATA, a vault-owned account of the mint) and moves the balance.
+ * `raw` holds accounts given whole, data and owner (a mint with extensions, a transfer hook's
+ * validation account); it is looked at first.
  */
 import { Keypair, PublicKey, Transaction, type AccountInfo } from "@solana/web3.js";
 import { decodeTombstone, decodeVault, encodeTombstone, encodeVault, isTombstone, TOMBSTONE_ACCOUNT_VERSION, usedKeyHash, type VaultAccount } from "../src/accounts.ts";
@@ -27,6 +29,8 @@ export class MockChain implements Rpc, SweepRpc {
   mints = new Map<string, PublicKey>();
   /** token account address -> owner, mint, balance (the program is the mint's) */
   tokenAccounts = new Map<string, MockTokenAccount>();
+  /** address -> an account given whole */
+  raw = new Map<string, { data: Uint8Array; owner: PublicKey }>();
   sent: Transaction[] = [];
   slot = 1000;
   failAt: number | null = null;
@@ -38,12 +42,22 @@ export class MockChain implements Rpc, SweepRpc {
   }
 
   async getAccountInfo(pk: PublicKey): Promise<AccountInfo<Buffer> | null> {
+    const whole = this.raw.get(pk.toBase58());
+    if (whole) return { data: Buffer.from(whole.data), executable: false, lamports: 1, owner: whole.owner };
     const data = this.accounts.get(pk.toBase58());
     if (data) return { data: Buffer.from(data), executable: false, lamports: 1, owner: LAMPORT_VAULT_PROGRAM_ID };
     const mintProgram = this.mints.get(pk.toBase58());
     if (mintProgram) return { data: Buffer.alloc(82), executable: false, lamports: 1, owner: mintProgram };
     const token = this.tokenAccounts.get(pk.toBase58());
-    if (token) return { data: Buffer.alloc(165), executable: false, lamports: 1, owner: this.mints.get(token.mint.toBase58())! };
+    if (token) {
+      // the token programs' account layout: mint, owner, amount, and "initialized" at 108
+      const account = Buffer.alloc(165);
+      account.set(token.mint.toBytes(), 0);
+      account.set(token.owner.toBytes(), 32);
+      account.writeBigUInt64LE(token.amount, 64);
+      account[108] = 1;
+      return { data: account, executable: false, lamports: 1, owner: this.mints.get(token.mint.toBase58())! };
+    }
     return null;
   }
   async getTokenAccountsByOwner(owner: PublicKey, filter: { mint: PublicKey }): Promise<{ value: { pubkey: PublicKey }[] }> {

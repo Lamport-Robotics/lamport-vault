@@ -11,6 +11,7 @@ import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault
 import { $, b64, el, isPubkey, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
 import { openJournal, keyFingerprint, storagePersistent } from "./journal.ts";
+import { decimalUnits } from "./units.ts";
 import { planAction, planProblem, showPlan } from "./heir-plan.ts";
 
 declare const __SIGNER_BUILD__: string | undefined;
@@ -114,16 +115,18 @@ function checkRequest(x: unknown): Checked {
   return { req: r, pub, total, used, spentOnChain };
 }
 
-const ui = (raw: string, decimals: number | undefined) => decimals == null ? "" : (Number(raw) / 10 ** decimals).toLocaleString("en-US", { maximumFractionDigits: decimals });
+const ui = (raw: string, decimals: number | undefined) => decimals == null ? "" : decimalUnits(raw, decimals);
 
 let req: SignRequest | null = null;
 let checked: Checked | null = null;
 let lastQ = 0;
+/** true from the click on Sign until that signature is made or refused: the request cannot change under it */
+let signing = false;
 $("#req").addEventListener("input", () => {
+  if (signing) return;
   const v = $("#reqview"); v.innerHTML = ""; req = null; checked = null;
   try {
     const c = checkRequest(JSON.parse(($("#req") as HTMLTextAreaElement).value));
-    req = c.req; checked = c;
     const r = c.req, a = r.action;
     const rows: (Node | string)[] = [el("dt", {}, "vault"), el("dd", {}, r.vault)];
     if (a.kind === "TransferSol") rows.push(el("dt", {}, "action"), el("dd", {}, `send ${a.lamports} lamports (${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL) to ${a.to}`));
@@ -142,7 +145,14 @@ $("#req").addEventListener("input", () => {
       el("dt", {}, "valid"), el("dd", {}, `slot ${r.issuedSlot} to ${r.expirySlot} (about ${Math.round((Number(r.expirySlot) - Number(r.issuedSlot)) * 0.4 / 60)} min)`),
       el("dt", {}, "cluster"), el("dd", {}, r.cluster));
     v.append(el("dl", { class: "spec", style: "margin-top:4px" }, ...rows));
-  } catch (e) { v.append(el("div", { class: "err" }, String((e as Error).message))); }
+    // the request is on the screen: only now is there something to sign. whatever went wrong before this
+    // line, in checking the request or in describing it, leaves the signer with nothing
+    req = c.req; checked = c;
+  } catch (e) {
+    const why = String((e as Error).message ?? e);
+    req = null; checked = null; v.innerHTML = "";
+    v.append(el("div", { class: "err" }, why.startsWith("refusing the request") ? why : `refusing the request: ${why}`));
+  }
   // a Heir build: the lines above know five actions and took this one for the last of them. put the plan in that
   // row's place, or show nothing and sign nothing. (it is done here, after the block, because a bundler keeps
   // everything inside a try block: a guarded line in there would pull the plan's code into the vault's signer.)
@@ -169,13 +179,18 @@ $("#sign").addEventListener("click", async () => {
   const btn = $("#sign") as HTMLButtonElement;
   let master: Uint8Array | null = null, key: LmsPrivateKey | null = null, next: LmsPrivateKey | null = null;
   try {
-    if (!req || !checked) throw new Error("paste a valid request first");
-    const { pub, total, used } = checked;
+    // only a request that is described on the screen can be signed
+    if (!req || !checked || !$("#reqview dl")) throw new Error("paste a valid request first");
+    // the request as it stands at this click. deriving the key takes seconds; whatever is pasted or scanned
+    // meanwhile is another request, and it is not looked at until this one is done
+    const request = req, checked_ = checked;
+    signing = true; ($("#req") as HTMLTextAreaElement).readOnly = true;
+    const { pub, total, used } = checked_;
     const words = ($("#words") as HTMLTextAreaElement).value.trim().toLowerCase().split(/\s+/).join(" ");
     if (!isValidMnemonic(words)) throw new Error("that is not a valid 24-word phrase");
-    const clusterKey = req.cluster === "mainnet-beta" ? "mainnet" : req.cluster;
+    const clusterKey = request.cluster === "mainnet-beta" ? "mainnet" : request.cluster;
     const cluster = (CLUSTERS as Record<string, { genesisHash: string }>)[clusterKey];
-    if (!cluster) throw new Error(`unknown cluster "${req.cluster}" in the request; refusing to sign`);
+    if (!cluster) throw new Error(`unknown cluster "${request.cluster}" in the request; refusing to sign`);
     const scope = { genesisHash: cluster.genesisHash, programId: LAMPORT_VAULT_PROGRAM_ID };
     // one-time keys: never sign the same leaf twice. the journal is this browser's durable memory of
     // which leaves this signer has used; nothing below it is ever offered again.
@@ -186,53 +201,53 @@ $("#sign").addEventListener("click", async () => {
     // the key belongs to one vault. a record names it; without a record, a generation-0 vault must be the
     // address this very key derives, and anything else is asked about below. a vault anyone created with
     // this key at another address would otherwise cost a leaf and publish a signature for a foreign account.
-    if (rec?.vault && rec.vault !== req.vault) throw new Error(`this key's record names vault ${rec.vault}; the request names ${req.vault}. A one-time key serves one vault; refusing`);
-    if (req.generation === 0 && findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, pub).address.toBase58() !== req.vault) throw new Error("the vault in the request is not the address this key derives; refusing");
+    if (rec?.vault && rec.vault !== request.vault) throw new Error(`this key's record names vault ${rec.vault}; the request names ${request.vault}. A one-time key serves one vault; refusing`);
+    if (request.generation === 0 && findVaultPdaForKey(LAMPORT_VAULT_PROGRAM_ID, pub).address.toBase58() !== request.vault) throw new Error("the vault in the request is not the address this key derives; refusing");
     // a request may not march this signer past the chain: every skipped leaf is lost to this profile
-    if (req.nextQ > checked.spentOnChain + 16) throw new Error(`the request asks for key ${req.nextQ} while the chain shows ${checked.spentOnChain} spent; refusing (the vault page hands out the next free key)`);
+    if (request.nextQ > checked_.spentOnChain + 16) throw new Error(`the request asks for key ${request.nextQ} while the chain shows ${checked_.spentOnChain} spent; refusing (the vault page hands out the next free key)`);
     const mine = (x: number) => !!rec && (x <= rec.maxQ || rec.used.includes(x));
     const chainUsed = (x: number) => !!used && ((used[x >> 3] >> (x & 7)) & 1) === 1;
     const free = (x: number) => !chainUsed(x) && !mine(x);
-    const floor = Math.max(req.nextQ, rec ? rec.maxQ + 1 : 0);
+    const floor = Math.max(request.nextQ, rec ? rec.maxQ + 1 : 0);
     // free leaves by this signer's own count: the bitmap minus what it signed itself. without a bitmap the
     // online page's number is a ceiling, never more than the leaves above the floor
     let freeNow = 0;
     if (used) { for (let x = 0; x < total; x++) if (free(x)) freeNow++; }
-    else freeNow = Math.max(0, Math.min((req.freeLeaves ?? total) - (floor - req.nextQ), total - floor));
+    else freeNow = Math.max(0, Math.min((request.freeLeaves ?? total) - (floor - request.nextQ), total - floor));
     // behind: the chain has moved past what this signer remembers signing
-    const behind = rec ? rec.maxQ < req.nextQ - 1 : checked.spentOnChain > 0;
+    const behind = rec ? rec.maxQ < request.nextQ - 1 : checked_.spentOnChain > 0;
     let q: number | undefined;
-    if (req.action.kind === "Rotate" && behind && used) {
+    if (request.action.kind === "Rotate" && behind && used) {
       // a rotation retires the key; the highest free leaf is the one least likely to be held by another signer
       for (let x = total - 1; x >= 0; x--) if (free(x)) { q = x; break; }
     } else for (let x = floor; x < total; x++) if (free(x)) { q = x; break; }
     if (q === undefined) throw new Error("no one-time key is left that this signer can use");
-    if (freeNow <= 1 && req.action.kind !== "Rotate" && req.action.kind !== "Close") throw new Error("this is the last one-time key of the vault; it may only be spent on a rotation or on closing the vault");
+    if (freeNow <= 1 && request.action.kind !== "Rotate" && request.action.kind !== "Close") throw new Error("this is the last one-time key of the vault; it may only be spent on a rotation or on closing the vault");
     // no record for this key: the request's own numbers cannot clear it (a hostile page can send a blank
     // bitmap), and evicted storage looks exactly like a fresh key. always ask.
-    if (!rec) { if (!(await confirmBox(`${UNSEEN} The request says ${checked.spentOnChain} key${checked.spentOnChain === 1 ? "" : "s"} of this vault ${req.generation > 0 ? `(generation ${req.generation}) ` : ""}are spent; compare with the vault page before continuing.${storagePersistent === false ? " This browser may evict the signer's record; prefer a dedicated profile." : ""}`))) throw new Error("cancelled; nothing was signed"); }
-    else if (req.action.kind === "Rotate" && behind && !used) { if (!(await confirmBox(`this signer's record stops at key ${rec!.maxQ} but the request says the chain is at ${req.nextQ}, and it carries no bitmap to pick a safer key from. ${UNSEEN}`))) throw new Error("cancelled; nothing was signed"); }
-    if (q !== req.nextQ) note(`the request asked for key ${req.nextQ}; this signer used key ${q} instead`);
+    if (!rec) { if (!(await confirmBox(`${UNSEEN} The request says ${checked_.spentOnChain} key${checked_.spentOnChain === 1 ? "" : "s"} of this vault ${request.generation > 0 ? `(generation ${request.generation}) ` : ""}are spent; compare with the vault page before continuing.${storagePersistent === false ? " This browser may evict the signer's record; prefer a dedicated profile." : ""}`))) throw new Error("cancelled; nothing was signed"); }
+    else if (request.action.kind === "Rotate" && behind && !used) { if (!(await confirmBox(`this signer's record stops at key ${rec!.maxQ} but the request says the chain is at ${request.nextQ}, and it carries no bitmap to pick a safer key from. ${UNSEEN}`))) throw new Error("cancelled; nothing was signed"); }
+    if (q !== request.nextQ) note(`the request asked for key ${request.nextQ}; this signer used key ${q} instead`);
     btn.disabled = true; btn.classList.add("spin"); btn.textContent = "deriving key";
     master = mnemonicToMaster(words, ($("#pass") as HTMLInputElement).value);
     const found = await recoverKey(master, pub, scope, { onProgress: (d, t) => (btn.textContent = `deriving key ${Math.round((d / t) * 100)}%`) });
     if (!found) throw new Error(`these words do not open this vault (checked k = 0…${RECOVERY_MAX_INDEX})`);
     key = found.key;
-    if (req.action.kind === "Rotate") {
+    if (request.action.kind === "Rotate") {
       // the target is the next key of these same words, derived here; a target in the request must be that key
       btn.textContent = "deriving the next key";
       const { k, material } = nextKeyMaterial(master, { lmsPubkey: pub }, scope);
       next = await LmsPrivateKey.generateAsync(material, { onProgress: (d, t) => (btn.textContent = `deriving the next key ${Math.round((d / t) * 100)}%`) });
-      if (req.action.newLmsPubkey && !equalBytes(unb64(req.action.newLmsPubkey), next.publicKey)) throw new Error(`the request asks to rotate to a key these words cannot reproduce (not index ${k + 1}); refusing, the vault would be lost`);
-      req.action = { kind: "Rotate", newLmsPubkey: b64(next.publicKey) };
+      if (request.action.newLmsPubkey && !equalBytes(unb64(request.action.newLmsPubkey), next.publicKey)) throw new Error(`the request asks to rotate to a key these words cannot reproduce (not index ${k + 1}); refusing, the vault would be lost`);
+      request.action = { kind: "Rotate", newLmsPubkey: b64(next.publicKey) };
     }
-    const action = toAction(req);
-    const message = vaultMessage(new PublicKey(req.vault), req.generation, encodeAction(action));
+    const action = toAction(request);
+    const message = vaultMessage(new PublicKey(request.vault), request.generation, encodeAction(action));
     // every check passed: record the leaf durably, then sign. a refused request costs no leaf.
-    if (!(await journal.reserve(jk, q, { vault: req.vault, generation: req.generation }))) throw new Error(`key ${q} is already recorded as used by this signer`);
+    if (!(await journal.reserve(jk, q, { vault: request.vault, generation: request.generation }))) throw new Error(`key ${q} is already recorded as used by this signer`);
     const signature = key.sign(q, message);
     lastQ = q;
-    const blob: SignedBlob = { v: 1, vault: req.vault, q, generation: req.generation, action: req.action, issuedSlot: req.issuedSlot, expirySlot: req.expirySlot, signature: b64(signature) };
+    const blob: SignedBlob = { v: 1, vault: request.vault, q, generation: request.generation, action: request.action, issuedSlot: request.issuedSlot, expirySlot: request.expirySlot, signature: b64(signature) };
     ($("#sig") as HTMLTextAreaElement).value = JSON.stringify(blob);
     $("#out").classList.remove("hidden");
     $("#out").scrollIntoView({ behavior: "smooth" });
@@ -242,6 +257,7 @@ $("#sign").addEventListener("click", async () => {
     if (master) { ($("#words") as HTMLTextAreaElement).value = ""; ($("#pass") as HTMLInputElement).value = ""; }
     try { master?.fill(0); key?.material.seed.fill(0); next?.material.seed.fill(0); } catch { /* fine */ }
     btn.disabled = false; btn.classList.remove("spin"); btn.textContent = "Sign";
+    signing = false; ($("#req") as HTMLTextAreaElement).readOnly = false;
   }
 });
 $("#copy").addEventListener("click", (e) => copy(($("#sig") as HTMLTextAreaElement).value, e.currentTarget as HTMLButtonElement));
@@ -251,7 +267,7 @@ let scanning: { stop: () => void } | null = null;
 $("#scanreq").addEventListener("click", () => {
   if (scanning) { scanning.stop(); scanning = null; return; }
   const sc = qr.scan($("#scanbox")); scanning = sc;
-  sc.done.then((text) => { ($("#req") as HTMLTextAreaElement).value = text; $("#req").dispatchEvent(new Event("input")); scanning = null; }).catch(() => { scanning = null; });
+  sc.done.then((text) => { scanning = null; if (signing) return; ($("#req") as HTMLTextAreaElement).value = text; $("#req").dispatchEvent(new Event("input")); }).catch(() => { scanning = null; });
 });
 $("#dl").addEventListener("click", () => {
   const a = document.createElement("a");

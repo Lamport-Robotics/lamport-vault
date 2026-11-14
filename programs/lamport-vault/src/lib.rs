@@ -13,7 +13,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::error::ErrorCode;
 use anchor_spl::associated_token::{self, get_associated_token_address_with_program_id, AssociatedToken, Create as CreateAta};
-use anchor_spl::token_interface::{self, CloseAccount, TransferChecked};
+use anchor_spl::token_interface::{self, CloseAccount};
 use lamport_lms::{parse_lms_signature, verify_parsed, LmsPublicKey, LmsType, LMS_PUBLIC_KEY_LEN};
 
 pub mod action;
@@ -238,6 +238,45 @@ fn token_account_fields(ai: &AccountInfo) -> Result<(Pubkey, Pubkey, u64)> {
     Ok((mint, owner, amount))
 }
 
+/// `transfer_checked` of `amount` by `authority`, a PDA of this program signed with `seeds`, that
+/// hands `extra` on to the token program after the four accounts the instruction names.
+///
+/// A Token-2022 mint with a transfer hook cannot be transferred without the hook program, its
+/// validation account and the accounts that account lists; whoever submits the transaction
+/// supplies them, and they are not part of anything an LMS key signed. This program does not
+/// look at them. The token program reads the mint, finds the hook's own list and picks out, by
+/// address, the accounts it names; for a mint without a hook, and under the original Token
+/// program, it reads none of them (docs/DESIGN.md, "Transfer hooks").
+///
+/// Each one is passed on writable only if the transaction made it writable, and never as a signer,
+/// whoever signed the transaction. The only signature the token program gets from here is the
+/// PDA's, for the authority, and the token program hands the hook that account read-only and
+/// unsigned. A hook that cannot do without somebody's signature therefore fails the transfer,
+/// and nothing moves.
+///
+/// (anchor-spl's `transfer_checked` sends the four named accounts and drops whatever
+/// `with_remaining_accounts` was given, so it cannot be used here.)
+#[allow(clippy::too_many_arguments)]
+fn transfer_checked_with_extra_accounts<'info>(
+    token_program: &Pubkey,
+    from: &AccountInfo<'info>,
+    mint: &AccountInfo<'info>,
+    to: &AccountInfo<'info>,
+    authority: &AccountInfo<'info>,
+    extra: &[AccountInfo<'info>],
+    amount: u64,
+    decimals: u8,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    let mut ix = anchor_spl::token_2022::spl_token_2022::instruction::transfer_checked(token_program, from.key, mint.key, to.key, authority.key, &[], amount, decimals)?;
+    let mut infos = vec![from.clone(), mint.clone(), to.clone(), authority.clone()];
+    for account in extra {
+        ix.accounts.push(AccountMeta { pubkey: account.key(), is_signer: false, is_writable: account.is_writable });
+        infos.push(account.clone());
+    }
+    anchor_lang::solana_program::program::invoke_signed(&ix, &infos, &[seeds]).map_err(Into::into)
+}
+
 /// Verifies, burns the leaf, checks the action and performs it. Both entry
 /// points end here; they differ only in where the signature and the Rotate
 /// rent come from.
@@ -296,24 +335,10 @@ fn verify_and_act<'info>(
             require_keys_eq!(to_ai.key(), to, VaultError::WrongDestination);
             require_keys_eq!(*mint_ai.owner, token_program.key(), VaultError::InvalidTokenProgram);
             let decimals = mint_decimals(mint_ai)?;
-            // Anything after the four named accounts goes to the token program as is: a Token-2022
-            // mint with a transfer hook needs the hook program and its extra account metas, and
-            // without them such a token could never leave the vault.
-            token_interface::transfer_checked(
-                CpiContext::new_with_signer(
-                    token_program.clone(),
-                    TransferChecked {
-                        from: from_ai.clone(),
-                        mint: mint_ai.clone(),
-                        to: to_ai.clone(),
-                        authority: vault.to_account_info(),
-                    },
-                    &[signer_seeds],
-                )
-                .with_remaining_accounts(remaining[4..].to_vec()),
-                amount,
-                decimals,
-            )?;
+            // Anything after the four named accounts goes to the token program: a Token-2022 mint
+            // with a transfer hook needs the hook program and its accounts, and without them such a
+            // token could never leave the vault. None of them is passed on as a signer.
+            transfer_checked_with_extra_accounts(token_program.key, from_ai, mint_ai, to_ai, &vault.to_account_info(), &remaining[4..], amount, decimals, signer_seeds)?;
         }
         Action::Rotate { new_lms_pubkey, .. } => {
             let new_pk = parse_vault_key(&new_lms_pubkey)?;
@@ -507,7 +532,7 @@ pub mod lamport_vault {
     ///
     /// Remaining accounts, by action:
     /// * `TransferSol`: `[to (writable)]`
-    /// * `TransferToken`: `[vault token account (w), destination token account (w), mint, token program]`
+    /// * `TransferToken`: `[vault token account (w), destination token account (w), mint, token program]`, then a transfer hook's accounts if the mint has one
     /// * `TransferTokenFrom`: the same four; the first must be the action's `from`
     /// * `Rotate`: none
     /// * `Close`: `[to (w)]`, then any number of `[token account (w), token program]` pairs,
@@ -554,7 +579,8 @@ pub mod lamport_vault {
     /// associated token account (created here if missing, rent paid by `payer`)
     /// and closes it, its rent to the heir. The heir is the `to` the `Close`
     /// was signed for, read from the `Tombstone`: anyone may call this, and
-    /// funds can only ever go there. Token and Token-2022, any mint.
+    /// funds can only ever go there. Token and Token-2022, any mint; a mint with a
+    /// transfer hook needs the hook's accounts as remaining accounts.
     pub fn sweep_closed<'info>(ctx: Context<'_, '_, 'info, 'info, SweepClosed<'info>>) -> Result<()> {
         let tomb = &ctx.accounts.tombstone;
         let heir = &ctx.accounts.heir;
@@ -590,21 +616,8 @@ pub mod lamport_vault {
         let signer_seeds: &[&[u8]] = &[VAULT_SEED, &tomb.vault_id, &[ctx.bumps.tombstone]];
         if amount > 0 {
             let decimals = mint_decimals(mint_ai)?;
-            token_interface::transfer_checked(
-                CpiContext::new_with_signer(
-                    token_program.to_account_info(),
-                    TransferChecked {
-                        from: acc_ai.to_account_info(),
-                        mint: mint_ai.to_account_info(),
-                        to: heir_ata.to_account_info(),
-                        authority: tomb.to_account_info(),
-                    },
-                    &[signer_seeds],
-                )
-                .with_remaining_accounts(ctx.remaining_accounts.to_vec()), // transfer-hook metas, if the mint has one
-                amount,
-                decimals,
-            )?;
+            // the remaining accounts are a transfer hook's, if the mint has one; the destination is the heir's account whatever they are
+            transfer_checked_with_extra_accounts(token_program.key, acc_ai, mint_ai, heir_ata, &tomb.to_account_info(), ctx.remaining_accounts, amount, decimals, signer_seeds)?;
         }
         token_interface::close_account(CpiContext::new_with_signer(
             token_program.to_account_info(),

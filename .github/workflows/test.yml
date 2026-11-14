@@ -63,8 +63,26 @@ jobs:
           node-version: 22
       - run: npm ci --ignore-scripts && npm run build
         working-directory: sdk
-      - run: npm ci --ignore-scripts && npm run typecheck && npm run build
+      - run: npm ci --ignore-scripts && npm run typecheck && npm test && npm run build
         working-directory: web
+      # The page and the signer have a second build, for vaults of the Heir-enabled program
+      # (docs/SUCCESSION.md, section 9). Its code sits in the same source behind a build constant,
+      # and the vault's own files must come out without any of it. The page already carries the
+      # SDK's encoder for the sixth action; the signer, which sees the 24 words, carries nothing.
+      - name: The vault's page and signer carry no Heir code
+        working-directory: web
+        run: |
+          heir_id=$(grep -o 'LAMPORT_VAULT_HEIR_PROGRAM_ID = new PublicKey("[^"]*' ../sdk/packages/vault/src/succession.ts | cut -d'"' -f2)
+          test -n "$heir_id"
+          fail=0
+          for word in "inheritance plan" "who that is" "/heir/signer.html"; do
+            if grep -rqF -- "$word" dist; then echo "::error::\"$word\" is in the vault's own build: $(grep -rlF -- "$word" dist | tr '\n' ' ')"; fail=1; fi
+          done
+          for word in SetSuccession "$heir_id"; do
+            if grep -qF -- "$word" dist/signer.html; then echo "::error::\"$word\" is in the vault's cold signer"; fail=1; fi
+          done
+          [ "$fail" = 0 ] && echo "none of it is in dist/"
+          exit "$fail"
       - name: Signer hash
         working-directory: web
         run: |
@@ -79,8 +97,26 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "signer.html $hash"
+      - name: Heir build of the page and the signer
+        working-directory: web
+        run: |
+          npm run build:heir
+          grep -qF SetSuccession dist-heir/signer.html
+          hash=$(sha256sum dist-heir/signer.html | cut -d" " -f1)
+          {
+            echo "### cold signer, Heir build"
+            echo
+            echo '```'
+            echo "commit   $GITHUB_SHA"
+            echo "sha256   $hash"
+            echo "size     $(wc -c < dist-heir/signer.html) bytes"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "heir signer.html $hash"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-${{ github.sha }}
-          path: web/dist
+          path: |
+            web/dist
+            web/dist-heir
           if-no-files-found: error

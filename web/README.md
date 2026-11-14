@@ -14,6 +14,28 @@ signature.
 
 Build in CI: the `web` job of `.github/workflows/test.yml` runs `npm ci` and `npm run build` and prints `sha256(dist/signer.html)` in its summary; a deploy is that artifact. Deploy: rsync `dist/` to `/opt/lamportvault/site` on the box, Caddy serves it.
 
+## The Heir build
+
+```sh
+npm run build:heir                       # dist-heir/ + dist-heir/signer.html, served under /heir/
+HEIR_CLOCK=short npm run build:heir      # for the short-clocks test program (a day lasts a second)
+npm test                                 # the Heir build's request code, against kat/succession_encoding.json
+```
+
+The same source, built for vaults of the Heir-enabled program: the page gets an Inheritance tab
+and the signer learns to show and sign a plan. `docs/SUCCESSION.md`, section 9, says how it is put
+together and why `npm run build` still produces exactly the files it did. The Heir build is not
+part of a deploy of this site; Lamport Heir ships its own, built from this source.
+
+To try it against a local validator that has the test program loaded:
+
+```sh
+HEIR_CLOCK=short HEIR_RPC=http://127.0.0.1:8899 npm run build:heir
+npx vite preview -c vite.heir.config.ts --port 4173      # http://localhost:4173/heir/
+```
+
+`HEIR_RPC` also widens the page's CSP to that endpoint. It makes a test build, never one to publish.
+
 ## Interface
 
 The app and information pages import `src/interface.css` after the base styles.

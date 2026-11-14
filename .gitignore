@@ -11,4 +11,6 @@ test-ledger/
 .env.*
 !.env.example
 dist-signer/
+dist-heir/
+dist-heir-signer/
 web/preview-shots/

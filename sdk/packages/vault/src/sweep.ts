@@ -4,12 +4,13 @@
  * such a balance to the tombstone's heir (the `to` the Close was signed for) and nowhere else.
  * `sweepClosed` finds a closed vault's token accounts for one mint and sweeps each.
  */
-import { type Commitment, type PublicKey, type Signer } from "@solana/web3.js";
+import { type AccountMeta, type Commitment, type PublicKey, type Signer } from "@solana/web3.js";
 import { decodeTombstone, isTombstone } from "./accounts.ts";
 import { sweepClosedInstruction } from "./instructions.ts";
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "./pda.ts";
+import { associatedTokenAddress, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "./pda.ts";
 import { LAMPORT_VAULT_PROGRAM_ID } from "./programIds.ts";
 import { type Rpc, sendAndConfirm, type SendOpts } from "./signer.ts";
+import { resolveTransferHookAccounts, transferHookProgramId } from "./transferHook.ts";
 
 /** What `sweepClosed` needs beyond {@link Rpc}: `Connection.getTokenAccountsByOwner`. */
 export interface SweepRpc extends Rpc {
@@ -46,6 +47,10 @@ export interface SweepClosedResult {
  * it only pays the heir's associated token account rent when that account has to be created).
  * Refused before anything is sent when the address holds a live vault or nothing at all. The token
  * program is the one that owns `mint` (Token or Token-2022).
+ *
+ * A Token-2022 mint with a transfer hook gets the hook's accounts, resolved here for each account
+ * from its balance (`transferHook.ts`). They are added unsigned, and a hook whose list names
+ * `payer` is refused before anything is sent: sweep with another payer, or not at all.
  */
 export async function sweepClosed(rpc: SweepRpc, payer: Signer, vault: PublicKey, mint: PublicKey, opts: SweepClosedOptions = {}): Promise<SweepClosedResult> {
   const programId = opts.programId ?? LAMPORT_VAULT_PROGRAM_ID;
@@ -59,11 +64,22 @@ export async function sweepClosed(rpc: SweepRpc, payer: Signer, vault: PublicKey
   if (!mintInfo) throw new Error(`mint ${mint.toBase58()} does not exist`);
   const tokenProgram = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].find((p) => p.equals(mintInfo.owner));
   if (!tokenProgram) throw new Error(`mint ${mint.toBase58()} is owned by ${mintInfo.owner.toBase58()}, not Token or Token-2022`);
+  const hookProgram = tokenProgram.equals(TOKEN_2022_PROGRAM_ID) ? transferHookProgramId(new Uint8Array(mintInfo.data)) : null;
   const found = await rpc.getTokenAccountsByOwner(vault, { mint }, opts.commitment);
   const swept: SweptAccount[] = [];
   let heirTokenAccount: PublicKey | undefined;
   for (const [i, { pubkey }] of found.value.entries()) {
-    const built = sweepClosedInstruction({ programId, payer: payer.publicKey, vault, heir, mint, vaultTokenAccount: pubkey, tokenProgram });
+    let extraAccounts: AccountMeta[] = [];
+    if (hookProgram) {
+      // the program moves the whole balance, and the hook is told the amount; an empty account is only closed
+      const account = await rpc.getAccountInfo(pubkey, opts.commitment);
+      const amount = account && account.data.length >= 72 ? account.data.readBigUInt64LE(64) : 0n;
+      if (amount > 0n) {
+        const destination = associatedTokenAddress(heir, mint, tokenProgram);
+        extraAccounts = await resolveTransferHookAccounts(rpc, hookProgram, { mint, source: pubkey, destination, authority: vault, amount }, { commitment: opts.commitment, signers: [payer.publicKey] });
+      }
+    }
+    const built = sweepClosedInstruction({ programId, payer: payer.publicKey, vault, heir, mint, vaultTokenAccount: pubkey, tokenProgram, extraAccounts });
     heirTokenAccount = built.heirTokenAccount;
     const signature = await sendAndConfirm(rpc, [payer], [built.instruction], { commitment: opts.commitment });
     swept.push({ account: pubkey, signature });

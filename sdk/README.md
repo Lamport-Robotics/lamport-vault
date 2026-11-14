@@ -131,7 +131,16 @@ await signer.execute({ kind: "Close", to });                                  //
 // Tokens the Close was not handed (closeTokenAccounts) stay owned by the PDA: anyone can sweep them to
 // `to`, the tombstone's heir, and nowhere else. One sweep_closed transaction per token account of the mint.
 await sweepClosed(rpc, payer, signer.vault, mint);                             // { heir, heirTokenAccount, swept: [{ account, signature }] }
+
+// A Token-2022 mint with a transfer hook needs the hook's accounts behind the instruction's own. A signer
+// built with tokenProgram: TOKEN_2022_PROGRAM_ID, and sweepClosed, resolve them from the chain themselves;
+// with the instruction builders, resolve them and pass them as extraAccounts:
+const extraAccounts = await transferHookAccounts(rpc, { mint, source, destination, authority: vault, amount }, { signers: [payer.publicKey] });
 ```
+
+A hook's accounts are never added as signers, and `transferHookAccounts` throws if the hook's list names
+a key in `signers`: the program hands a hook nobody's signature, and a client should not put its own
+payer in front of a stranger's hook program (`docs/DESIGN.md`, "Transfer hooks").
 
 A closed vault's address is never reusable (`Close` leaves an 81-byte `Tombstone` holding its own rent and
 naming the heir; `create_vault` on it fails `VaultClosed`), so the next vault needs the next key:

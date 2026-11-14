@@ -11,5 +11,6 @@ export * from "./registry.ts";
 export * from "./signer.ts";
 export * from "./succession.ts";
 export * from "./sweep.ts";
+export * from "./transferHook.ts";
 export { ByteReader, ByteWriter, u64le } from "./borsh.ts";
 export * from "./programIds.ts";

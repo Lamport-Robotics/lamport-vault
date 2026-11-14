@@ -64,7 +64,7 @@ export interface ExecuteDirectParams {
   closeTokenAccounts?: CloseTokenAccount[];
   /** For `TransferToken`: the vault-owned token account to draw from. Default: the vault's associated token account. */
   source?: PublicKey;
-  /** Token-2022 transfer hook: the hook program and its extra account metas, passed through to the token program. */
+  /** A Token-2022 transfer hook's accounts, handed to the token program after the four the program names (`transferHookAccounts` resolves them). Added unsigned. */
   extraAccounts?: AccountMeta[];
 }
 

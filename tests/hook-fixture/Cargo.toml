@@ -1,0 +1,38 @@
+[package]
+name = "hook-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test fixture for the LiteSVM tests (tests/svm/tests/transfer_hook.rs): a Token-2022 transfer hook, and a stand-in that records what a caller hands the token program. Never deployed."
+
+# Standalone on purpose, like tests/svm: it is in no build that is deployed or verified, and it
+# cannot change the program workspace's Cargo.lock.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "hook_fixture"
+
+[features]
+# named by the entrypoint macro
+custom-heap = []
+custom-panic = []
+
+# The versions the program workspace's Cargo.lock resolves.
+[dependencies]
+solana-account-info = "=2.3.0"
+solana-cpi = "=2.2.1"
+solana-instruction = "=2.3.3"
+solana-program-entrypoint = "=2.3.0"
+solana-program-error = "=2.2.2"
+solana-pubkey = "=2.4.0"
+
+# the same platform-tools as the programs (cargo-build-sbf reads this key)
+[package.metadata.solana]
+tools-version = "v1.56"
+
+[profile.release]
+overflow-checks = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

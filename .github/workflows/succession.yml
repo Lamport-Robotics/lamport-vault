@@ -21,6 +21,7 @@ on:
     paths:
       - "programs/**"
       - "tests/svm/**"
+      - "tests/hook-fixture/**"
       - "tests/mutants/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -177,6 +178,7 @@ jobs:
           workspaces: |
             . -> target
             tests/svm -> target
+            tests/hook-fixture -> target
           cache-targets: true
 
       - name: Cache platform-tools and the SBF toolchain

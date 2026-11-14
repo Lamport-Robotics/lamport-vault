@@ -128,7 +128,8 @@ jobs:
     # `execute_direct` on chain: the whole LMS signature rides in the instruction
     # data, 2.3 KB and more, which no wire transaction of the test validator can
     # carry. LiteSVM runs the built program against the SVM directly, so all four
-    # actions take that path here (tests/svm).
+    # actions take that path here (tests/svm). The same suite moves tokens whose mint has a
+    # Token-2022 transfer hook through every instruction that moves tokens (transfer_hook.rs).
     name: execute_direct in litesvm${{ matrix.features && format(' (--features {0})', matrix.features) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -150,6 +151,7 @@ jobs:
           workspaces: |
             . -> target
             tests/svm -> target
+            tests/hook-fixture -> target
           cache-targets: true
 
       - name: Cache platform-tools and the SBF toolchain
@@ -192,6 +194,12 @@ jobs:
 
       - name: anchor build
         run: anchor build ${{ matrix.features && format('-- --features {0}', matrix.features) || '' }}
+
+      # The transfer-hook tests load a program of their own into LiteSVM (tests/hook-fixture): a
+      # Token-2022 transfer hook, and a stand-in that records what the vault hands the token program.
+      # Built with the same platform-tools as the vault; it is in no build that is deployed.
+      - name: Build the transfer-hook fixture
+        run: cargo build-sbf --manifest-path tests/hook-fixture/Cargo.toml
 
       # run from inside the crate: its rust-toolchain.toml pins the toolchain litesvm's agave crates need, rustup fetches it.
       # The test crate takes the same feature as the build: another program id, another vault layout, more tests.

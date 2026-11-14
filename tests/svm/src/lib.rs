@@ -22,6 +22,7 @@ pub const PROGRAM_ID: Pubkey = Address::from_str_const("3mJU9ozZByXsHavMGfzdwDLF
 
 #[cfg(feature = "succession")]
 pub mod succession;
+pub mod hook;
 pub const TOKEN_PROGRAM_ID: Pubkey = Address::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 pub const MESSAGE_DOMAIN: &[u8] = b"lamport-vault/v1";
 
@@ -88,6 +89,15 @@ pub mod action {
     pub fn close(to: &Pubkey, issued: u64, expiry: u64) -> Vec<u8> {
         let mut v = vec![3u8];
         v.extend_from_slice(to.as_ref());
+        window(&mut v, issued, expiry);
+        v
+    }
+    pub fn transfer_token_from(from: &Pubkey, mint: &Pubkey, to: &Pubkey, amount: u64, issued: u64, expiry: u64) -> Vec<u8> {
+        let mut v = vec![4u8];
+        v.extend_from_slice(from.as_ref());
+        v.extend_from_slice(mint.as_ref());
+        v.extend_from_slice(to.as_ref());
+        v.extend_from_slice(&amount.to_le_bytes());
         window(&mut v, issued, expiry);
         v
     }

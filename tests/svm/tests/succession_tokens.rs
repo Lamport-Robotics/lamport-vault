@@ -380,9 +380,76 @@ fn a_transfer_hook_whose_program_is_not_given_fails_cleanly() {
     assert!(w.sweep(&account, &mint).is_err());
     nothing_moved(&w, &account, &mint, 100);
     // sweep_closed hands every extra account on to the token program, so a real hook's accounts
-    // can be supplied; here the hook program itself does not exist, and the transfer still fails
+    // can be supplied (the tests below); here the hook program itself does not exist, and the
+    // transfer still fails
     assert!(w.sweep_with(&account, &mint, vec![AccountMeta::new_readonly(hook_program, false)]).is_err());
     nothing_moved(&w, &account, &mint, 100);
+}
+
+/// A mint whose transfer hook is the fixture in `tests/hook-fixture`, told to allow or to refuse,
+/// and 100 of it in the vault.
+fn hook_world(mode: u8) -> (World, Pubkey, Pubkey) {
+    let mut w = World::new();
+    hook::load(&mut w.b.svm);
+    let payer = w.payer();
+    let mint_key = Keypair::new();
+    let space = ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::TransferHook]).unwrap();
+    let ixs = vec![
+        system_instruction::create_account(&payer, &mint_key.pubkey(), w.b.rent(space), space as u64, &T22),
+        t22::extension::transfer_hook::instruction::initialize(&T22, &mint_key.pubkey(), Some(payer), Some(hook::HOOK_PROGRAM_ID)).unwrap(),
+        t22::instruction::initialize_mint2(&T22, &mint_key.pubkey(), &payer, None, DECIMALS).unwrap(),
+    ];
+    w.b.send(&ixs, &[&mint_key]).expect("a mint with the fixture as its transfer hook");
+    let mint = mint_key.pubkey();
+    hook::install(&mut w.b.svm, &mint, mode, &[hook::Listed::Counter]);
+    let account = w.vault_tokens(&mint, 100);
+    (w, mint, account)
+}
+
+#[test]
+fn a_transfer_hook_given_its_accounts_lets_the_tokens_through() {
+    let (mut w, mint, account) = hook_world(hook::ALLOW);
+    w.release();
+    // without the hook's accounts the token program cannot call the hook
+    assert!(w.sweep(&account, &mint).is_err());
+    nothing_moved(&w, &account, &mint, 100);
+    // with them (the counter the hook asks for, its validation account, the hook program) it goes
+    w.sweep_with(&account, &mint, hook::accounts(&mint)).expect("sweep with the hook's accounts");
+    assert_eq!(w.arrived(&mint), 100);
+    assert!(w.b.account(&account).is_none(), "the vault's account is closed");
+    let seen = hook::seen(&w.b.svm, &mint);
+    assert_eq!((seen.calls, seen.amount, seen.authority), (1, 100, w.b.vault), "the hook ran, for the released vault");
+    assert_eq!(seen.signers, 0, "and was handed nobody's signature");
+}
+
+#[test]
+fn a_transfer_hook_that_refuses_holds_the_token_until_it_allows() {
+    let (mut w, mint, account) = hook_world(hook::REFUSE);
+    let sol_before = w.b.balance(&w.claim());
+    w.release();
+    assert!(w.b.balance(&w.claim()) > sol_before, "the SOL was released all the same");
+    assert_eq!(token_error(w.sweep_with(&account, &mint, hook::accounts(&mint))), hook::ERR_REFUSED);
+    nothing_moved(&w, &account, &mint, 100);
+    hook::set_mode(&mut w.b.svm, &mint, hook::ALLOW);
+    w.sweep_with(&account, &mint, hook::accounts(&mint)).expect("sweep once the hook allows it");
+    assert_eq!(w.arrived(&mint), 100);
+}
+
+#[test]
+fn an_empty_account_of_a_hook_mint_is_closed_in_the_release_without_the_hook() {
+    // nothing is transferred, so the hook is not called and its accounts are not needed
+    let (mut w, mint, account) = hook_world(hook::REFUSE);
+    let to = w.ata(&w.payer(), &mint);
+    hook::set_mode(&mut w.b.svm, &mint, hook::ALLOW);
+    let (issued, expiry) = w.b.window();
+    let out = action::transfer_token(&mint, &to, 100, issued, expiry);
+    let mut metas = vec![AccountMeta::new(account, false), AccountMeta::new(to, false), AccountMeta::new_readonly(mint, false), AccountMeta::new_readonly(T22, false)];
+    metas.extend(hook::accounts(&mint));
+    w.b.signed(&out, metas).expect("the owner moves the hook mint out with a signed action");
+    assert_eq!((w.amount(&account), w.amount(&to)), (0, 100));
+    hook::set_mode(&mut w.b.svm, &mint, hook::REFUSE);
+    w.release_with(&[(account, T22)]).expect("release, closing the empty account");
+    assert!(w.b.account(&account).is_none());
 }
 
 // ---- what the heir set on their own account ----

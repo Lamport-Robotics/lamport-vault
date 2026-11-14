@@ -24,7 +24,7 @@ pub use action::Action;
 pub use error::VaultError;
 pub use state::{SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_ACTION_LEN};
 
-#[cfg(not(feature = "succession"))] declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH"); #[cfg(all(feature = "succession", not(feature = "short-clocks")))] declare_id!("HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb"); #[cfg(feature = "short-clocks")] declare_id!("DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS");
+#[cfg(not(feature = "succession"))] declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH"); #[cfg(all(feature = "succession", not(feature = "short-clocks")))] declare_id!("3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV"); #[cfg(feature = "short-clocks")] declare_id!("3pwH161r4SZRH6nCHY4RUm7gk2NZqypyFJaUgv9a2duG");
 
 /// Seed prefix of the `Vault` PDA: `["vault", vault_id]`.
 pub const VAULT_SEED: &[u8] = b"vault";

@@ -16,9 +16,9 @@ fn hashv(parts: &[&[u8]]) -> [u8; 32] {
 
 #[cfg(not(feature = "succession"))]
 pub const PROGRAM_ID: Pubkey = Address::from_str_const("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
-/// The Heir-enabled build declares its own id (a placeholder with no private key until deployed).
+/// The Heir-enabled build declares its own id (docs/SUCCESSION.md, section 3).
 #[cfg(feature = "succession")]
-pub const PROGRAM_ID: Pubkey = Address::from_str_const("HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb");
+pub const PROGRAM_ID: Pubkey = Address::from_str_const("3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV");
 
 #[cfg(feature = "succession")]
 pub mod succession;

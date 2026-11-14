@@ -1,9 +1,9 @@
 {
   "source": "@lamport-robotics/vault (this repository), scripts/succession-kat.ts",
-  "note": "The Heir-enabled program: programs/lamport-vault built with the `succession` feature. The program ids are placeholders with no private key until a deployment exists.",
+  "note": "The Heir-enabled program: programs/lamport-vault built with the `succession` feature.",
   "program_ids": {
-    "lamport_vault_heir": "HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb",
-    "lamport_vault_heir_short_clocks": "DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS"
+    "lamport_vault_heir": "3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV",
+    "lamport_vault_heir_short_clocks": "3pwH161r4SZRH6nCHY4RUm7gk2NZqypyFJaUgv9a2duG"
   },
   "inputs": {
     "pk_11": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
@@ -62,7 +62,7 @@
   "pdas": {
     "vault_id_hex": "36bfe00f25cee3b40a6e4842e3a77988ea05b01d62196682d52d13a773de435a",
     "vault": {
-      "address": "GEACW8YKJUVJiqELYwNavdCZcPg2gRhnnrihZBLNZ5ZT",
+      "address": "HbmDwnta8tdktofPfGbStpwUWc8dhbEjjj2b4dTDyeMi",
       "bump": 255
     }
   },
@@ -82,7 +82,7 @@
           "expirySlot": "305419896"
         },
         "action_hex": "0511111111111111111111111111111111111111111111111111111111111111118033e10100000000001a4f00000000004444444444444444444444444444444444444444444444444444444444444444555555555555555555555555555555555555555555555555555555555555555500003412000000007856341200000000",
-        "message_hex": "339a937692f9ecc8db2061537759d5bd0c67e95fb3ff8d87da6755b4cc9ebcc5"
+        "message_hex": "4d803ca43cb952da6e876dc0a15ec8063e1891048490e894bbc57867a3ccffa8"
       },
       "set_succession_no_keys": {
         "action": {
@@ -96,7 +96,7 @@
           "expirySlot": "305419896"
         },
         "action_hex": "05111111111111111111111111111111111111111111111111111111111111111100a7760000000000008d2700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003412000000007856341200000000",
-        "message_hex": "9eceb633d612bbe591b1ce0462e76e0528c1d3540a32f79cbcc67b9d5c62e503"
+        "message_hex": "9e9d71316a83d5334e60f8f36e27b72c39160be173c1e8c46ce57f1226982ce4"
       },
       "clear_succession": {
         "action": {
@@ -110,7 +110,7 @@
           "expirySlot": "305419896"
         },
         "action_hex": "050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003412000000007856341200000000",
-        "message_hex": "4bd670cb35990320e0252ac57411f2af79d8f0467e45646f55363a25d9d5a2f5"
+        "message_hex": "9de7f7ecaaad7f9bbd05d73dc44d528d3890956c1b6a20440081ce972674424d"
       },
       "transfer_sol": {
         "action": {
@@ -121,7 +121,7 @@
           "expirySlot": "305419896"
         },
         "action_hex": "001111111111111111111111111111111111111111111111111111111111111111002f68590000000000003412000000007856341200000000",
-        "message_hex": "e10c8467c8d30535fde974be9d4d9e7ff500c1a26ae528fd3aa6ca4152f75a80"
+        "message_hex": "7d2e0528a037c04ebfde54348cd2c68ed93162efd9d7828f4f45884008ca92fb"
       },
       "close": {
         "action": {
@@ -131,7 +131,7 @@
           "expirySlot": "305419896"
         },
         "action_hex": "03111111111111111111111111111111111111111111111111111111111111111100003412000000007856341200000000",
-        "message_hex": "fbf0b8c45171ac1be1c79d3770cd6ac20e27f819d7d65da33faef155c9499230"
+        "message_hex": "ebb729e54d0f8a82f8765c2044f7dabe4748ed4837c0d8a7aba31e130af4e200"
       }
     }
   },

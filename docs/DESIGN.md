@@ -142,9 +142,11 @@ the destination was fixed by the `Close` signature that made it. The SDK's `swee
 vault, mint)` lists the closed vault's token accounts for the mint (`getTokenAccountsByOwner`) and sends
 one `sweep_closed` per account.
 
-Both token CPIs (`TransferToken` and `sweep_closed`) pass any accounts after the named ones straight to
-the token program. A Token-2022 mint with a transfer hook needs its hook program and extra account metas
-there; the SDK takes them as `extraAccounts`. Without this a hooked token could never leave a vault.
+Both token CPIs (`TransferToken` / `TransferTokenFrom`, and `sweep_closed`) hand any accounts after the
+named ones to the token program, none of them as a signer. A Token-2022 mint with a transfer hook needs
+its hook program and the hook's accounts there; the SDK resolves them (`transferHookAccounts`) and takes
+them as `extraAccounts`. Without this a token with a hook could never leave a vault. The rules, and why
+accounts that no LMS key signed for are safe to pass on, are under "Transfer hooks" below.
 
 `execute_direct` takes the accounts `vault`, `payer` (signer, writable) and `system_program`, then the same
 remaining accounts as `execute`. `action` must be 1..256 bytes. Steps 2–6 below are one shared code path for
@@ -229,6 +231,90 @@ always move to a fresh key, and when it cannot, because its key history is full 
 `HistoryFull`, it can still leave: `Close` on the last leaf sends the lamports to `to` and the tombstone
 remembers `to` as heir for any tokens. Rotate-only would have been a deadlock at that corner: 128
 rotations, one leaf, and no instruction left that could move the funds.
+
+### Transfer hooks
+
+A Token-2022 mint can name a *transfer hook*: a program the token program calls on every transfer of
+that mint, which can refuse it. The hook keeps a *validation account* at the address
+`["extra-account-metas", mint]` of its own program, listing further accounts it wants on each call. A
+transfer goes through only when the token program is handed the hook program, the validation account
+and every account on that list, on top of the four accounts `transfer_checked` names.
+
+The vault does not know any of this. It builds `transfer_checked` itself: source, mint, destination and
+authority exactly as before, then every remaining account the caller passed, in order. The vault's PDA
+signs for the authority. For each of the others the rule is:
+
+- **never a signer**, whoever signed the transaction;
+- **writable only if the transaction made it writable**.
+
+(`anchor-spl`'s `transfer_checked` cannot do this: it sends the four named accounts and drops whatever
+`with_remaining_accounts` was given, which is why hook mints could not move before.)
+
+These accounts are chosen by whoever submits the transaction. No LMS signature covers them. That is
+safe for these reasons:
+
+1. **They cannot change what was signed.** The signature fixes the mint, the destination and the amount
+   (`TransferTokenFrom` also the source; `sweep_closed` takes the destination from the tombstone). The
+   token program either moves that amount between those two accounts or fails. Extra accounts decide
+   only whether the hook can run.
+2. **The token program validates them, not the vault.** Token-2022 reads the mint, finds the hook
+   program, derives the validation account's address from the mint and that program, reads the list and
+   picks the listed accounts out of what it was given, by address. An account that is not on the list
+   goes no further. A missing or wrong one fails the transfer and nothing moves. The hook program then
+   checks its own accounts.
+3. **A mint without a hook is untouched.** For such a mint, and under the original Token program,
+   accounts after the authority are read only as multisig signers, and only when the authority is a
+   multisig account owned by the token program. A vault is owned by this program, so they are ignored.
+   Read in the transfer and `validate_owner` code of spl-token-2022 8.0.1, spl-token 8.0.0 and
+   p-token; run against the Token-2022 11.0.0 and p-token that LiteSVM 0.17.0 loads
+   (`tests/svm/tests/transfer_hook.rs`).
+4. **The vault parses nothing.** It does not look for the hook in the mint or read the list. The other
+   way to do this, `spl_token_2022::onchain::invoke_transfer_checked`, resolves the list inside the
+   calling program, with the extension types that were known when the program was compiled: an
+   extension added to Token-2022 later, sitting in front of the hook in a mint, would hide the hook from
+   a vault whose upgrade authority is burned, and that token would be stuck for good. It also adds about
+   41 KB to the program (383 136 bytes against 340 808, local builds), past the 350 000 bytes allocated
+   on devnet.
+5. **The vault's signature stops at the token program.** The token program gets the PDA's signature for
+   the authority and uses it for this one transfer. It calls the hook with source, mint, destination and
+   authority read-only and unsigned, and an entry of the list that names one of those four gets no more
+   than that. The hook cannot call back into the vault either: the runtime refuses to re-enter a program
+   that is further up the call stack.
+6. **Nobody else's signature reaches the hook.** Whoever pays for a transaction signs all of it, so the
+   fee payer is a signer in every instruction that names it. A mint's owner can write any address into
+   the hook's list (a fixed key, or one read from account data they control) and ask for it as a
+   writable signer; a hook handed the payer that way could move the payer's SOL. This matters most for
+   `sweep_closed`, which anyone may call on a token they know nothing about. Because the vault passes no
+   account on as a signer, the token program has no signature to give. The account-resolution
+   library Token-2022 uses has demoted every listed account to a non-signer by itself since October
+   2025, and the Token-2022 11.0.0 the tests run does so; the 8.0.1 source this program is built
+   against passed the flag on. The vault does not depend on which one a cluster runs.
+   The cost: a hook that needs a co-signature cannot be satisfied through a vault. The transfer fails
+   and the token stays.
+
+What a hook can still do is refuse. A hook that returns an error, or burns the compute budget, fails
+the whole transaction: no token moves, no leaf is spent, the staging buffer stays, and the same signed
+action can be submitted again until it expires. The token cannot leave while the hook refuses, which is
+the issuer's power over that token wherever it is held, like a freeze. SOL and every other token are
+not affected. After a `Close`, such a token waits in the closed vault's account until `sweep_closed`
+succeeds.
+
+Compute: the vault adds one account to the CPI per extra account and parses nothing; the hook's own
+cost is the hook's. Measured in LiteSVM: the same signed `TransferToken` of a mint without a hook costs
+130 CU less on this build than on the one before it (138 474 against 138 604 for SPL Token, 140 402
+against 140 532 for Token-2022). A Token-2022 transfer of a hook mint took about 18 000 CU in the token
+program, 5 400 of them in the test fixture's hook (`tests/hook-fixture`). Whole instructions, H5 key:
+`execute_direct` `TransferToken` of a hook mint 141 439 CU in one run (LMS verification alone moves by
+thousands from one signature to the next), `sweep_closed` of a hook mint 51 419 CU, creating the heir's
+account included. A hook that needs much more than the 400 000 CU the SDK requests needs a larger
+request from whoever submits. The call stack is vault, token program, hook; a hook's own calls go below
+that, within the runtime's nesting limit.
+
+The SDK (`transferHook.ts`) follows the same rules: `transferHookAccounts` reads the mint and the
+hook's list and returns the accounts to pass, all unsigned; if the list names a key that signs the
+transaction it throws before a leaf is spent, so a client never puts its own payer in front of a
+stranger's hook. `VaultSigner` (when its `tokenProgram` is Token-2022) and `sweepClosed` call it
+themselves; the instruction builders take the result as `extraAccounts` and strip any signer flag.
 
 ### Multi-device
 
@@ -390,6 +476,9 @@ complements the per-message binding of program, account and generation, it does 
 | `Close` signed without every token account in hand (an airdrop, an account the owner forgot) | the tombstone records `to` as `heir`; the permissionless `sweep_closed` moves any token account the PDA still owns to the heir's associated token account and closes it, and refuses every other destination (`WrongHeir`, `NotHeirTokenAccount`); a live vault cannot be swept (`VaultNotClosed`) |
 | rotate to a key the 24 words cannot reproduce (a wrong or injected target) | the chain cannot tell; the SDK's `VaultSigner` refuses a `Rotate` target that is not index k+1 of its `master` seed (`nextKeyMaterial`) unless the caller opts in with `allowForeignKey: true` |
 | key history runs out | after 128 rotations (32 for a commitment) the account refuses to rotate; the vault can still spend and `Close` |
+| a token with a transfer hook: the hook's accounts are chosen by whoever submits the transaction, and no LMS key signed for them | they cannot change the mint, the destination or the amount; the token program picks the hook's accounts by address from the hook's own list, and a wrong or missing one fails the transfer with nothing moved (section 2, "Transfer hooks") |
+| a hostile transfer hook lists the fee payer, or another signer of the transaction, as a writable signer, to spend from it | the vault passes every such account on unsigned, so the token program has no signature to hand the hook; the vault's own signature goes to the token program for the authority and no further. The SDK refuses to add a signer of the transaction for a hook at all |
+| a transfer hook refuses, or burns the compute budget | that one token does not move while the hook refuses, as with a freeze by its issuer; the transaction fails whole, no leaf is spent, SOL and other tokens are unaffected |
 
 ## 6. Compute and sizes
 
@@ -406,7 +495,7 @@ complements the per-message binding of program, account and generation, it does 
 | `execute` compute | ~115-145k CU measured for H10, worst case ~210k; client requests 400k |
 | staging | `open_sig_buffer` with a 708-byte first chunk plus `write_sig` chunks of 900 bytes: H5 and H10 take 3 transactions in total, H15 and H20 take 4 |
 | `execute_direct` transaction v1 | H10: TransferSol 2 871 bytes, TransferToken 3 002, TransferTokenFrom 3 034, Rotate 2 854, Close 2 897; H15 adds 160; the largest (H15 TransferTokenFrom) stays under 3 200 of the 4 096 allowed |
-| program binaries | `lamport_vault.so` 330 880 bytes (devnet allocation 350 000); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
+| program binaries | `lamport_vault.so` 341 968 bytes as deployed on devnet (`docs/VERIFY.md`; allocation 350 000), and about 1 000 bytes less on `main` since the transfer-hook fix (a local `anchor build` went from 341 816 to 340 808); `pq_registry.so` 262 000 bytes (devnet allocation 272 000) |
 
 ### Direct (transaction v1) against staged, measured on devnet
 

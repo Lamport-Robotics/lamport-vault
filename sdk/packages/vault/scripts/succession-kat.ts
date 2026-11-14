@@ -126,7 +126,7 @@ export function buildSuccessionKat(): unknown {
 
   return {
     source: "@lamport-robotics/vault (this repository), scripts/succession-kat.ts",
-    note: "The Heir-enabled program: programs/lamport-vault built with the `succession` feature. The program ids are placeholders with no private key until a deployment exists.",
+    note: "The Heir-enabled program: programs/lamport-vault built with the `succession` feature.",
     program_ids: { lamport_vault_heir: programId.toBase58(), lamport_vault_heir_short_clocks: LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID.toBase58() },
     inputs: { pk_11: PK_11.toBase58(), pk_44: PK_44.toBase58(), pk_55: PK_55.toBase58(), h5_pubkey_hex: toHex(H5_PUBKEY), h10_pubkey_hex: toHex(H10_PUBKEY), issued_slot: ISSUED.toString(), expiry_slot: EXPIRY.toString(), generation: GENERATION, t0: T0.toString() },
     discriminators: { checkin: toHex(IX.checkin), contact_extend: toHex(IX.contactExtend), start_succession: toHex(IX.startSuccession), execute_succession: toHex(IX.executeSuccession) },

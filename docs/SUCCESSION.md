@@ -107,13 +107,14 @@ the feature build's id for one command and puts the file back.
 | build | features | program id |
 |---|---|---|
 | the vault | none | `B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH` |
-| Heir-enabled vault | `succession` | `HK1QPbqjkozJHB74QuGaduYzAtqBe9hry3nV64LmpCsb` |
-| test build, one-second days | `short-clocks` | `DGe6SeUVApXcN7j3X613SeTmazXGqtAuFSn7RQWBiDDS` |
+| Heir-enabled vault | `succession` | `3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV` |
+| test build, one-second days | `short-clocks` | `3pwH161r4SZRH6nCHY4RUm7gk2NZqypyFJaUgv9a2duG` |
 
-The two Heir ids are **placeholders**: each is the SHA-256 of a label, so no private key for it
-exists and nothing can be deployed there. They are replaced by real ids when the project owner
-generates deployment keypairs. Because a vault's key derivation binds the program id, a vault of
-one program can never be operated under another.
+The two Heir ids have deployment keypairs, made on 2026-11-13 for devnet and kept by the project
+owner outside every repository. An id says where a build would be deployed, not that it is:
+[lamport-heir's `docs/program-ids.md`](https://github.com/Lamport-Robotics/lamport-heir/blob/main/docs/program-ids.md)
+records what is deployed, on which cluster, with which hash. Because a vault's key derivation binds
+the program id, a vault of one program can never be operated under another.
 
 `short-clocks` implies `succession` and makes a "day" of the clock last one second, so a whole
 cycle (90 days of inactivity, 30 days of waiting) fits in a devnet test. It has its own id so that

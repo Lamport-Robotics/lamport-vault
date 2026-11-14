@@ -14,6 +14,7 @@ import { holdings, destinationTokenAccount, toBase, type Holding } from "./token
 import { tape } from "./tape.ts";
 import { openJournal, openIssued, issuedKey, keyFingerprint } from "./journal.ts";
 import { equalBytes } from "@lamport-robotics/lms";
+import { decimalUnits } from "./units.ts";
 import { describePlan, planAction } from "./heir-plan.ts";
 import { inheritancePanel, planForm } from "./heir-page.ts";
 
@@ -394,7 +395,7 @@ function confirmPanel(host: HTMLElement, what: string, note: string): Promise<bo
 
 function describe(a: SignRequest["action"]): string {
   if (a.kind === "TransferSol") return `Send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`;
-  if (a.kind === "TransferToken") return `Send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
+  if (a.kind === "TransferToken") return `Send ${a.decimals != null ? decimalUnits(a.amount, a.decimals) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
   if (a.kind === "Rotate") return a.newLmsPubkey ? `Rotate the vault to the next key from your words ${short(a.newLmsPubkey, 10)}` : "Rotate the vault to the next key from your words";
   if (__HEIR__ && a.kind === "SetSuccession") return describePlan(a);
   return `Close the vault and send everything to ${(a as Closing).to}`;

@@ -34,6 +34,7 @@ export async function claimProblemOnChain(claim: PublicKey, vault: PublicKey, ma
     if (!isLiveVault(info.data)) return "That address is an account of the vault program that is not an open vault.";
     if (decodeVault(info.data).succession?.claim.equals(vault)) return "That address is a vault whose own plan names this vault. A release would be trapped between the two.";
   }
+  // a plan's address before the plan exists looks like this. the form never lets it through: the plan is created first
   if (!info && !PublicKey.isOnCurve(claim.toBytes()) && !mayBeUnkeyed) return "Nothing exists at that address and no key can sign for it. If it is a program's address (a plan, a multisig), create that account first.";
   return null;
 }
@@ -97,7 +98,7 @@ export function planForm(ctx: HeirCtx): { node: HTMLElement; read: () => SignReq
     try {
       const a = current();
       btn.setAttribute("disabled", "");
-      if (a.claim !== NO_ADDRESS) { const why = await claimProblemOnChain(new PublicKey(a.claim), ctx.address, a.terms !== undefined); if (why) throw new Error(why); }
+      if (a.claim !== NO_ADDRESS) { const why = await claimProblemOnChain(new PublicKey(a.claim), ctx.address); if (why) throw new Error(why); }
       checked = JSON.stringify(a);
       out.append(el("dl", { class: "spec", style: "margin-top:14px" }, ...planRows(a, ctx.address.toBase58())),
         el("p", { class: "quiet", style: "font-size:12.5px;margin-top:14px" }, "The signer shows these same lines. Sign only if it does."));

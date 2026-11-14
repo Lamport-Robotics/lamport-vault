@@ -29,6 +29,10 @@ image `verify.yml` pins, at commit `c4a4ccd`:
 | one blank line added after the `#[program]` module, above the `#[derive(Accounts)]` structs | `223d12bc…080fa3`: a different program |
 | feature-gated code added at the **end of existing lines** and at the **end of files**, plus a new file | `b9c055c3…2a563b`: identical |
 
+(The numbers are that commit's. `main`'s default build has changed since, on purpose: the
+transfer-hook fix in `docs/DESIGN.md`. The check in CI compares a pull request with its own base,
+never with a hash written here.)
+
 So the rule for `programs/lamport-vault/src/*.rs` is: **no existing line moves.**
 
 - New code goes in `succession.rs`, or in another new file.
@@ -95,6 +99,7 @@ cargo test --workspace --features lamport-lms/sign,lamport-vault/succession     
 anchor test                                                                      # as always
 scripts/anchor-succession.sh                                                     # anchor test, feature build
 scripts/anchor-succession.sh succession,small-history
+cargo build-sbf --manifest-path tests/hook-fixture/Cargo.toml                    # the transfer-hook tests' fixture, once
 (cd tests/svm && cargo test --features succession)                               # after a feature build
 ```
 
@@ -249,7 +254,8 @@ The token-account checks in `execute_succession` return the vault's own errors, 
 | every instruction on chain, each with its refusals | `tests/svm/tests/succession.rs` | 25 |
 | `execute_succession` equals a signed `Close` | `tests/svm/tests/succession_close.rs` | 2 (120 random vault states) |
 | random sequences of signatures, check-ins, extensions and clock jumps against a model | `tests/svm/tests/succession_random.rs` | 400 sequences |
-| Token-2022 extensions through a release and the sweeps | `tests/svm/tests/succession_tokens.rs` | 13 |
+| Token-2022 extensions through a release and the sweeps | `tests/svm/tests/succession_tokens.rs` | 16 |
+| transfer hooks through every instruction that moves tokens (both builds) | `tests/svm/tests/transfer_hook.rs` | 21 |
 | the SDK: encodings, the clock, the signer's refusals | `sdk/packages/vault/test/succession.test.ts` | 30 |
 | the SDK's signer and builders against a real validator | `tests/succession.ts` (localnet, feature build only) | 8 |
 | fuzzing | `fuzz/fuzz_targets/succession_action.rs`, `succession_clock.rs` | in `fuzz.yml` |
@@ -284,8 +290,13 @@ clock cases that both implementations must compute alike.
 - **Non-transferable** tokens stay where they are: no instruction of this program can move them.
 - A **frozen** account (including a mint whose accounts start frozen) moves only after the issuer
   thaws it.
-- A **paused** mint, a destination that requires **memos**, and a **transfer hook** whose program
-  is missing all fail the sweep of that one token cleanly. The SOL and every other token still go.
+- A **paused** mint and a destination that requires **memos** fail the sweep of that one token
+  cleanly. The SOL and every other token still go.
+- A mint with a **transfer hook** is swept when the hook's accounts follow `sweep_closed`'s own
+  (the SDK's `sweepClosed` resolves them). Without them, or while the hook refuses, the sweep of
+  that one token fails cleanly and the token waits. A hook that insists on somebody's signature
+  cannot be satisfied: the program passes nobody's signature on to a hook
+  (`docs/DESIGN.md`, "Transfer hooks").
 
 None of this blocks the release itself, provided such accounts are not passed to it.
 

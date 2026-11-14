@@ -1,9 +1,14 @@
 import { PublicKey } from "@solana/web3.js";
 
+// both are constants of the build: false and "" in the vault's own, so the line that reads them is the line it
+// always was. a Heir build made with HEIR_RPC set talks to that endpoint instead, for tests on a local validator.
+declare const __HEIR__: boolean;
+declare const __HEIR_RPC__: string;
+
 export const CLUSTER = "devnet" as const;
 // on the hosted site json-rpc goes through the same origin (/rpc), which the server forwards to a
 // provider; elsewhere (local dev, the single-file build) the public devnet endpoint is used
-export const RPC_URL = typeof location !== "undefined" && location.hostname === "vault.lamportrobotics.com" ? `${location.origin}/rpc` : "https://api.devnet.solana.com";
+export const RPC_URL = __HEIR__ && __HEIR_RPC__ ? __HEIR_RPC__ : typeof location !== "undefined" && location.hostname === "vault.lamportrobotics.com" ? `${location.origin}/rpc` : "https://api.devnet.solana.com";
 export const GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; // devnet; mainnet 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
 /** ~400 ms per slot: a rough wall-clock for a slot number relative to `now` */
 export const slotToDate = (slot: bigint | number, nowSlot: number) => new Date(Date.now() + (Number(slot) - nowSlot) * 400);
@@ -51,7 +56,11 @@ export interface SignRequest {
     | { kind: "TransferToken"; mint: string; to: string; toOwner?: string; amount: string; tokenProgram: string; symbol?: string; decimals?: number; source?: string }
     // the signer derives the target itself: the next key of the same words. a target given here must match it.
     | { kind: "Rotate"; newLmsPubkey?: string }
-    | { kind: "Close"; to: string };
+    | { kind: "Close"; to: string }
+    // a Heir build only (src/heir-plan.ts): the plan a Heir-enabled vault releases under. durations are decimal seconds; the
+    // default address stands for "no check-in key" and "no contact", and with zero durations for "no plan". `terms` says what
+    // the claim address is made of, for a signer that can derive the address again from it.
+    | { kind: "SetSuccession"; claim: string; windowSecs: string; waitSecs: string; checkinKey: string; contactKey: string; terms?: unknown };
 }
 export interface SignedBlob {
   v: 1;

@@ -11,8 +11,12 @@ import { encodeAction, vaultMessage, type Action } from "@lamport-robotics/vault
 import { $, b64, el, isPubkey, short, unb64, copy, type SignRequest, type SignedBlob } from "./common.ts";
 import * as qr from "./qr.ts";
 import { openJournal, keyFingerprint, storagePersistent } from "./journal.ts";
+import { planAction, planProblem, showPlan } from "./heir-plan.ts";
 
 declare const __SIGNER_BUILD__: string | undefined;
+// true only in the Heir build of this file (vite.heir.signer.config.ts). here it is the constant false,
+// and every line it guards is left out of the bundle: this signer does not know a sixth action.
+declare const __HEIR__: boolean;
 
 const app = $("#app");
 app.className = "shell";
@@ -41,9 +45,14 @@ app.append(
   el("footer", {}, el("span", {}, "nothing on this page talks to the network"), el("span", { class: "mono" }, `build ${typeof __SIGNER_BUILD__ === "string" ? __SIGNER_BUILD__ : "dev"}`), el("span", {}, "lamportrobotics.com")),
 );
 
+if (__HEIR__) { $(".brand small").textContent = "cold signer · Heir"; document.title = "Lamport Heir · cold signer"; }
+
 const net = $("#net");
 const paintNet = () => { const on = navigator.onLine; net.textContent = on ? "online · go offline before typing words" : "offline"; net.className = `offline-pill ${on ? "on" : "off"}`; };
 paintNet(); addEventListener("online", paintNet); addEventListener("offline", paintNet);
+
+/** what is left of a request's action once the kinds handled by name are gone (a type only; `__HEIR__` hides one from the compiler) */
+type Closing = Extract<SignRequest["action"], { kind: "Close" }>;
 
 /** a request that passed every shape check, with what the signer worked out from it */
 interface Checked { req: SignRequest; pub: Uint8Array; total: number; used: Uint8Array | null; spentOnChain: number }
@@ -97,6 +106,8 @@ function checkRequest(x: unknown): Checked {
     if (a.newLmsPubkey !== undefined) must(() => parseLmsPublicKey(unb64(a.newLmsPubkey!)), "rotation target is not an LMS public key");
   } else if (a.kind === "Close") {
     if (!isPk(a.to)) bad("heir is not a valid address");
+  } else if (__HEIR__ && a.kind === "SetSuccession") {
+    const why = planProblem(a, r.vault); if (why) bad(why);
   } else bad("unknown action kind");
   let spentOnChain = r.nextQ;   // without a bitmap, the leaves below nextQ are the least that are gone
   if (used) { spentOnChain = 0; for (let b of used) while (b) { spentOnChain += b & 1; b >>= 1; } }
@@ -123,7 +134,7 @@ $("#req").addEventListener("input", () => {
       el("dt", {}, "token account"), el("dd", {}, `${a.to} (derived here from the owner, matches)`),
       ...(a.source ? [el("dt", {}, "from token account"), el("dd", {}, `${a.source} (bound by the signature; the transfer can draw from no other account)`)] : []));
     else if (a.kind === "Rotate") rows.push(el("dt", {}, "action"), el("dd", {}, "rotate the vault to the next key from your words"));
-    else rows.push(el("dt", {}, "action"), el("dd", {}, `close the vault, everything to ${a.to}`));
+    else rows.push(el("dt", {}, "action"), el("dd", {}, `close the vault, everything to ${(a as Closing).to}`));
     rows.push(
       el("dt", {}, "leaf q"), el("dd", {}, String(r.nextQ)),
       el("dt", {}, "keys spent"), el("dd", {}, c.used ? `${c.spentOnChain} of ${c.total}, from the bitmap` : `at least ${c.spentOnChain} of ${c.total}; the request carries no bitmap`),
@@ -132,6 +143,13 @@ $("#req").addEventListener("input", () => {
       el("dt", {}, "cluster"), el("dd", {}, r.cluster));
     v.append(el("dl", { class: "spec", style: "margin-top:4px" }, ...rows));
   } catch (e) { v.append(el("div", { class: "err" }, String((e as Error).message))); }
+  // a Heir build: the lines above know five actions and took this one for the last of them. put the plan in that
+  // row's place, or show nothing and sign nothing. (it is done here, after the block, because a bundler keeps
+  // everything inside a try block: a guarded line in there would pull the plan's code into the vault's signer.)
+  if (__HEIR__ && checked && checked.req.action.kind === "SetSuccession") {
+    try { showPlan(v, checked.req.action, checked.req.vault); }
+    catch (e) { req = null; checked = null; v.innerHTML = ""; v.append(el("div", { class: "err" }, String((e as Error).message))); }
+  }
 });
 
 /** a warning that needs a deliberate yes before anything is reserved or signed */
@@ -252,7 +270,8 @@ function toAction(r: SignRequest): Action {
     return { kind: "TransferToken", mint, to, amount, issuedSlot, expirySlot };
   }
   if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("rotation target not derived"); const k = unb64(a.newLmsPubkey); parseLmsPublicKey(k); return { kind: "Rotate", newLmsPubkey: k, issuedSlot, expirySlot }; }
-  return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
+  if (__HEIR__ && a.kind === "SetSuccession") return planAction(a, issuedSlot, expirySlot);
+  return { kind: "Close", to: new PublicKey((a as Closing).to), issuedSlot, expirySlot };
 }
 
 // keep the key-derivation code path warm so the first sign is not a cold import

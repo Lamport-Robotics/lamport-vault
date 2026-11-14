@@ -305,6 +305,54 @@ The cold signer (`web/signer.html`, the one file that sees the 24 words) does no
 from this code it is the file `main` builds, byte for byte, apart from the commit it prints. Two
 things keep it so. Succession's extra Borsh field types are functions in `borshExtra.ts`, not
 methods of the reader and writer classes that the signer bundles whole; and the Heir program ids
-live in `succession.ts`, not in `programIds.ts`. The vault page and the cold signer cannot show or
-sign a `SetSuccession` yet. They learn it together with the Heir app, in a change that is reviewed
-as a change to the signer.
+live in `succession.ts`, not in `programIds.ts`.
+
+## 9. In the page and the cold signer
+
+A Heir-enabled vault is another program, and a vault's keys are derived for one program: the same
+24 words give other keys and another address there. So the vault page and its cold signer cannot
+operate such a vault, and they are not taught to. Instead the same source has a **second build**,
+the way the program does:
+
+| | the vault's own build | the Heir build |
+|---|---|---|
+| made by | `npm run build` | `npm run build:heir` |
+| output | `web/dist/`, `web/dist/signer.html` | `web/dist-heir/`, `web/dist-heir/signer.html` |
+| served at | `/` | `/heir/` on the same origin |
+| program | the vault | the Heir-enabled vault (`HEIR_CLOCK=short`: the test build) |
+| actions | five | six: it shows and signs a `SetSuccession` |
+
+**The vault's own build does not change.** `web/dist/` built from this code is the same set of
+files, byte for byte, as before the Heir build existed. Everything the Heir build adds sits behind
+one build constant, `__HEIR__`, which is the literal `false` in the vault's build, so the bundler
+drops each guarded line and, with them, the modules only those lines reach. The `web` job in CI
+fails if the Heir build's own text turns up anywhere in `web/dist/`, or if the cold signer, which
+is the file that sees the 24 words, contains a `SetSuccession` or the Heir program id. (The page
+has carried the SDK's encoder for the sixth action since the SDK learned it; the signer never
+has.) (One trap, for whoever edits `signer.ts`: a bundler keeps everything inside a `try`
+block, dead or not. A guarded line belongs outside one.)
+
+What the Heir build is made of:
+
+- `web/src/heir-sdk.ts` stands in for the SDK in a Heir build (a bundler alias). Three names mean
+  something else there: the program id is the Heir-enabled program's; `vaultMessage` binds that id;
+  `encodeAction` is `encodeHeirAction`. A test checks that nothing else differs.
+- `web/src/heir-plan.ts` checks a `SetSuccession` request, says it in words and turns it into the
+  bytes that are signed. The page and the signer share it, so the owner reads the same lines on
+  the offline machine as on the online one: where the vault releases to, after how long, the
+  soonest that could be, and what the check-in key and the contact may do. A request the program
+  would refuse is refused before it costs a one-time key.
+- `web/src/heir-page.ts` is the page's Inheritance tab: where the plan stands by the cluster's
+  clock, and the form. Before a request is prepared it asks the chain about the claim address and
+  refuses what `VaultSigner` refuses. Signing and submitting are the page's existing flow.
+- `web/src/heir-ext.ts` is a seam. To the vault program a claim address is 32 bytes, and this
+  repository's Heir build says so on the signer's screen: "this signer only sees an address".
+  [Lamport Heir](https://github.com/Lamport-Robotics/lamport-heir) builds the page and signer it
+  ships from this source with its own module in that file's place, which knows the claim program
+  and can derive a plan's address again from the heirs it names, offline.
+
+`web/test/heir.test.ts` runs the request code against `kat/succession_encoding.json`: a request
+becomes exactly the action bytes and the signed message the program's own tests expect. The first
+run in a browser found what that test now pins down: `vaultMessage` defaults to the vault's
+program id, so a Heir build that did not override it signed for the wrong program. The chain
+refused the signature, as it should.

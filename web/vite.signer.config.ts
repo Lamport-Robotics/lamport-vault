@@ -9,6 +9,7 @@ export default defineConfig({
   plugins: [viteSingleFile()],
   build: { outDir: "dist-signer", target: "es2022", rollupOptions: { input: "signer.html" } },
   // the footer shows which commit the file was built from; CI prints the file's sha256 for that commit
-  define: { "process.env.NODE_DEBUG": "false", __SIGNER_BUILD__: JSON.stringify(commit) },
+  // __HEIR__ is true only in the Heir build (vite.heir.signer.config.ts); false here, and what it guards is left out
+  define: { "process.env.NODE_DEBUG": "false", __HEIR__: "false", __HEIR_RPC__: '""', __SIGNER_BUILD__: JSON.stringify(commit) },
   resolve: { alias: { buffer: "buffer/" } },
 });

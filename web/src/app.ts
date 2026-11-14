@@ -14,6 +14,14 @@ import { holdings, destinationTokenAccount, toBase, type Holding } from "./token
 import { tape } from "./tape.ts";
 import { openJournal, openIssued, issuedKey, keyFingerprint } from "./journal.ts";
 import { equalBytes } from "@lamport-robotics/lms";
+import { describePlan, planAction } from "./heir-plan.ts";
+import { inheritancePanel, planForm } from "./heir-page.ts";
+
+// true only in the Heir build of this page (vite.heir.config.ts). here it is the constant false, and
+// every line it guards is left out of the bundle.
+declare const __HEIR__: boolean;
+/** what is left of an action once the kinds handled by name are gone (a type only; `__HEIR__` hides one from the compiler) */
+type Closing = Extract<SignRequest["action"], { kind: "Close" }>;
 
 // ── state ──
 let wallet: Wallet | null = null;
@@ -29,7 +37,7 @@ let hotKey: LmsPrivateKey | null = null;   // only while the owner chose hot mod
 let hotMaster: Uint8Array | null = null;   // with it: the seed the next key (a Rotate target) is derived from
 const SCOPE = { genesisHash: GENESIS_HASH, programId: LAMPORT_VAULT_PROGRAM_ID };
 let lastRun: { vault: string; q: number; kind: string; sigs: string[] } | null = null;
-type Tab = "deposit" | "withdraw" | "rotate" | "registry";
+type Tab = "deposit" | "withdraw" | "rotate" | "registry" | "inheritance";
 let tab: Tab = "deposit";
 type Mode = "cold" | "hot";
 let mode: Mode = "cold";
@@ -43,9 +51,12 @@ const top = el("div", { class: "top app" },
 const main = el("div", { id: "main" });
 app.append(top, main, el("footer", {},
   el("a", { href: "https://github.com/Lamport-Robotics/lamport-vault" }, "Source"),
-  el("a", { href: "/signer.html", download: "lamport-vault-signer.html" }, "Cold signer"),
+  el("a", { href: __HEIR__ ? "/heir/signer.html" : "/signer.html", download: __HEIR__ ? "lamport-heir-signer.html" : "lamport-vault-signer.html" }, "Cold signer"),
   el("a", { href: "https://lamportrobotics.com" }, "Lamport Robotics"),
   el("span", { class: "ids" }, `vault ${short(LAMPORT_VAULT_PROGRAM_ID.toBase58(), 6)} · registry ${short(PQ_REGISTRY_PROGRAM_ID.toBase58(), 6)}`)));
+
+// (the fifth tab needs the row's padding trimmed to fit; said here and not in a stylesheet, so the vault's stay as they are)
+if (__HEIR__) { $(".brand small", top).textContent = `heir · ${CLUSTER}`; document.title = "Lamport Heir"; document.head.append(el("style", {}, "@media (min-width: 561px) { .seg.five button { padding: 0 13px; } }")); }
 
 // ── wallet ──
 function paintWallet() {
@@ -255,9 +266,11 @@ function vaultView() {
   const seg = el("div", { class: "seg" }, ...(["deposit", "withdraw", "rotate", "registry"] as Tab[]).map((t) => el("button", { "data-t": t }, t[0].toUpperCase() + t.slice(1))));
   const body = el("div", {});
   panel.append(seg, body);
+  if (__HEIR__) { seg.append(el("button", { "data-t": "inheritance" }, "Inheritance")); seg.classList.add("five"); }
   const paint = () => {
     seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.t === tab));
     body.innerHTML = "";
+    if (__HEIR__ && tab === "inheritance") return void body.append(inheritanceTab());
     body.append(tab === "deposit" ? depositPanel() : tab === "withdraw" ? withdrawPanel() : tab === "rotate" ? rotatePanel() : registryPanel());
   };
   seg.addEventListener("click", (e) => { const b = (e.target as HTMLElement).closest("button"); if (b) { tab = b.dataset.t as Tab; paint(); } });
@@ -314,9 +327,21 @@ function rotatePanel() {
   return s;
 }
 
-type Scope = "transfer" | "rotate";
+type Scope = "transfer" | "rotate" | "plan";
+
+/** a Heir build only: the vault as the page last read it, for the Inheritance tab */
+function heirCtx() { return { vault: vault!, address: vaultAddr!, lamports: vaultLamports, tokens: vaultTokens, wallet, reload: load }; }
+
+/** a Heir build only: where the plan stands, then the same signing flow every other action goes through */
+function inheritanceTab() {
+  const s = el("div", {}, inheritancePanel(heirCtx()));
+  const rl = resultLine(); if (rl) s.append(rl);
+  modeSwitch("plan", s);
+  return s;
+}
 
 function actionForm(scope: Scope): { node: HTMLElement; read: () => SignRequest["action"] } {
+  if (__HEIR__ && scope === "plan") return planForm(heirCtx());
   const kinds = scope === "rotate"
     ? [el("option", { value: "Rotate" }, "Rotate to a new key"), el("option", { value: "Close" }, "Close the vault")]
     : [el("option", { value: "TransferSol" }, "Send SOL"), ...(vaultTokens.length ? [el("option", { value: "TransferToken" }, "Send a token")] : [])];
@@ -371,7 +396,8 @@ function describe(a: SignRequest["action"]): string {
   if (a.kind === "TransferSol") return `Send ${(Number(a.lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 9 })} SOL to ${a.to}`;
   if (a.kind === "TransferToken") return `Send ${a.decimals != null ? (Number(a.amount) / 10 ** a.decimals).toLocaleString("en-US", { maximumFractionDigits: a.decimals }) : a.amount} of ${short(a.mint, 6)} to token account ${a.to}`;
   if (a.kind === "Rotate") return a.newLmsPubkey ? `Rotate the vault to the next key from your words ${short(a.newLmsPubkey, 10)}` : "Rotate the vault to the next key from your words";
-  return `Close the vault and send everything to ${a.to}`;
+  if (__HEIR__ && a.kind === "SetSuccession") return describePlan(a);
+  return `Close the vault and send everything to ${(a as Closing).to}`;
 }
 
 function toAction(a: SignRequest["action"], issuedSlot: bigint, expirySlot: bigint): Action {
@@ -383,7 +409,8 @@ function toAction(a: SignRequest["action"], issuedSlot: bigint, expirySlot: bigi
     return { kind: "TransferToken", mint, to, amount, issuedSlot, expirySlot };
   }
   if (a.kind === "Rotate") { if (!a.newLmsPubkey) throw new Error("The rotation target is missing; the signer derives it from the words."); return { kind: "Rotate", newLmsPubkey: unb64(a.newLmsPubkey), issuedSlot, expirySlot }; }
-  return { kind: "Close", to: new PublicKey(a.to), issuedSlot, expirySlot };
+  if (__HEIR__ && a.kind === "SetSuccession") return planAction(a, issuedSlot, expirySlot);
+  return { kind: "Close", to: new PublicKey((a as Closing).to), issuedSlot, expirySlot };
 }
 
 /** the token account a TransferToken draws from: the one the form picked, else any vault account of that mint that covers the amount */
@@ -402,7 +429,7 @@ function coldFlow(scope: Scope) {
     el("div", { class: "actions" }, el("button", { class: "btn", id: "mkreq" }, "Prepare request")),
     el("div", { id: "reqout", class: "hidden", style: "margin-top:22px" },
       el("label", { class: "field" }, el("span", {}, "Request · for the cold signer"), el("textarea", { class: "mono", id: "reqtxt", rows: "3", readonly: "" })),
-      el("div", { class: "actions" }, el("button", { class: "link", id: "cpreq" }, "Copy"), el("button", { class: "link", id: "qrreq" }, "Show QR"), el("a", { class: "link quiet", href: "/signer.html", download: "lamport-vault-signer.html" }, "Download the signer")),
+      el("div", { class: "actions" }, el("button", { class: "link", id: "cpreq" }, "Copy"), el("button", { class: "link", id: "qrreq" }, "Show QR"), el("a", { class: "link quiet", href: __HEIR__ ? "/heir/signer.html" : "/signer.html", download: __HEIR__ ? "lamport-heir-signer.html" : "lamport-vault-signer.html" }, "Download the signer")),
       el("div", { id: "qrbox", class: "qr", style: "margin-top:14px" }),
       el("p", { class: "quiet", style: "margin-top:14px" }, "Open the signer on a machine with no network. Paste or scan the request, type the words, bring the signature back here."),
       el("p", { class: "quiet mono", id: "reqvalid", style: "font-size:12px" }),

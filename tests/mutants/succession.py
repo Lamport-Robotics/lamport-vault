@@ -20,6 +20,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "programs", "lamport-vault", "src")
 BUILD = "cargo build-sbf --manifest-path programs/lamport-vault/Cargo.toml --features succession"
+# the program the LiteSVM suite's transfer-hook tests load next to the vault; built once, never mutated
+FIXTURE = "cargo build-sbf --manifest-path tests/hook-fixture/Cargo.toml"
 
 # (what the mutant does, file, text to find exactly once, replacement)
 MUTANTS = [
@@ -146,6 +148,10 @@ def baseline():
     build = sh(BUILD, ROOT)
     if build.returncode != 0:
         print("the untouched program does not build:", build.stderr[-400:])
+        return False
+    fixture = sh(FIXTURE, ROOT)
+    if fixture.returncode != 0:
+        print("the transfer-hook fixture does not build:", fixture.stderr[-400:])
         return False
     unit = sh("cargo test -p lamport-vault --features succession 2>&1", ROOT).stdout
     svm = sh("cargo test --features succession 2>&1", os.path.join(ROOT, "tests", "svm")).stdout

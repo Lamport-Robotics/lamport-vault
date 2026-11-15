@@ -35,6 +35,20 @@ jobs:
       # (docs/SUCCESSION.md). The same rules have to hold in it.
       - if: matrix.succession
         run: cargo test --workspace --features lamport-lms/sign,lamport-vault/short-clocks --locked
+      # A mainnet build differs from these in the program id and in nothing else (docs/VERIFY.md).
+      # The id is what keeps a devnet signature from being a mainnet one, so the test that says
+      # which id a build carries is run on the mainnet side too.
+      - name: The mainnet builds carry the mainnet ids
+        run: cargo test -p lamport-vault -p pq-registry --test program_id --features lamport-vault/mainnet,pq-registry/mainnet${{ matrix.succession && ',lamport-vault/succession' || '' }} --locked
+      - name: A mainnet build is never a test build
+        if: matrix.succession
+        run: |
+          refuse() {
+            if cargo check "$@" --locked 2>/dev/null; then echo "built, and must not: $*"; exit 1; fi
+          }
+          refuse -p lamport-vault --features lamport-vault/mainnet,lamport-vault/short-clocks
+          refuse -p lamport-vault --features lamport-vault/mainnet,lamport-vault/small-history
+          refuse -p pq-registry --features pq-registry/mainnet,pq-registry/small-history
 
   sdk:
     runs-on: ubuntu-latest
@@ -113,10 +127,41 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "heir signer.html $hash"
+      # The same two builds for mainnet: the mainnet program ids, the mainnet genesis hash in every
+      # key derivation, and a page that may talk to mainnet only (web/cluster.config.ts).
+      - name: Mainnet builds of the page and the signer
+        working-directory: web
+        run: |
+          npm run build:mainnet
+          npm run build:heir:mainnet
+          grep -qF 7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H dist-mainnet/signer.html
+          grep -qF 3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX dist-heir-mainnet/signer.html
+          grep -qF SetSuccession dist-heir-mainnet/signer.html
+          for page in dist-mainnet/index.html dist-heir-mainnet/index.html; do
+            grep -qF "https://api.mainnet-beta.solana.com" "$page"
+            if grep -qF "api.devnet.solana.com" "$page"; then echo "$page names a devnet endpoint"; exit 1; fi
+          done
+          # and the devnet builds made above are still devnet builds
+          if grep -qF "this is the mainnet signer" dist/signer.html dist-heir/signer.html; then echo "a devnet signer was built as a mainnet one"; exit 1; fi
+          for f in dist-mainnet/signer.html dist-heir-mainnet/signer.html; do
+            hash=$(sha256sum "$f" | cut -d" " -f1)
+            {
+              echo "### cold signer, $f"
+              echo
+              echo '```'
+              echo "commit   $GITHUB_SHA"
+              echo "sha256   $hash"
+              echo "size     $(wc -c < "$f") bytes"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$f $hash"
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-${{ github.sha }}
           path: |
             web/dist
             web/dist-heir
+            web/dist-mainnet
+            web/dist-heir-mainnet
           if-no-files-found: error

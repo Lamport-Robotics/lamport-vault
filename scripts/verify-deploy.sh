@@ -5,10 +5,17 @@
 # program bytes.
 #
 # Usage:
-#   scripts/verify-deploy.sh <program-name> <program-id> [--url <rpc|moniker>] [--no-build]
+#   scripts/verify-deploy.sh <program-name> <program-id> [--url <rpc|moniker>] [--features <list>] [--no-build]
 #
 #   scripts/verify-deploy.sh lamport-vault B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH --url devnet
 #   scripts/verify-deploy.sh pq-registry   48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad --url devnet
+#
+# A deployment's program id is compiled in by cargo features, so a mainnet program is checked
+# against a build with the features it was deployed with (docs/VERIFY.md):
+#
+#   scripts/verify-deploy.sh lamport-vault 7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H --url mainnet-beta --features mainnet
+#   scripts/verify-deploy.sh lamport-vault 3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX --url mainnet-beta --features mainnet,succession
+#   scripts/verify-deploy.sh pq-registry   9MYg9uqYBrTPXA6MNRZ6cbpwHSissY3496Y84iofTaNF --url mainnet-beta --features mainnet
 #
 # On-chain bytes: the ProgramData account is `u32 type || u64 slot ||
 # Option<Pubkey> authority (1 + 32)` = 45 bytes of header, then the ELF, then
@@ -25,7 +32,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
 if [ $# -lt 2 ]; then
-  echo "usage: $0 <program-name> <program-id> [--url <rpc|moniker>] [--no-build]" >&2
+  echo "usage: $0 <program-name> <program-id> [--url <rpc|moniker>] [--features <list>] [--no-build]" >&2
   exit 2
 fi
 
@@ -33,10 +40,12 @@ NAME="$1"
 PROGRAM_ID="$2"
 shift 2
 URL_ARGS=()
+FEATURES=""
 BUILD=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --url) URL_ARGS=(--url "$2"); shift 2 ;;
+    --features) FEATURES="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -57,9 +66,13 @@ done
 
 SO="target/deploy/${LIB}.so"
 if [ "$BUILD" -eq 1 ]; then
-  echo "== building $CRATE"
+  echo "== building $CRATE${FEATURES:+ with --features $FEATURES}"
   # macOS: keep resource forks out of the build.
-  COPYFILE_DISABLE=1 anchor build -p "$CRATE" >/dev/null
+  if [ -n "$FEATURES" ]; then
+    COPYFILE_DISABLE=1 anchor build -p "$CRATE" -- --features "$FEATURES" >/dev/null
+  else
+    COPYFILE_DISABLE=1 anchor build -p "$CRATE" >/dev/null
+  fi
 fi
 if [ ! -f "$SO" ]; then
   echo "missing $SO (build first, or drop --no-build)" >&2

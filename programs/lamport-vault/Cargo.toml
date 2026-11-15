@@ -29,6 +29,11 @@ succession = []
 # period, release) fits in a devnet test. It compiles in a program id of its own, so it can never
 # be deployed as the real program. Never use it for anything that holds value.
 short-clocks = ["succession"]
+# Mainnet build: compiles in the mainnet program id (docs/VERIFY.md). The signed message binds the
+# program id and nothing else about the cluster, so mainnet never shares an id with devnet. With
+# `succession` it is the Heir-enabled vault's mainnet id. Changes nothing but the id, and cannot
+# be combined with a test build (`short-clocks`, `small-history`).
+mainnet = []
 custom-heap = []
 custom-panic = []
 

@@ -32,18 +32,44 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.lib }}
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # One row per program that gets deployed. `cluster` is the tag prefix the row is compared
+        # under; `features` are the cargo features that compile in that deployment's program id.
         include:
-          - crate: lamport-vault
+          - name: lamport_vault
+            crate: lamport-vault
             lib: lamport_vault
+            cluster: devnet
+            features: ""
             program_id: B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH
-          - crate: pq-registry
+          - name: pq_registry
+            crate: pq-registry
             lib: pq_registry
+            cluster: devnet
+            features: ""
             program_id: 48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
+          - name: lamport_vault-mainnet
+            crate: lamport-vault
+            lib: lamport_vault
+            cluster: mainnet
+            features: mainnet
+            program_id: 7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H
+          - name: lamport_vault-mainnet-heir
+            crate: lamport-vault
+            lib: lamport_vault
+            cluster: mainnet
+            features: mainnet,succession
+            program_id: 3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX
+          - name: pq_registry-mainnet
+            crate: pq-registry
+            lib: pq_registry
+            cluster: mainnet
+            features: mainnet
+            program_id: 9MYg9uqYBrTPXA6MNRZ6cbpwHSissY3496Y84iofTaNF
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -69,8 +95,15 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: cargo install --locked solana-verify --version "$SOLANA_VERIFY_VERSION"
 
-      - name: Build ${{ matrix.lib }} in ${{ env.BASE_IMAGE }}
-        run: solana-verify build --library-name ${{ matrix.lib }} --base-image "$BASE_IMAGE"
+      - name: Build ${{ matrix.name }} in ${{ env.BASE_IMAGE }}
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          if [ -n "$FEATURES" ]; then
+            solana-verify build --library-name ${{ matrix.lib }} --base-image "$BASE_IMAGE" -- --features "$FEATURES"
+          else
+            solana-verify build --library-name ${{ matrix.lib }} --base-image "$BASE_IMAGE"
+          fi
 
       - name: Hash
         id: hash
@@ -79,7 +112,9 @@ jobs:
           hash=$(solana-verify get-executable-hash "$so" | tail -n1)
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
           {
-            echo "### ${{ matrix.lib }}"
+            echo "### ${{ matrix.name }}"
+            echo
+            echo "program id \`${{ matrix.program_id }}\` (${{ matrix.cluster }}), features: \`${{ matrix.features || 'default' }}\`"
             echo
             echo '```'
             echo "commit   $GITHUB_SHA"
@@ -88,16 +123,17 @@ jobs:
             echo "image    $BASE_IMAGE (platform-tools $PLATFORM_TOOLS)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ matrix.lib }} $hash"
+          echo "${{ matrix.name }} $hash"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.lib }}-${{ github.sha }}
+          name: ${{ matrix.name }}-${{ github.sha }}
           path: target/deploy/${{ matrix.lib }}.so
           if-no-files-found: error
 
       - name: Compare with the deployed program
-        if: startsWith(github.ref, 'refs/tags/')
+        # a row is compared only under its own cluster's tag: a devnet tag says nothing about mainnet
+        if: startsWith(github.ref, 'refs/tags/') && startsWith(github.ref_name, format('{0}-', matrix.cluster))
         run: |
           case "$GITHUB_REF_NAME" in
             devnet-*)  url=https://api.devnet.solana.com ;;

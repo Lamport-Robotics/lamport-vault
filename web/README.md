@@ -19,6 +19,8 @@ Build in CI: the `web` job of `.github/workflows/test.yml` runs `npm ci` and `np
 ```sh
 npm run build:heir                       # dist-heir/ + dist-heir/signer.html, served under /heir/
 HEIR_CLOCK=short npm run build:heir      # for the short-clocks test program (a day lasts a second)
+npm run build:mainnet                    # dist-mainnet/ + signer: the vault's own page, for the mainnet programs
+npm run build:heir:mainnet               # dist-heir-mainnet/ + signer: the Heir build, for the mainnet programs
 npm test                                 # the Heir build's request code, against kat/succession_encoding.json
 ```
 
@@ -43,3 +45,20 @@ The app and information pages import `src/interface.css` after the base styles.
 nodes, preserving the copy, form IDs, and listeners in `app.ts`. Keep the
 `presentHome(s)` call when editing the home page. The standalone offline signer
 continues using its own existing base stylesheet.
+
+## Mainnet builds
+
+`LAMPORT_CLUSTER=mainnet` (what `build:mainnet` and `build:heir:mainnet` set) makes the same source
+for the mainnet programs: their ids (docs/VERIFY.md), the mainnet genesis hash in every key
+derivation, mainnet's endpoints in the page's CSP, and `/rpc-mainnet` as the same-origin json-rpc
+path on the hosted site. `cluster.config.ts` holds all of it, and the sentences in which a page
+says where the programs run; a mainnet page that still names devnet fails the build.
+
+A signer is built for one side. The mainnet signer refuses a request for any other cluster, and
+the devnet one refuses a mainnet request, before anything is derived: the same 24 words give other
+keys on the other side, so a request from there could only be signed for a vault that does not
+exist.
+
+`npm run build` makes the page it made before these builds existed, byte for byte. Its signer
+differs by that one refusal. A mainnet build is never a test build: `HEIR_CLOCK=short` or
+`HEIR_RPC` with `LAMPORT_CLUSTER=mainnet` stops the build.

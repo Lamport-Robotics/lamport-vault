@@ -3,7 +3,8 @@
  * program (docs/SUCCESSION.md), so the page and the signer are the same source too, with three
  * names meaning something else:
  *
- *   LAMPORT_VAULT_PROGRAM_ID   the Heir-enabled program's id
+ *   LAMPORT_VAULT_PROGRAM_ID   the Heir-enabled program's id: devnet's, or mainnet's in a mainnet build
+ *   PQ_REGISTRY_PROGRAM_ID     the registry's id on the same cluster
  *   vaultMessage               binds that id when the caller names none (a signature made for the
  *                              vault's own id is refused by the Heir-enabled program, and should be)
  *   encodeAction               the encoder that also knows `SetSuccession`
@@ -13,12 +14,16 @@
  */
 export * from "../node_modules/@lamport-robotics/vault/dist/index.js";
 import type { PublicKey } from "@solana/web3.js";
-import { LAMPORT_VAULT_HEIR_PROGRAM_ID, LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID, encodeHeirAction, vaultMessage as vaultMessageFor } from "../node_modules/@lamport-robotics/vault/dist/index.js";
+import { LAMPORT_VAULT_HEIR_MAINNET_PROGRAM_ID, LAMPORT_VAULT_HEIR_PROGRAM_ID, LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID, PQ_REGISTRY_MAINNET_PROGRAM_ID, PQ_REGISTRY_PROGRAM_ID as PQ_REGISTRY_DEVNET_PROGRAM_ID, encodeHeirAction, vaultMessage as vaultMessageFor } from "../node_modules/@lamport-robotics/vault/dist/index.js";
 
 declare const __HEIR_SHORT_CLOCKS__: boolean;
+// true only in a mainnet build (cluster.config.ts), which is never a `short-clocks` one
+declare const __MAINNET__: boolean;
 
 /** the program this build operates vaults of. a vault's key derivation binds it, so the same words give other keys here */
-export const LAMPORT_VAULT_PROGRAM_ID = __HEIR_SHORT_CLOCKS__ ? LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID : LAMPORT_VAULT_HEIR_PROGRAM_ID;
+export const LAMPORT_VAULT_PROGRAM_ID = __HEIR_SHORT_CLOCKS__ ? LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID : __MAINNET__ ? LAMPORT_VAULT_HEIR_MAINNET_PROGRAM_ID : LAMPORT_VAULT_HEIR_PROGRAM_ID;
+/** the registry is one program per cluster, shared by both vault programs */
+export const PQ_REGISTRY_PROGRAM_ID = __MAINNET__ ? PQ_REGISTRY_MAINNET_PROGRAM_ID : PQ_REGISTRY_DEVNET_PROGRAM_ID;
 
 /** the message a vault key signs. it binds the program id: this build's, unless the caller names another */
 export function vaultMessage(vault: PublicKey, generation: number, actionBytes: Uint8Array, programId: PublicKey = LAMPORT_VAULT_PROGRAM_ID): Uint8Array {

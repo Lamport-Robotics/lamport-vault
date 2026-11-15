@@ -4,12 +4,17 @@ import { PublicKey } from "@solana/web3.js";
 // always was. a Heir build made with HEIR_RPC set talks to that endpoint instead, for tests on a local validator.
 declare const __HEIR__: boolean;
 declare const __HEIR_RPC__: string;
+// true only in a mainnet build (cluster.config.ts, LAMPORT_CLUSTER=mainnet): false in every other, and the
+// devnet value of each line below is then the only one left in the bundle
+declare const __MAINNET__: boolean;
 
-export const CLUSTER = "devnet" as const;
-// on the hosted site json-rpc goes through the same origin (/rpc), which the server forwards to a
-// provider; elsewhere (local dev, the single-file build) the public devnet endpoint is used
-export const RPC_URL = __HEIR__ && __HEIR_RPC__ ? __HEIR_RPC__ : typeof location !== "undefined" && location.hostname === "vault.lamportrobotics.com" ? `${location.origin}/rpc` : "https://api.devnet.solana.com";
-export const GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; // devnet; mainnet 5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
+export const CLUSTER = __MAINNET__ ? ("mainnet-beta" as const) : ("devnet" as const);
+// on the hosted site json-rpc goes through the same origin (/rpc, or /rpc-mainnet in a mainnet build),
+// which the server forwards to a provider; elsewhere (local dev, the single-file build) the cluster's
+// public endpoint is used
+export const RPC_URL = __HEIR__ && __HEIR_RPC__ ? __HEIR_RPC__ : typeof location !== "undefined" && location.hostname === "vault.lamportrobotics.com" ? `${location.origin}${__MAINNET__ ? "/rpc-mainnet" : "/rpc"}` : __MAINNET__ ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com";
+// every key a vault uses is derived under its cluster's genesis hash: the same words give other keys on the other cluster
+export const GENESIS_HASH = __MAINNET__ ? "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" : "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 /** ~400 ms per slot: a rough wall-clock for a slot number relative to `now` */
 export const slotToDate = (slot: bigint | number, nowSlot: number) => new Date(Date.now() + (Number(slot) - nowSlot) * 400);
 export const EXPLORER = (sig: string) => `https://explorer.solana.com/tx/${sig}?cluster=${CLUSTER}`;

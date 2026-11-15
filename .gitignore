@@ -13,4 +13,8 @@ test-ledger/
 dist-signer/
 dist-heir/
 dist-heir-signer/
+dist-mainnet/
+dist-signer-mainnet/
+dist-heir-mainnet/
+dist-heir-signer-mainnet/
 web/preview-shots/

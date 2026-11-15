@@ -16,6 +16,8 @@ features="${1:-succession}"
 command="${2:-test}"
 lib=programs/lamport-vault/src/lib.rs
 case ",$features," in
+  # a mainnet build carries the id of a program that holds value: the local suite is never pointed at it
+  *,mainnet,*) echo "the local suite is not run against a mainnet build (got: $features)" >&2; exit 2 ;;
   *,short-clocks,*) id=$(sed -n 's/.*#\[cfg(feature = "short-clocks")\] declare_id!("\([^"]*\)").*/\1/p' "$lib") ;;
   *,succession,*)   id=$(sed -n 's/.*not(feature = "short-clocks")))\] declare_id!("\([^"]*\)").*/\1/p' "$lib") ;;
   *) echo "the feature list must include succession (got: $features)" >&2; exit 2 ;;

@@ -21,6 +21,9 @@ anchor-debug = []
 # Test build: MAX_KEY_HISTORY = 2 so the HistoryFull path is reachable in a test
 # (`anchor test -- --features small-history`). Never deploy with it.
 small-history = []
+# Mainnet build: compiles in the mainnet program id (docs/VERIFY.md). Changes nothing but the id,
+# and cannot be combined with `small-history`.
+mainnet = []
 # Not a registry feature. `anchor build -- --features succession` hands the flag to every program in
 # the workspace, as it does with small-history, so the registry has to know the name. It gates
 # nothing here: the feature belongs to lamport-vault (docs/SUCCESSION.md).

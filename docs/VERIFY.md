@@ -54,18 +54,35 @@ there will be none: see below.
 
 ## Mainnet
 
-Not deployed. The plan, in order:
+Not deployed. The mainnet programs are this same source built with the `mainnet` cargo feature,
+which compiles in program ids of their own and changes nothing else:
 
-1. Tag the release commit; let `verify.yml` build it and keep the artifact.
-2. `solana program deploy` each `.so` from that artifact with the deployer key as upgrade authority,
-   under **new program ids** (fresh keypairs; the ids are compiled in, so this is a commit of its own).
-   The signed message binds the program id and nothing else about the cluster: with the devnet ids a
-   devnet signature by a raw or hardware key would replay on mainnet.
-3. `scripts/verify-deploy.sh <program> <id> --url mainnet-beta` from the tagged commit: `MATCH`.
-4. `scripts/burn-upgrade-authority.sh <id> --url mainnet-beta --yes` for both programs, right away.
+| program | features | mainnet id |
+|---|---|---|
+| lamport-vault | `mainnet` | `7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H` |
+| lamport-vault, Heir-enabled (docs/SUCCESSION.md) | `mainnet,succession` | `3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX` |
+| pq-registry | `mainnet` | `9MYg9uqYBrTPXA6MNRZ6cbpwHSissY3496Y84iofTaNF` |
+
+The signed message binds the program id and nothing else about the cluster: with the devnet ids a
+devnet signature by a raw or hardware key would replay on mainnet. So mainnet has ids of its own,
+each with a deployment keypair kept by the project owner. `mainnet` cannot be combined with a test
+build (`short-clocks`, `small-history`): the source refuses to compile. The test that says which
+id a build carries (`programs/*/tests/program_id.rs`) runs on both sides in CI, and `verify.yml`
+builds one row per deployment.
+
+The plan, in order:
+
+1. Merge the release commit to main. `verify.yml` builds every row there and keeps the artifacts
+   (`lamport_vault-mainnet-<sha>`, `lamport_vault-mainnet-heir-<sha>`, `pq_registry-mainnet-<sha>`).
+2. `solana program deploy` each `.so` from those artifacts with the deployer key as upgrade
+   authority, under its mainnet id.
+3. `scripts/verify-deploy.sh <program> <id> --url mainnet-beta --features <features>` from that
+   commit: `MATCH`.
+4. `scripts/burn-upgrade-authority.sh <id> --url mainnet-beta --yes` for every program, right away.
    After this nobody can change the code; a bug means a new program id and vaults moving over by
    `Close` and recreate.
-5. Push `mainnet-<version>`; CI compares with the cluster.
+5. Push `mainnet-<version>`; CI compares the mainnet rows with the cluster (a devnet tag compares
+   the devnet rows, and says nothing about mainnet).
 6. Write the slot, hash and commit into the record below.
 
 ## Record

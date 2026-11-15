@@ -26,7 +26,7 @@
 use anchor_lang::prelude::*;
 use lamport_lms::{parse_lms_signature, verify_parsed, LmsPublicKey, LMS_PUBLIC_KEY_LEN};
 
-declare_id!("48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad");
+#[cfg(not(feature = "mainnet"))] declare_id!("48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad"); #[cfg(feature = "mainnet")] declare_id!("9MYg9uqYBrTPXA6MNRZ6cbpwHSissY3496Y84iofTaNF");
 
 /// Seed prefix of the `Commitment` PDA: `["pq", owner]`.
 pub const PQ_SEED: &[u8] = b"pq";
@@ -497,3 +497,6 @@ mod tests {
         assert_eq!(Commitment::space(32), 127 + 16 * 32);
     }
 }
+
+#[cfg(all(feature = "mainnet", feature = "small-history"))]
+compile_error!("`mainnet` compiles in the id of a program that holds value: it cannot be combined with the `small-history` test build");

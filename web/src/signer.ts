@@ -18,6 +18,8 @@ declare const __SIGNER_BUILD__: string | undefined;
 // true only in the Heir build of this file (vite.heir.signer.config.ts). here it is the constant false,
 // and every line it guards is left out of the bundle: this signer does not know a sixth action.
 declare const __HEIR__: boolean;
+// true only in a mainnet build of this file (cluster.config.ts): its program id is then the mainnet one
+declare const __MAINNET__: boolean;
 
 const app = $("#app");
 app.className = "shell";
@@ -72,6 +74,9 @@ function checkRequest(x: unknown): Checked {
   const r = x as SignRequest;
   if (r.v !== 1) bad("unknown request version");
   if (typeof r.cluster !== "string" || !r.cluster) bad("cluster missing");
+  // a signer is built for one side: its program id is mainnet's or it is not. a request from the other side
+  // would be signed for a vault that does not exist there
+  if (__MAINNET__ ? r.cluster !== "mainnet-beta" : r.cluster === "mainnet-beta") bad(__MAINNET__ ? `this is the mainnet signer, and the request is for ${r.cluster}: use the signer from that page` : "this is not the mainnet signer, and the request is for mainnet-beta: use the signer from the mainnet page");
   if (!isPk(r.vault)) bad("vault is not a valid address");
   const pub = must(() => unb64(r.lmsPubkey), "lmsPubkey is not base64");
   const h = must(() => lmsParams(parseLmsPublicKey(pub).lmsType).h, "lmsPubkey is not an LMS public key this signer knows");

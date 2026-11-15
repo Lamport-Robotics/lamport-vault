@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-Object.assign(globalThis, { __HEIR__: true, __HEIR_RPC__: "", __HEIR_SHORT_CLOCKS__: false });
+Object.assign(globalThis, { __HEIR__: true, __HEIR_RPC__: "", __HEIR_SHORT_CLOCKS__: false, __MAINNET__: false });
 
 const { PublicKey } = await import("@solana/web3.js");
 const real = await import("@lamport-robotics/vault");

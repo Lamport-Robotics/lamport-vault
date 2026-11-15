@@ -3,6 +3,9 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction, type Transaction
 import { getWallets } from "@wallet-standard/app";
 import type { Wallet as StdWallet, WalletAccount } from "@wallet-standard/base";
 import { CLUSTER } from "./common.ts";
+
+// true only in a mainnet build (cluster.config.ts). Wallet Standard calls that cluster "mainnet", not "mainnet-beta"
+declare const __MAINNET__: boolean;
 import { rpc } from "./rpc.ts";
 import { registerMwa, createDefaultAuthorizationCache, createDefaultChainSelector, createDefaultWalletNotFoundHandler } from "@solana-mobile/wallet-standard-mobile";
 
@@ -11,7 +14,7 @@ import { registerMwa, createDefaultAuthorizationCache, createDefaultChainSelecto
 try {
   registerMwa({
     appIdentity: { name: "Lamport Vault", uri: location.origin, icon: "apple-touch-icon.png" },
-    chains: [`solana:${CLUSTER}`],
+    chains: [__MAINNET__ ? "solana:mainnet" : `solana:${CLUSTER}`],
     authorizationCache: createDefaultAuthorizationCache(),
     chainSelector: createDefaultChainSelector(),
     onWalletNotFound: createDefaultWalletNotFoundHandler(),
@@ -28,7 +31,7 @@ export interface Wallet {
   disconnect(): Promise<void>;
 }
 
-const CHAIN = `solana:${CLUSTER}` as const;
+const CHAIN = __MAINNET__ ? ("solana:mainnet" as const) : (`solana:${CLUSTER}` as const);
 
 export function listWallets(): StdWallet[] {
   return getWallets().get().filter((w) => (w.chains as readonly string[]).includes(CHAIN) && ("solana:signAndSendTransaction" in w.features || "solana:signTransaction" in w.features));

@@ -28,13 +28,13 @@ describe("mainnet program ids", () => {
 
   it("are the ids the programs compile in with the `mainnet` feature", () => {
     expect(LAMPORT_VAULT_MAINNET_PROGRAM_ID.toBase58()).toBe(declared(vault, 'all(feature = "mainnet", not(feature = "succession"))'));
-    expect(LAMPORT_VAULT_HEIR_MAINNET_PROGRAM_ID.toBase58()).toBe(declared(vault, 'all(feature = "mainnet", feature = "succession", not(feature = "short-clocks"))'));
+    expect(LAMPORT_VAULT_HEIR_MAINNET_PROGRAM_ID.toBase58()).toBe(declared(vault, 'all(not(feature = "short-clocks"), feature = "mainnet", feature = "succession")'));
     expect(PQ_REGISTRY_MAINNET_PROGRAM_ID.toBase58()).toBe(declared(registry, 'feature = "mainnet"'));
   });
 
   it("leave the devnet ids where they were", () => {
     expect(LAMPORT_VAULT_PROGRAM_ID.toBase58()).toBe(declared(vault, 'not(any(feature = "succession", feature = "mainnet"))'));
-    expect(LAMPORT_VAULT_HEIR_PROGRAM_ID.toBase58()).toBe(declared(vault, 'all(feature = "succession", not(feature = "short-clocks"), not(feature = "mainnet"))'));
+    expect(LAMPORT_VAULT_HEIR_PROGRAM_ID.toBase58()).toBe(declared(vault, 'all(feature = "succession", not(feature = "mainnet"), not(feature = "short-clocks"))'));
     expect(LAMPORT_VAULT_HEIR_SHORT_CLOCKS_PROGRAM_ID.toBase58()).toBe(declared(vault, 'feature = "short-clocks"'));
     expect(PQ_REGISTRY_PROGRAM_ID.toBase58()).toBe(declared(registry, 'not(feature = "mainnet")'));
   });

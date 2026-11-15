@@ -24,7 +24,7 @@ pub use action::Action;
 pub use error::VaultError;
 pub use state::{SigBuffer, Tombstone, Vault, KEY_HASH_LEN, MAX_ACTION_LEN};
 
-#[cfg(not(any(feature = "succession", feature = "mainnet")))] declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH"); #[cfg(all(feature = "succession", not(feature = "short-clocks"), not(feature = "mainnet")))] declare_id!("3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV"); #[cfg(feature = "short-clocks")] declare_id!("3pwH161r4SZRH6nCHY4RUm7gk2NZqypyFJaUgv9a2duG"); #[cfg(all(feature = "mainnet", not(feature = "succession")))] declare_id!("7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H"); #[cfg(all(feature = "mainnet", feature = "succession", not(feature = "short-clocks")))] declare_id!("3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX");
+#[cfg(not(any(feature = "succession", feature = "mainnet")))] declare_id!("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH"); #[cfg(all(feature = "succession", not(feature = "mainnet"), not(feature = "short-clocks")))] declare_id!("3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV"); #[cfg(feature = "short-clocks")] declare_id!("3pwH161r4SZRH6nCHY4RUm7gk2NZqypyFJaUgv9a2duG"); #[cfg(all(feature = "mainnet", not(feature = "succession")))] declare_id!("7EiE5pRP5byrY7mzvUBfXS2UD8GwGtPhbGne6D1BTR5H"); #[cfg(all(not(feature = "short-clocks"), feature = "mainnet", feature = "succession"))] declare_id!("3XsnTrQJ5XmFyEyVauMmMseHph4wXkn6QWUZCRPjuEEX");
 
 /// Seed prefix of the `Vault` PDA: `["vault", vault_id]`.
 pub const VAULT_SEED: &[u8] = b"vault";

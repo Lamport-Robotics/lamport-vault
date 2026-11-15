@@ -44,7 +44,7 @@ test("the vault's own mainnet build operates the mainnet programs", () => {
 });
 
 test("the Heir mainnet build operates the mainnet Heir vault and the mainnet registry", () => {
-  assert.equal(heir.LAMPORT_VAULT_PROGRAM_ID.toBase58(), declared(rust("lamport-vault"), 'all(feature = "mainnet", feature = "succession", not(feature = "short-clocks"))'));
+  assert.equal(heir.LAMPORT_VAULT_PROGRAM_ID.toBase58(), declared(rust("lamport-vault"), 'all(not(feature = "short-clocks"), feature = "mainnet", feature = "succession")'));
   assert.equal(heir.PQ_REGISTRY_PROGRAM_ID.toBase58(), own.PQ_REGISTRY_PROGRAM_ID.toBase58());
   assert.notEqual(heir.LAMPORT_VAULT_PROGRAM_ID.toBase58(), own.LAMPORT_VAULT_PROGRAM_ID.toBase58());
 });

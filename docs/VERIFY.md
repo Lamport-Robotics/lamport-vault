@@ -91,6 +91,21 @@ The plan, in order:
 
 ## Record
 
+devnet, 2026-11-17, commit `989f8db`: the Heir-enabled vault (`succession`, docs/SUCCESSION.md) deployed
+for the first time, from the `verify.yml` artifact `lamport_vault-heir` of that commit. It is a program
+of its own beside the vault below, which it does not replace or change. No tag: a `devnet-<x>` tag
+compares every devnet row, and the plain vault's row is ahead of what is on chain (see below).
+[lamport-heir's `docs/program-ids.md`](https://github.com/Lamport-Robotics/lamport-heir/blob/main/docs/program-ids.md)
+keeps this program's record.
+
+```
+lamport_vault-heir  3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV
+  hash       848bc48ae379c081a5103a814b0170261d75ea40ebe06104eb6a5187ceb85ec8
+  size       386 504 bytes (allocation 386 504)
+  slot       523426265
+  authority  4ARvLemSynLjt82WaBvcyS93E7PB5ZdSwR2HwQgiRBcg
+```
+
 devnet, tag `devnet-2`, commit `8558973`, vault redeployed from the `verify.yml` artifact of that commit
 (solana-verify 0.5.2 in `solanafoundation/solana-verifiable-build@sha256:0cf72459…`, platform-tools v1.56);
 the registry is unchanged since `devnet-1`. `scripts/verify-deploy.sh … --no-build` on the artifacts prints

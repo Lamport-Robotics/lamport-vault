@@ -58,7 +58,8 @@ the vault should go. If they then sign nothing and check in nowhere for the wind
 days or more), anyone can open a waiting period (30 days or more); any signature or check-in
 cancels it; when it runs out anyone can release the vault to that address, the way a signed `Close`
 would. No key is added to the funds path. Without the feature the vault builds to the same bytes as
-before, and CI compares them on every succession pull request. Not deployed anywhere, not audited.
+before, and CI compares them on every succession pull request. On devnet since 2026-11-17, under an
+id of its own (`docs/VERIFY.md`, "Record"); not on mainnet, not audited.
 `docs/SUCCESSION.md`.
 
 ## devnet

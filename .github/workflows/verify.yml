@@ -52,6 +52,13 @@ jobs:
             cluster: devnet
             features: ""
             program_id: 48J2BtWFjEUbGPYf1yMPBkHxpy4dLo69gK2znQR2q2ad
+          # the Heir-enabled vault (docs/SUCCESSION.md) is a deployment of its own, with its own id
+          - name: lamport_vault-heir
+            crate: lamport-vault
+            lib: lamport_vault
+            cluster: devnet
+            features: succession
+            program_id: 3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV
           - name: lamport_vault-mainnet
             crate: lamport-vault
             lib: lamport_vault

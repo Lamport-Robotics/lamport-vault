@@ -26,6 +26,10 @@ first. `--no-build` reuses `target/deploy/*.so`.
 summary and uploads the `.so` files as artifacts. On a tag named `devnet-<x>` or `mainnet-<x>` it also
 runs `solana-verify get-program-hash` against that cluster and fails on a mismatch.
 
+There is one row per deployment, not per crate. The Heir-enabled vault (docs/SUCCESSION.md) is
+this crate built with the `succession` feature, which compiles in an id of its own: on devnet
+`3mJU9ozZByXsHavMGfzdwDLFs9YuFaMA3jabaLwczxAV`, the row `lamport_vault-heir`.
+
 Deployments that are meant to be tagged are made from the CI artifact, not from a laptop build:
 download the `.so` from the run for the release commit, `solana program deploy` it, push the tag.
 Anyone can redo the check without trusting our CI:

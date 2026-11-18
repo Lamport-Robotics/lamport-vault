@@ -27,7 +27,8 @@ npm test                                 # the Heir build's request code, agains
 The same source, built for vaults of the Heir-enabled program: the page gets an Inheritance tab
 and the signer learns to show and sign a plan. `docs/SUCCESSION.md`, section 9, says how it is put
 together and why `npm run build` still produces exactly the files it did. The Heir build is not
-part of a deploy of this site; Lamport Heir ships its own, built from this source.
+part of a deploy of this site; Lamport Heir ships its own, built from this source. The site's
+pages link to it: `Heir`, in each header and in the home page's footer.
 
 To try it against a local validator that has the test program loaded:
 

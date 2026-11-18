@@ -47,12 +47,15 @@ const app = $("#app");
 app.className = "shell";
 const top = el("div", { class: "top app" },
   el("a", { class: "brand", href: "/" }, el("img", { src: "/mark.svg", alt: "" }), el("b", {}, "Lamport Vault"), el("i", {}), el("small", {}, CLUSTER)),
-  el("nav", { class: "nav" }, el("a", { href: "/how-it-works" }, "How it works"), el("a", { href: "/security" }, "Security"), el("a", { href: "/cold-signer" }, "Cold signer"), el("a", { href: "/faq" }, "FAQ")),
+  el("nav", { class: "nav" }, ...(__HEIR__ ? [] : [el("a", { href: "/heir/" }, "Heir")]), el("a", { href: "/how-it-works" }, "How it works"), el("a", { href: "/security" }, "Security"), el("a", { href: "/cold-signer" }, "Cold signer"), el("a", { href: "/faq" }, "FAQ")),
   el("div", { class: "wallet", id: "walletbox" }));
 const main = el("div", { id: "main" });
 app.append(top, main, el("footer", {},
   el("a", { href: "https://github.com/Lamport-Robotics/lamport-vault" }, "Source"),
   el("a", { href: __HEIR__ ? "/heir/signer.html" : "/signer.html", download: __HEIR__ ? "lamport-heir-signer.html" : "lamport-vault-signer.html" }, "Cold signer"),
+  // Lamport Heir is this page built for the Heir-enabled program, served under /heir/. The header's links are
+  // hidden on a phone, so the way there is here as well. (The Heir build has neither: it is that page.)
+  ...(__HEIR__ ? [] : [el("a", { href: "/heir/" }, "Heir")]),
   el("a", { href: "https://lamportrobotics.com" }, "Lamport Robotics"),
   el("span", { class: "ids" }, `vault ${short(LAMPORT_VAULT_PROGRAM_ID.toBase58(), 6)} · registry ${short(PQ_REGISTRY_PROGRAM_ID.toBase58(), 6)}`)));
 

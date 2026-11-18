@@ -7,6 +7,8 @@
 .top.pages { gap: 24px; }
 .top.pages .nav { margin-left: auto; }
 @media (max-width: 720px) { .top.pages { height: auto; flex-wrap: wrap; padding: 14px 0 0; } .top.pages .nav { margin-left: 0; width: 100%; gap: 18px; padding-bottom: 10px; } }
+/* six links in one row of a 375px phone; narrower than that the row scrolls, as it did with five */
+@media (max-width: 420px) { .top.pages .nav { gap: 14px; font-size: 13px; } }
 
 .hero { padding: 96px 0 72px; max-width: 880px; }
 .hero h1 { font-size: 64px; line-height: 0.98; letter-spacing: -0.03em; max-width: 16ch; margin: 18px 0 26px; }

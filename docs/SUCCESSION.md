@@ -343,6 +343,11 @@ has carried the SDK's encoder for the sixth action since the SDK learned it; the
 has.) (One trap, for whoever edits `signer.ts`: a bundler keeps everything inside a `try`
 block, dead or not. A guarded line belongs outside one.)
 
+One thing in the vault's own pages does know of the Heir build, since 2026-11-17: a link to it.
+`Heir`, to `/heir/`, is in the header of every page and in the home page's footer (a phone hides
+the home page's header links). It is a link and no code, the cold signer is the same file with
+or without it, and the Heir build has neither link: it is the page they lead to.
+
 What the Heir build is made of:
 
 - `web/src/heir-sdk.ts` stands in for the SDK in a Heir build (a bundler alias). Three names mean
